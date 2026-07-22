@@ -1,0 +1,18 @@
+dataset_root: data/processed
+manifest_root: data/manifests
+seed: 5132
+split_ratios:
+  train: 0.80
+  validation: 0.10
+  test: 0.10
+
+# Best research split: put whole cities into validation/test.
+city_splits:
+  # validation: [amsterdam]
+  # test: [barcelona]
+  validation: []
+  test: []
+
+# When a city is not explicitly held out, nearby tiles are grouped into large
+# supercells before splitting, reducing leakage between neighbouring samples.
+spatial_group_tiles: 2

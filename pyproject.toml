@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "urban-city-generation"
+version = "0.1.0"
+description = "Tools for preparing urban map data for machine learning."
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [{name = "Suvigya Goyal"}]
+dependencies = [
+  "numpy>=2.0",
+  "pandas>=2.2",
+  "geopandas>=1.0",
+  "shapely>=2.0",
+  "pyproj>=3.6",
+  "pyogrio>=0.9",
+  "rasterio>=1.4",
+  "Pillow>=11",
+  "PyYAML>=6",
+  "networkx>=3.3",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+osm = ["pyrosm>=0.11.0"]
+dev = ["pytest>=8", "ruff>=0.9"]
+
+[project.scripts]
+urban-dataset = "urban_dataset.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

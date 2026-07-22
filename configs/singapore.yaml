@@ -1,0 +1,65 @@
+project:
+  city_id: singapore
+  source_name: OpenStreetMap contributors via BBBike extract
+  source_license: ODbL-1.0
+  # Set this to sha256:<digest> before recording an experiment.
+  source_snapshot: null
+
+input:
+  pbf_path: data/raw/Singapore.osm.pbf
+  # WGS84 order: [minimum longitude, minimum latitude, maximum longitude, maximum latitude]
+  # This small example covers part of central Singapore. Replace it with your chosen study area.
+  bbox_wgs84: [103.8260, 1.2800, 103.8660, 1.3200]
+  metric_crs: auto
+  # gdal is deterministic and needs no pyrosm build; pyrosm remains available.
+  extraction_backend: gdal
+  pyrosm_engine: out_of_core
+  pyrosm_workers: auto
+  keep_metadata: false
+  complete_relations: true
+
+output:
+  root: data/processed/singapore_v02
+  overwrite: false
+  save_extracted_gpkg: true
+  save_tile_vectors: true
+
+raster:
+  tile_size_m: 1024
+  pixels: 256
+  stride_m: 1024
+  all_touched: true
+  max_height_m: 180
+  include_partial_tiles: false
+
+roads:
+  # Used only when a road has neither a usable OSM width nor lane count.
+  widths_m:
+    major: 8.0
+    secondary: 6.5
+    local: 5.0
+  lane_width_m: 3.25
+  edge_margin_m: 0.8
+  minimum_width_m: 2.5
+  maximum_width_m: 24.0
+  surface_all_touched: false
+
+heights:
+  floor_height_m: 3.1
+  default_height_m: 9.3
+  default_by_building:
+    apartments: 24.8
+    residential: 9.3
+    house: 7.0
+    commercial: 15.5
+    retail: 9.3
+    industrial: 10.0
+    school: 12.4
+    hospital: 18.6
+
+quality:
+  minimum_buildings: 3
+  minimum_road_length_m: 80
+  minimum_nonempty_fraction: 0.002
+  minimum_valid_fraction: 0.95
+  reject_water_fraction_above: 0.98
