@@ -1,0 +1,21 @@
+name: urban-city-training
+channels:
+  - pytorch
+  - conda-forge
+channel_priority: strict
+dependencies:
+  - python=3.12
+  - pytorch>=2.5
+  - numpy>=2
+  - pandas>=2.2
+  - geopandas>=1
+  - shapely>=2
+  - pyproj>=3.6
+  - pyogrio>=0.9
+  - rasterio>=1.4
+  - pillow>=11
+  - pyyaml>=6
+  - networkx>=3.3
+  - tqdm>=4.66
+  - pytest>=8
+  - pip
