@@ -6,8 +6,7 @@ import numpy as np
 from PIL import Image
 
 
-def save_preview(layers: np.ndarray, path: Path, scale: int = 2) -> None:
-    """Create a debugging preview. The NPZ remains the authoritative dataset."""
+def render_preview(layers: np.ndarray) -> Image.Image:
     height, width = layers.shape[1:]
     canvas = np.full((height, width, 3), 245, dtype=np.uint8)
 
@@ -17,7 +16,9 @@ def save_preview(layers: np.ndarray, path: Path, scale: int = 2) -> None:
             return
         source = np.asarray(rgb, dtype=np.float32)
         existing = canvas[active].astype(np.float32)
-        canvas[active] = np.clip(existing * (1.0 - alpha) + source * alpha, 0, 255).astype(np.uint8)
+        canvas[active] = np.clip(existing * (1.0 - alpha) + source * alpha, 0, 255).astype(
+            np.uint8
+        )
 
     paint(layers[4], (236, 209, 150), 0.65)
     paint(layers[5], (214, 151, 177), 0.70)
@@ -33,10 +34,18 @@ def save_preview(layers: np.ndarray, path: Path, scale: int = 2) -> None:
     height_norm = np.clip(layers[9], 0.0, 1.0)
     if building.any():
         shade = (48 + (1.0 - height_norm) * 85).astype(np.uint8)
-        canvas[building] = np.stack([shade[building], shade[building], shade[building]], axis=1)
+        canvas[building] = np.stack(
+            [shade[building], shade[building], shade[building]], axis=1
+        )
 
-    image = Image.fromarray(canvas, mode="RGB")
+    return Image.fromarray(canvas, mode="RGB")
+
+
+def save_preview(layers: np.ndarray, path: Path, scale: int = 2) -> None:
+    image = render_preview(layers)
     if scale != 1:
-        image = image.resize((width * scale, height * scale), Image.Resampling.NEAREST)
+        image = image.resize(
+            (image.width * scale, image.height * scale), Image.Resampling.NEAREST
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     image.save(path, optimize=True)
