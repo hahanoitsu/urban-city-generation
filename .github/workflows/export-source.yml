@@ -1,0 +1,19 @@
+name: export-source
+
+on:
+  push:
+    branches: [tmp-export-seeded-extension]
+    paths: [.export-ready]
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Archive source
+        run: tar --exclude=.git --exclude=.github/workflows/export-source.yml --exclude=.export-ready -czf /tmp/source.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seeded-extension-source
+          path: /tmp/source.tar.gz
+          retention-days: 1
