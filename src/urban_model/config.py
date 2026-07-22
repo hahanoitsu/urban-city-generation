@@ -16,8 +16,12 @@ class DataConfig:
     train_manifest: Path
     validation_manifest: Path
     test_manifest: Path | None = None
+    task: str = "reconstruction"
     augment: bool = True
     height_scale_m: float = 180.0
+    directions: tuple[str, ...] = ("east", "west", "north", "south")
+    boundary_width: int = 3
+    guide_length: int = 12
 
 
 @dataclass(frozen=True)
@@ -145,9 +149,23 @@ def load_training_config(path: str | Path) -> TrainingConfig:
             name="data.test_manifest",
             required=False,
         ),
+        task=str(data_raw.get("task", "reconstruction")).strip().lower(),
         augment=bool(data_raw.get("augment", True)),
         height_scale_m=float(data_raw.get("height_scale_m", 180.0)),
+        directions=tuple(
+            str(value).strip().lower()
+            for value in data_raw.get("directions", ["east", "west", "north", "south"])
+        ),
+        boundary_width=int(data_raw.get("boundary_width", 3)),
+        guide_length=int(data_raw.get("guide_length", 12)),
     )
+    if data.task not in {"reconstruction", "extension"}:
+        raise TrainingConfigError("data.task must be 'reconstruction' or 'extension'")
+    allowed_directions = {"east", "west", "north", "south"}
+    if not data.directions or any(value not in allowed_directions for value in data.directions):
+        raise TrainingConfigError("data.directions contains an invalid direction")
+    if data.boundary_width <= 0 or data.guide_length <= 0:
+        raise TrainingConfigError("boundary_width and guide_length must be positive")
 
     model = ModelConfig(
         input_channels=int(model_raw.get("input_channels", 12)),
@@ -161,6 +179,11 @@ def load_training_config(path: str | Path) -> TrainingConfig:
     )
     if model.input_channels <= 0 or model.base_channels <= 0:
         raise TrainingConfigError("Model channel counts must be positive")
+    expected_input_channels = 16 if data.task == "extension" else 12
+    if model.input_channels != expected_input_channels:
+        raise TrainingConfigError(
+            f"{data.task} expects model.input_channels={expected_input_channels}"
+        )
     if not 0.0 <= model.dropout < 1.0:
         raise TrainingConfigError("model.dropout must be in [0, 1)")
 

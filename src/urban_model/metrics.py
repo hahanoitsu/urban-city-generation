@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import torch
+from torch.nn import functional as F
 
 ROAD_NAMES = ("major", "secondary", "local")
 LANDUSE_NAMES = ("residential", "commercial_mixed", "industrial", "green", "civic")
@@ -32,6 +33,8 @@ class MetricAccumulator:
     )
     height_absolute_error: float = 0.0
     height_pixels: int = 0
+    boundary_required: int = 0
+    boundary_matched: int = 0
 
     def update(
         self,
@@ -75,6 +78,29 @@ class MetricAccumulator:
         )
         self.height_pixels += int(height_mask.sum().detach().cpu())
 
+        if "boundary_guide" in batch:
+            guide = batch["boundary_guide"] > 0.5
+            midpoint = guide.shape[-1] // 2
+            required = guide[:, :, :, midpoint]
+            prediction = torch.sigmoid(outputs["centerline_logits"]) > 0.5
+            guide_length = batch.get("guide_length", 12)
+            if torch.is_tensor(guide_length):
+                guide_length = int(guide_length.max().item())
+            elif isinstance(guide_length, (list, tuple)):
+                guide_length = max(int(value) for value in guide_length)
+            guide_length = max(1, int(guide_length))
+            unknown_band = prediction[:, :, :, midpoint : midpoint + guide_length]
+            predicted_rows = unknown_band.any(dim=-1).to(torch.float32)
+            batch_size, classes, rows = predicted_rows.shape
+            dilated = F.max_pool1d(
+                predicted_rows.reshape(batch_size * classes, 1, rows),
+                kernel_size=3,
+                stride=1,
+                padding=1,
+            ).reshape(batch_size, classes, rows) > 0.5
+            self.boundary_required += int(required.sum().detach().cpu())
+            self.boundary_matched += int((required & dilated).sum().detach().cpu())
+
     @staticmethod
     def _iou(
         names: tuple[str, ...], intersection: torch.Tensor, union: torch.Tensor
@@ -98,4 +124,10 @@ class MetricAccumulator:
             "height_mae_metres_observed": (
                 height_mae * self.height_scale_m if height_mae is not None else None
             ),
+            "boundary_road_recall": (
+                self.boundary_matched / self.boundary_required
+                if self.boundary_required
+                else None
+            ),
+            "boundary_road_crossings": self.boundary_required,
         }

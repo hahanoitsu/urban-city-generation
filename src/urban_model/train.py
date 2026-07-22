@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from .checkpoint import load_checkpoint, save_checkpoint
 from .config import TrainingConfig
-from .data import ReconstructionDataset
+from .data import dataset_for_task
 from .losses import ReconstructionLoss
 from .metrics import MetricAccumulator
 from .model import ReconstructionAutoencoder
@@ -103,8 +103,23 @@ def train(
         torch.backends.cudnn.benchmark = True
     torch.set_float32_matmul_precision("high")
 
-    train_dataset = ReconstructionDataset(config.data.train_manifest, augment=config.data.augment)
-    validation_dataset = ReconstructionDataset(config.data.validation_manifest, augment=False)
+    dataset_options = {
+        "directions": config.data.directions,
+        "boundary_width": config.data.boundary_width,
+        "guide_length": config.data.guide_length,
+    }
+    train_dataset = dataset_for_task(
+        config.data.task,
+        config.data.train_manifest,
+        augment=config.data.augment,
+        **dataset_options,
+    )
+    validation_dataset = dataset_for_task(
+        config.data.task,
+        config.data.validation_manifest,
+        augment=False,
+        **dataset_options,
+    )
     if not train_dataset:
         raise ValueError("The training manifest is empty")
     if not validation_dataset:
@@ -244,6 +259,9 @@ def train(
                 preview_outputs,
                 list(preview_batch["tile_id"]),
                 output_dir / "previews" / f"epoch-{epoch:04d}.png",
+                known_layers=preview_batch.get("known_layers"),
+                known_mask=preview_batch.get("known_mask"),
+                full_target=preview_batch.get("full_target"),
             )
 
         print(

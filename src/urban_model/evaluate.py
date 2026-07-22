@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 
 from .checkpoint import load_checkpoint
 from .config import TrainingConfig
-from .data import ReconstructionDataset
+from .data import dataset_for_task
 from .losses import ReconstructionLoss
 from .metrics import MetricAccumulator
 from .model import ReconstructionAutoencoder
@@ -31,7 +31,14 @@ def evaluate(
         raise ValueError(f"No manifest configured for split '{split}'")
 
     device = select_device(device_name or config.run.device)
-    dataset = ReconstructionDataset(manifest, augment=False)
+    dataset = dataset_for_task(
+        config.data.task,
+        manifest,
+        augment=False,
+        directions=config.data.directions,
+        boundary_width=config.data.boundary_width,
+        guide_length=config.data.guide_length,
+    )
     loader = DataLoader(
         dataset,
         batch_size=config.run.batch_size,

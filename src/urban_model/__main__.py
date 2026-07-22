@@ -8,6 +8,7 @@ from pathlib import Path
 from .check import check_data
 from .config import load_training_config
 from .evaluate import evaluate
+from .extend import extend_tile
 from .train import train
 
 
@@ -33,6 +34,16 @@ def _parser() -> argparse.ArgumentParser:
         "--split", choices=["train", "validation", "test"], default="test"
     )
     evaluation.add_argument("--device")
+
+    extension = commands.add_parser("extend", help="Extend one saved tile in a chosen direction")
+    extension.add_argument("--config", required=True, type=Path)
+    extension.add_argument("--checkpoint", required=True, type=Path)
+    extension.add_argument("--seed", required=True, type=Path)
+    extension.add_argument("--output", required=True, type=Path)
+    extension.add_argument(
+        "--direction", choices=["east", "west", "north", "south"], default="east"
+    )
+    extension.add_argument("--device")
     return parser
 
 
@@ -55,6 +66,15 @@ def main(argv: list[str] | None = None) -> int:
                 config,
                 args.checkpoint,
                 split=args.split,
+                device_name=args.device,
+            )
+        elif args.command == "extend":
+            result = extend_tile(
+                config,
+                args.checkpoint,
+                args.seed,
+                args.output,
+                direction=args.direction,
                 device_name=args.device,
             )
         else:
