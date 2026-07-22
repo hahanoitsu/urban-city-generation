@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
+import pandas as pd
+
 _NUMBER = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
 
 MAJOR_HIGHWAYS = {
@@ -128,7 +130,7 @@ GREEN_LEISURE = {
 
 
 def clean_tag(value: Any) -> str:
-    if value is None:
+    if value is None or pd.isna(value):
         return ""
     text = str(value).strip().lower()
     if ";" in text:
