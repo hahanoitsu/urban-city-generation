@@ -20,9 +20,9 @@ jobs:
           rm -rf .export
           mkdir .export
           tar --exclude=.git --exclude=.github/workflows/export-source.yml --exclude=.export-ready --exclude=.export -czf /tmp/source.tar.gz .
-          base64 -w 0 /tmp/source.tar.gz | split -b 50000 - .export/chunk-
+          base64 -w 0 /tmp/source.tar.gz | split -b 8000 - .export/chunk-
           git config user.name "Suvigya Goyal"
           git config user.email "105093069+hahanoitsu@users.noreply.github.com"
-          git add .export
-          git commit -m "Write temporary source export"
+          git add -A .export
+          git commit -m "Rewrite temporary source export"
           git push origin HEAD:tmp-export-seeded-extension
