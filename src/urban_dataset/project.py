@@ -9,6 +9,14 @@ from shapely.geometry import box
 from .extract import CityLayers
 
 
+def _repair_geometries(frame: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    frame = frame[frame.geometry.notna() & ~frame.geometry.is_empty].copy()
+    invalid = ~frame.geometry.is_valid
+    if invalid.any():
+        frame.loc[invalid, frame.geometry.name] = frame.loc[invalid].geometry.make_valid()
+    return frame[frame.geometry.notna() & ~frame.geometry.is_empty].copy()
+
+
 def choose_metric_crs(
     bbox_wgs84: tuple[float, float, float, float], requested: str | int
 ) -> CRS:
@@ -19,7 +27,7 @@ def choose_metric_crs(
     )
     estimated = boundary.estimate_utm_crs()
     if estimated is None:
-        raise ValueError("Could not estimate a suitable UTM CRS; set input.metric_crs explicitly")
+        raise ValueError("Could not estimate a suitable UTM CRS")
     return CRS.from_user_input(estimated)
 
 
@@ -32,17 +40,16 @@ def project_and_clip_layers(
         {"geometry": [box(*bbox_wgs84)]}, geometry="geometry", crs="EPSG:4326"
     )
     boundary = boundary_wgs84.to_crs(metric_crs)
-    roi = boundary.geometry.iloc[0]
+    region = boundary.geometry.iloc[0]
 
     projected: dict[str, gpd.GeoDataFrame] = {}
     for name, frame in layers.items():
         if frame.empty:
             projected[name] = gpd.GeoDataFrame({"geometry": []}, crs=metric_crs)
             continue
-        candidate = frame.to_crs(metric_crs)
-        candidate = candidate[candidate.geometry.intersects(roi)].copy()
-        candidate["geometry"] = candidate.geometry.intersection(roi)
-        candidate = candidate[candidate.geometry.notna() & ~candidate.geometry.is_empty].copy()
-        projected[name] = candidate
+        candidate = _repair_geometries(frame.to_crs(metric_crs))
+        candidate = candidate[candidate.geometry.intersects(region)].copy()
+        candidate["geometry"] = candidate.geometry.intersection(region)
+        projected[name] = _repair_geometries(candidate)
 
     return replace(layers, **projected), boundary

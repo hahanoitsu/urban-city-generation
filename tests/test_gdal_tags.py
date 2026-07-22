@@ -1,6 +1,8 @@
 import geopandas as gpd
+import numpy as np
 from shapely.geometry import LineString, Polygon
 
+from urban_dataset.classify import clean_tag
 from urban_dataset.extract import _expand_other_tags, _parse_other_tags
 
 
@@ -42,3 +44,8 @@ def test_expand_other_tags_treats_gdal_lines_as_ways():
     assert result.loc[0, "id"] == "123"
     assert result.loc[0, "osm_type"] == "way"
     assert result.loc[0, "highway"] == "primary"
+
+
+def test_clean_tag_treats_nan_as_missing():
+    assert clean_tag(np.nan) == ""
+    assert clean_tag(None) == ""
