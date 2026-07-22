@@ -1,0 +1,42 @@
+data:
+  train_manifest: data/manifests/singapore-training/train.jsonl
+  validation_manifest: data/manifests/singapore-training/validation.jsonl
+  test_manifest: data/manifests/singapore-training/test.jsonl
+  augment: true
+  height_scale_m: 180.0
+
+model:
+  input_channels: 12
+  base_channels: 32
+  channel_multipliers: [1, 2, 4, 8]
+  dropout: 0.05
+
+loss:
+  road: 1.0
+  landuse: 1.0
+  binary: 1.0
+  height: 0.5
+  centerline: 0.5
+  dice: 0.5
+  road_class_weights: [0.2, 1.0, 1.0, 1.0]
+  landuse_class_weights: [0.25, 1.0, 1.0, 1.0, 1.0, 1.0]
+  binary_positive_weights: [4.0, 2.0, 8.0]
+  centerline_positive_weight: 10.0
+  height_confidence_weights: [0.25, 0.5, 0.75, 1.0]
+
+optimizer:
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+
+run:
+  output_dir: runs/reconstruction-small
+  epochs: 100
+  batch_size: 4
+  num_workers: 0
+  seed: 5132
+  device: auto
+  amp: true
+  gradient_clip_norm: 1.0
+  checkpoint_every: 5
+  preview_every: 5
+  early_stopping_patience: 20
