@@ -4,6 +4,8 @@ on:
   push:
     branches: [tmp-export-seeded-extension]
     paths: [.export-ready]
+  pull_request:
+    branches: [seeded-extension]
 
 jobs:
   export:
