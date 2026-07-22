@@ -1,22 +1,18 @@
 # Urban City Generation
 
-This repository contains the first two parts of a research project on learning urban layouts from real cities:
+This repository contains two early parts of a research project on learning urban layouts from real cities:
 
 1. a dataset pipeline that converts OpenStreetMap data into fixed 1,024 m tiles;
 2. a convolutional autoencoder that tests whether those tiles can be compressed and reconstructed.
 
-The reconstruction model is a baseline, not the final city generator. Its purpose is to check whether roads, land use, buildings and heights survive the chosen representation.
+The normal dataset workflow prepares one GeoPackage for each city and then builds several manually selected study areas from it. Raw map files, prepared cities, generated tiles and model checkpoints are kept outside Git.
 
-Raw map files, generated tiles and model checkpoints are kept outside Git.
-
-## Commands
+The reconstruction model is a baseline rather than the final city generator. Its purpose is to test whether roads, land use, buildings and height patterns survive the chosen representation.
 
 ```bash
 python -m urban_dataset --help
 python -m urban_model --help
 ```
-
-The current example uses a manually selected central Singapore rectangle. Later datasets should use several non-overlapping study areas and reserve complete cities for validation and testing.
 
 ## Notes
 
@@ -24,5 +20,5 @@ The current example uses a manually selected central Singapore rectangle. Later 
 - [Dataset method](docs/methodology/dataset-pipeline.md)
 - [Reconstruction baseline](docs/methodology/reconstruction-baseline.md)
 - [Tile format](docs/reference/data-format.md)
-- [Current study area](docs/results/singapore-study-area.md)
+- [Singapore corpus check](docs/results/singapore-corpus.md)
 - [Roadmap](docs/roadmap.md)

@@ -32,7 +32,11 @@ def _target_group_counts(group_count: int, ratios: dict[str, float]) -> dict[str
     raw = {split: max(0.0, float(ratios.get(split, 0.0))) * group_count for split in splits}
     counts = {split: math.floor(raw[split]) for split in splits}
     remainder = group_count - sum(counts.values())
-    for split in sorted(splits, key=lambda name: (raw[name] - counts[name], ratios.get(name, 0)), reverse=True):
+    for split in sorted(
+        splits,
+        key=lambda name: (raw[name] - counts[name], ratios.get(name, 0)),
+        reverse=True,
+    ):
         if remainder <= 0:
             break
         counts[split] += 1
@@ -53,30 +57,31 @@ def _target_group_counts(group_count: int, ratios: dict[str, float]) -> dict[str
     return counts
 
 
-def build_manifests(config_path: str | Path) -> dict[str, Any]:
-    config_path = Path(config_path).expanduser().resolve()
-    with config_path.open("r", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle) or {}
-    dataset_root = Path(config.get("dataset_root", "data/processed"))
-    manifest_root = Path(config.get("manifest_root", "data/manifests"))
-    if not dataset_root.is_absolute():
-        dataset_root = (config_path.parent.parent / dataset_root).resolve()
-    if not manifest_root.is_absolute():
-        manifest_root = (config_path.parent.parent / manifest_root).resolve()
+def build_manifests_from_values(
+    dataset_root: str | Path,
+    manifest_root: str | Path,
+    *,
+    seed: int = 5132,
+    split_ratios: dict[str, float] | None = None,
+    validation_cities: set[str] | None = None,
+    test_cities: set[str] | None = None,
+    spatial_group_tiles: int = 4,
+) -> dict[str, Any]:
+    dataset_root = Path(dataset_root).expanduser().resolve()
+    manifest_root = Path(manifest_root).expanduser().resolve()
     manifest_root.mkdir(parents=True, exist_ok=True)
 
     rows = _load_rows(dataset_root, manifest_root)
     if not rows:
         raise FileNotFoundError(f"No city index.csv files found below {dataset_root}")
 
-    seed = int(config.get("seed", 5132))
-    ratios = config.get("split_ratios", {"train": 0.8, "validation": 0.1, "test": 0.1})
+    ratios = split_ratios or {"train": 0.8, "validation": 0.1, "test": 0.1}
     ratio_sum = sum(float(ratios.get(name, 0.0)) for name in ["train", "validation", "test"])
     if not 0.999 <= ratio_sum <= 1.001:
         raise ValueError("split_ratios must sum to 1")
-    validation_cities = set(config.get("city_splits", {}).get("validation", []))
-    test_cities = set(config.get("city_splits", {}).get("test", []))
-    group_tiles = max(1, int(config.get("spatial_group_tiles", 4)))
+    validation_cities = validation_cities or set()
+    test_cities = test_cities or set()
+    group_tiles = max(1, int(spatial_group_tiles))
 
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -110,8 +115,6 @@ def build_manifests(config_path: str | Path) -> dict[str, Any]:
     free_groups.sort(key=lambda item: stable_int(item[0], seed))
     group_targets = _target_group_counts(len(free_groups), ratios)
     assignment_order: list[str] = []
-    # Interleave split labels so similarly hashed neighbouring groups are not all
-    # consumed by the same split merely because train has the largest quota.
     remaining = dict(group_targets)
     while sum(remaining.values()) > 0:
         for split in ["train", "validation", "test"]:
@@ -147,3 +150,26 @@ def build_manifests(config_path: str | Path) -> dict[str, Any]:
     summary["warnings"] = warnings
     write_json(manifest_root / "manifest_summary.json", summary)
     return summary
+
+
+def build_manifests(config_path: str | Path) -> dict[str, Any]:
+    config_path = Path(config_path).expanduser().resolve()
+    with config_path.open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+
+    dataset_root = Path(config.get("dataset_root", "data/processed"))
+    manifest_root = Path(config.get("manifest_root", "data/manifests"))
+    if not dataset_root.is_absolute():
+        dataset_root = (config_path.parent.parent / dataset_root).resolve()
+    if not manifest_root.is_absolute():
+        manifest_root = (config_path.parent.parent / manifest_root).resolve()
+
+    return build_manifests_from_values(
+        dataset_root,
+        manifest_root,
+        seed=int(config.get("seed", 5132)),
+        split_ratios=config.get("split_ratios", {"train": 0.8, "validation": 0.1, "test": 0.1}),
+        validation_cities=set(config.get("city_splits", {}).get("validation", [])),
+        test_cities=set(config.get("city_splits", {}).get("test", [])),
+        spatial_group_tiles=int(config.get("spatial_group_tiles", 4)),
+    )

@@ -7,9 +7,11 @@ from pathlib import Path
 
 from .audit import audit_dataset, create_preview_atlas
 from .config import load_build_config
+from .corpus import build_corpus, load_corpus_config
 from .demo import run_demo
 from .manifests import build_manifests
 from .pipeline import run_build
+from .prepared import prepare_city
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -19,8 +21,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    build = subparsers.add_parser("build", help="Build one city dataset from a YAML config")
+    build = subparsers.add_parser("build", help="Build one study area directly from a PBF")
     build.add_argument("--config", required=True, type=Path)
+
+    prepare = subparsers.add_parser(
+        "prepare-city", help="Extract and enrich one city into a reusable GeoPackage"
+    )
+    prepare.add_argument("--config", required=True, type=Path)
+
+    corpus = subparsers.add_parser(
+        "build-corpus", help="Build several study areas from prepared city GeoPackages"
+    )
+    corpus.add_argument("--config", required=True, type=Path)
 
     demo = subparsers.add_parser("demo", help="Run the full path on built-in synthetic data")
     demo.add_argument("--output", default="data/demo", type=Path)
@@ -49,6 +61,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "build":
             result = run_build(load_build_config(args.config))
+        elif args.command == "prepare-city":
+            result = prepare_city(load_build_config(args.config))
+        elif args.command == "build-corpus":
+            result = build_corpus(load_corpus_config(args.config))
         elif args.command == "demo":
             result = run_demo(args.output, overwrite=args.overwrite)
         elif args.command == "manifests":

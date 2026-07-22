@@ -1,23 +1,39 @@
 # Code notes
 
-These notes explain the parts of the project that are most likely to be changed during the research.
+These notes describe the parts of the project that are most likely to be changed during the research.
 
 ## Dataset code
 
 The dataset package is in `src/urban_dataset`.
 
-- `config.py` reads the YAML build files.
+- `config.py` reads the single-area and city-preparation YAML files.
 - `extract.py` reads an OSM PBF and separates roads, buildings, land use, water, green areas and rail.
 - `classify.py` maps OSM tags to the classes used by the dataset.
 - `enrich.py` estimates road widths and missing building heights.
-- `project.py` repairs invalid geometry, projects it into metres and clips it to the selected area.
+- `project.py` repairs invalid geometry, projects it into metres and clips it to a boundary.
+- `prepared.py` writes and reopens the prepared city GeoPackage.
+- `corpus.py` reads the corpus YAML file and builds every configured study area.
 - `tile.py` creates the fixed 1,024 m grid.
 - `raster.py` converts vector features into the twelve model channels and the auxiliary masks.
-- `pipeline.py` runs one complete dataset build.
+- `pipeline.py` writes the tiles, metadata, indexes and previews for one study area.
 - `audit.py` checks saved tensors and creates summary statistics.
 - `manifests.py` creates the train, validation and test lists.
 
-A build currently starts from a PBF. The next data refactor should prepare one GeoPackage per city and then build several manually selected coordinate boxes from that file. This avoids repeating the expensive extraction step whenever a box changes.
+### Prepared city functions
+
+`prepare_city(config)` extracts a city from its PBF, projects and enriches the layers, and writes one GeoPackage.
+
+`save_city_gpkg(layers, path, metadata)` writes the seven vector layers and a small `urban_metadata` table.
+
+`load_city_gpkg(path)` reopens those layers and checks that they use one coordinate system.
+
+### Corpus functions
+
+`load_corpus_config(path)` reads the output settings, tile settings, city files and coordinate boxes.
+
+`build_corpus(config)` opens each GeoPackage once, checks that boxes do not overlap, clips the prepared layers to each box and builds all areas. It also creates an atlas and audit for every area, a combined audit and the three manifests.
+
+`run_prepared_build(...)` is the part of `pipeline.py` used after a GeoPackage has already been prepared. The older `run_build(...)` path remains for small direct PBF experiments.
 
 ## Model code
 
@@ -35,4 +51,4 @@ The encoder reduces a 256 × 256 tile to a 32 × 32 latent map. There are no enc
 
 ## Current limitations
 
-The current corpus contains one central Singapore study area. It is useful for checking the software and the representation, but it is too small for a final model comparison. Local roads, rail and individual building shapes are also reconstructed less accurately than broad land-use regions.
+The first corpus still comes from one city. It is large enough for a more useful reconstruction experiment, but it cannot test transfer to a different city. Local roads, rail and individual building shapes also remain weaker reconstruction targets than broad land-use regions.

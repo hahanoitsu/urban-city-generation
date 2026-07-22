@@ -1,0 +1,48 @@
+output_root: data/processed/singapore-corpus
+manifest_root: data/manifests/singapore-corpus
+overwrite: false
+save_tile_vectors: false
+seed: 5132
+spatial_group_tiles: 4
+
+split_ratios:
+  train: 0.80
+  validation: 0.10
+  test: 0.10
+
+tile:
+  size_m: 1024
+  pixels: 256
+  stride_m: 1024
+  max_height_m: 180
+  all_touched: true
+  include_partial_tiles: false
+
+quality:
+  minimum_buildings: 0
+  minimum_road_length_m: 0
+  minimum_nonempty_fraction: 0.001
+  minimum_valid_fraction: 0.95
+  reject_water_fraction_above: 0.95
+
+atlas:
+  columns: 6
+  limit: 180
+
+cities:
+  - id: singapore
+    gpkg: data/cities/singapore.gpkg
+    split: auto
+    areas:
+      - id: central-mixed
+        bbox_wgs84: [103.7900, 1.2900, 103.8700, 1.3700]
+      - id: bukit-timah
+        bbox_wgs84: [103.7500, 1.3000, 103.7900, 1.3900]
+      - id: jurong-west
+        bbox_wgs84: [103.6900, 1.3150, 103.7500, 1.3850]
+      - id: north
+        bbox_wgs84: [103.7450, 1.4050, 103.8250, 1.4700]
+      - id: northeast
+        bbox_wgs84: [103.8700, 1.3750, 103.9500, 1.4450]
+      - id: east
+        bbox_wgs84: [103.9100, 1.3050, 103.9900, 1.3700]

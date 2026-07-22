@@ -1,7 +1,7 @@
 data:
-  train_manifest: data/manifests/singapore-training/train.jsonl
-  validation_manifest: data/manifests/singapore-training/validation.jsonl
-  test_manifest: data/manifests/singapore-training/test.jsonl
+  train_manifest: data/manifests/singapore-corpus/train.jsonl
+  validation_manifest: data/manifests/singapore-corpus/validation.jsonl
+  test_manifest: data/manifests/singapore-corpus/test.jsonl
   augment: true
   height_scale_m: 180.0
 
