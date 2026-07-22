@@ -1,18 +1,32 @@
 # Urban City Generation
 
-This repository contains three early parts of a research project on learning urban layouts from real cities:
+This repository contains early research code for learning urban layouts from real map data:
 
-1. a dataset pipeline that converts OpenStreetMap data into fixed 1,024 m tiles;
-2. a convolutional autoencoder that tests whether those tiles can be compressed and reconstructed;
-3. a boundary-conditioned baseline that extends a real tile into a neighbouring area while preserving the seed.
+1. a dataset pipeline that prepares reusable city GeoPackages and fixed-scale raster tiles;
+2. reconstruction and deterministic extension baselines;
+3. a CityGen-style semantic diffusion experiment for local block generation and masked outpainting.
 
-The normal dataset workflow prepares one GeoPackage for each city and then builds several manually selected study areas from it. Raw map files, prepared cities, generated tiles and model checkpoints are kept outside Git.
+The deterministic extension models are retained as negative baselines. The active generation path first learns complete categorical semantic blocks, then transfers that model to boundary-conditioned outpainting. Height synthesis, vector repair and Unreal Engine PCG are later stages.
 
-The reconstruction and extension networks are baselines rather than the final city generator. They are used to test the representation, losses and road-boundary constraints before training a probabilistic latent model.
+Raw map files, prepared GeoPackages, generated tiles and model checkpoints are kept outside Git.
+
+## Commands
 
 ```bash
 python -m urban_dataset --help
 python -m urban_model --help
+```
+
+The normal data workflow is:
+
+```text
+OSM PBF → prepared city GeoPackage → selected study areas → raster corpus
+```
+
+The current generation workflow is:
+
+```text
+semantic block diffusion → masked semantic outpainting → later refinement and height
 ```
 
 ## Notes
@@ -21,6 +35,6 @@ python -m urban_model --help
 - [Dataset method](docs/methodology/dataset-pipeline.md)
 - [Reconstruction baseline](docs/methodology/reconstruction-baseline.md)
 - [Seeded extension baseline](docs/methodology/seeded-extension.md)
+- [Semantic diffusion](docs/methodology/semantic-diffusion.md)
 - [Tile format](docs/reference/data-format.md)
-- [Singapore corpus check](docs/results/singapore-corpus.md)
 - [Roadmap](docs/roadmap.md)

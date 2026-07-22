@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "urban-city-generation"
-version = "0.5.0"
-description = "Tools for preparing urban map data and testing a reconstruction model."
+version = "0.6.0"
+description = "Urban map preparation and semantic city-layout generation experiments."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{name = "Suvigya Goyal"}]
@@ -26,8 +26,9 @@ dependencies = [
 [project.optional-dependencies]
 osm = ["pyrosm>=0.11.0"]
 train = ["torch>=2.5"]
+diffusion = ["diffusers>=0.35"]
 dev = ["pytest>=8", "ruff>=0.9"]
-all = ["pyrosm>=0.11.0", "torch>=2.5", "pytest>=8", "ruff>=0.9"]
+all = ["pyrosm>=0.11.0", "torch>=2.5", "diffusers>=0.35", "pytest>=8", "ruff>=0.9"]
 
 [project.scripts]
 urban-dataset = "urban_dataset.__main__:main"

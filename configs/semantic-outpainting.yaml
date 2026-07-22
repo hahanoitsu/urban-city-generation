@@ -1,0 +1,36 @@
+data:
+  task: outpaint
+  train_manifest: data/manifests/singapore-corpus/train.jsonl
+  validation_manifest: data/manifests/singapore-corpus/validation.jsonl
+  resolution: [128, 256]
+  augment: true
+  directions: [east, west, north, south]
+  boundary_width: 3
+  guide_length: 24
+
+model:
+  block_out_channels: [64, 128, 256]
+  layers_per_block: 2
+  attention_levels: [false, false, true]
+  norm_num_groups: 8
+
+diffusion:
+  train_steps: 1000
+  inference_steps: 100
+  beta_schedule: squaredcos_cap_v2
+
+run:
+  output_dir: runs/semantic-outpainting
+  initial_checkpoint: runs/semantic-block/best.pt
+  epochs: 100
+  batch_size: 2
+  learning_rate: 0.00005
+  weight_decay: 0.0001
+  num_workers: 0
+  seed: 5132
+  device: auto
+  ema_decay: 0.999
+  gradient_clip_norm: 1.0
+  checkpoint_every: 10
+  preview_every: 10
+  early_stopping_patience: 20

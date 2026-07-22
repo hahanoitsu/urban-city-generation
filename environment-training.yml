@@ -19,3 +19,6 @@ dependencies:
   - tqdm>=4.66
   - pytest>=8
   - pip
+  - pip:
+      - diffusers>=0.35
+      - ruff>=0.9
