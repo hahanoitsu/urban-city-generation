@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Editors and notebooks
+.vscode/
+.idea/
+.ipynb_checkpoints/
+
+# Local data and model output
+data/raw/
+data/intermediate/
+data/processed/
+data/manifests/
+checkpoints/
+runs/
+
+# Geospatial and training artefacts
+*.osm.pbf
+*.gpkg
+*.npz
+*.pt
+*.pth
+*.ckpt
+
+# System files
+.DS_Store

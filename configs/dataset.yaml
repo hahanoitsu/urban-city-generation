@@ -1,0 +1,15 @@
+dataset_root: data/processed
+manifest_root: data/manifests
+seed: 5132
+split_ratios:
+  train: 0.80
+  validation: 0.10
+  test: 0.10
+
+city_splits:
+  # validation: [amsterdam]
+  # test: [barcelona]
+  validation: []
+  test: []
+
+spatial_group_tiles: 2
