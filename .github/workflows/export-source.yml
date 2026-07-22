@@ -4,18 +4,25 @@ on:
   push:
     branches: [tmp-export-seeded-extension]
     paths: [.export-ready]
-  pull_request:
-    branches: [seeded-extension]
+
+permissions:
+  contents: write
 
 jobs:
   export:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Archive source
-        run: tar --exclude=.git --exclude=.github/workflows/export-source.yml --exclude=.export-ready -czf /tmp/source.tar.gz .
-      - uses: actions/upload-artifact@v4
         with:
-          name: seeded-extension-source
-          path: /tmp/source.tar.gz
-          retention-days: 1
+          fetch-depth: 0
+      - name: Write temporary source chunks
+        run: |
+          rm -rf .export
+          mkdir .export
+          tar --exclude=.git --exclude=.github/workflows/export-source.yml --exclude=.export-ready --exclude=.export -czf /tmp/source.tar.gz .
+          base64 -w 0 /tmp/source.tar.gz | split -b 50000 - .export/chunk-
+          git config user.name "Suvigya Goyal"
+          git config user.email "105093069+hahanoitsu@users.noreply.github.com"
+          git add .export
+          git commit -m "Write temporary source export"
+          git push origin HEAD:tmp-export-seeded-extension
