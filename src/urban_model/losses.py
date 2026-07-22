@@ -41,6 +41,28 @@ def _dice_loss(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -
     return (1.0 - (2.0 * intersection + 1.0) / (denominator + 1.0)).mean()
 
 
+def _tversky_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    alpha: float,
+    beta: float,
+) -> torch.Tensor:
+    probability = torch.sigmoid(logits)
+    expanded_mask = mask.to(dtype=probability.dtype).unsqueeze(1)
+    probability = probability * expanded_mask
+    target = target * expanded_mask
+    dimensions = (0, 2, 3)
+    true_positive = (probability * target).sum(dim=dimensions)
+    false_positive = (probability * (1.0 - target)).sum(dim=dimensions)
+    false_negative = ((1.0 - probability) * target).sum(dim=dimensions)
+    score = (true_positive + 1.0) / (
+        true_positive + alpha * false_positive + beta * false_negative + 1.0
+    )
+    return (1.0 - score).mean()
+
+
 class ReconstructionLoss(nn.Module):
     def __init__(self, config: LossConfig) -> None:
         super().__init__()
@@ -120,6 +142,26 @@ class ReconstructionLoss(nn.Module):
         centerline_loss = centerline_loss + self.config.dice * _dice_loss(
             outputs["centerline_logits"], batch["centerline_target"], valid
         )
+        if self.config.centerline_tversky > 0:
+            centerline_loss = centerline_loss + self.config.centerline_tversky * _tversky_loss(
+                outputs["centerline_logits"],
+                batch["centerline_target"],
+                valid,
+                alpha=self.config.tversky_alpha,
+                beta=self.config.tversky_beta,
+            )
+
+        boundary_loss = outputs["centerline_logits"].sum() * 0.0
+        if self.config.boundary_centerline > 0 and "boundary_guide" in batch:
+            guide = batch["boundary_guide"] > 0.5
+            guide_mask = guide.any(dim=1)
+            if guide_mask.any():
+                guide_values = F.binary_cross_entropy_with_logits(
+                    outputs["centerline_logits"],
+                    guide.to(dtype=outputs["centerline_logits"].dtype),
+                    reduction="none",
+                )
+                boundary_loss = _masked_mean(guide_values, guide_mask)
 
         total = (
             self.config.road * road_loss
@@ -127,6 +169,7 @@ class ReconstructionLoss(nn.Module):
             + self.config.binary * binary_loss
             + self.config.height * height_loss
             + self.config.centerline * centerline_loss
+            + self.config.boundary_centerline * boundary_loss
         )
         return {
             "total": total,
@@ -135,4 +178,5 @@ class ReconstructionLoss(nn.Module):
             "binary": binary_loss,
             "height": height_loss,
             "centerline": centerline_loss,
+            "boundary_centerline": boundary_loss,
         }

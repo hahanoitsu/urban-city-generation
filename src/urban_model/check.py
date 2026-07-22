@@ -26,6 +26,7 @@ def check_data(config: TrainingConfig, *, samples_per_split: int = 4) -> dict[st
             directions=config.data.directions,
             boundary_width=config.data.boundary_width,
             guide_length=config.data.guide_length,
+            pair_limit=config.data.pair_limit,
         )
         shapes: set[tuple[int, ...]] = set()
         for index in range(min(len(dataset), samples_per_split)):

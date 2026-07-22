@@ -11,7 +11,7 @@ from urban_dataset.preview import render_preview
 from .checkpoint import load_checkpoint
 from .config import TrainingConfig
 from .data import make_boundary_guide
-from .model import ReconstructionAutoencoder
+from .model import build_model
 from .reconstruct import reconstruct_layers
 from .runtime import select_device
 
@@ -79,7 +79,7 @@ def extend_tile(
     model_input = torch.cat([known_layers, known_mask, guide], dim=0).unsqueeze(0)
 
     device = select_device(device_name or config.run.device)
-    model = ReconstructionAutoencoder(config.model).to(device)
+    model = build_model(config.model).to(device)
     load_checkpoint(checkpoint_path, model=model, device=device)
     model.eval()
     with torch.inference_mode():
@@ -122,6 +122,7 @@ def extend_tile(
         "generated_tile_shape": list(generated.shape),
         "boundary_width": config.data.boundary_width,
         "guide_length": config.data.guide_length,
+        "architecture": config.model.architecture,
         "note": "This is a deterministic conditional baseline, not a diffusion sample.",
     }
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")

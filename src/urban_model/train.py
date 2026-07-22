@@ -17,7 +17,7 @@ from .config import TrainingConfig
 from .data import dataset_for_task
 from .losses import ReconstructionLoss
 from .metrics import MetricAccumulator
-from .model import ReconstructionAutoencoder
+from .model import build_model
 from .preview import save_reconstruction_preview
 from .runtime import (
     append_jsonl,
@@ -31,9 +31,7 @@ from .runtime import (
 )
 
 
-def _loader(
-    dataset, config: TrainingConfig, device: torch.device, *, shuffle: bool
-) -> DataLoader:
+def _loader(dataset, config: TrainingConfig, device: torch.device, *, shuffle: bool) -> DataLoader:
     workers = worker_count(config.run.num_workers)
     return DataLoader(
         dataset,
@@ -107,6 +105,7 @@ def train(
         "directions": config.data.directions,
         "boundary_width": config.data.boundary_width,
         "guide_length": config.data.guide_length,
+        "pair_limit": config.data.pair_limit,
     }
     train_dataset = dataset_for_task(
         config.data.task,
@@ -127,7 +126,7 @@ def train(
 
     train_loader = _loader(train_dataset, config, device, shuffle=True)
     validation_loader = _loader(validation_dataset, config, device, shuffle=False)
-    model = ReconstructionAutoencoder(config.model).to(device)
+    model = build_model(config.model).to(device)
     criterion = ReconstructionLoss(config.loss).to(device)
     optimizer = AdamW(
         model.parameters(),
@@ -279,6 +278,7 @@ def train(
         "best_validation_loss": best_validation_loss,
         "train_samples": len(train_dataset),
         "validation_samples": len(validation_dataset),
+        "architecture": config.model.architecture,
     }
     write_json(output_dir / "summary.json", summary)
     return summary

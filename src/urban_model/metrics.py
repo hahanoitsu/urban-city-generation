@@ -35,6 +35,7 @@ class MetricAccumulator:
     height_pixels: int = 0
     boundary_required: int = 0
     boundary_matched: int = 0
+    boundary_depth_sum: float = 0.0
 
     def update(
         self,
@@ -101,6 +102,16 @@ class MetricAccumulator:
             self.boundary_required += int(required.sum().detach().cpu())
             self.boundary_matched += int((required & dilated).sum().detach().cpu())
 
+            for distance in range(guide_length):
+                at_distance = prediction[:, :, :, midpoint + distance].to(torch.float32)
+                at_distance = F.max_pool1d(
+                    at_distance.reshape(batch_size * classes, 1, rows),
+                    kernel_size=3,
+                    stride=1,
+                    padding=1,
+                ).reshape(batch_size, classes, rows) > 0.5
+                self.boundary_depth_sum += float((required & at_distance).sum().detach().cpu())
+
     @staticmethod
     def _iou(
         names: tuple[str, ...], intersection: torch.Tensor, union: torch.Tensor
@@ -113,6 +124,9 @@ class MetricAccumulator:
     def compute(self) -> dict[str, object]:
         divisor = max(self.batches, 1)
         height_mae = self.height_absolute_error / self.height_pixels if self.height_pixels else None
+        continuation_depth = (
+            self.boundary_depth_sum / self.boundary_required if self.boundary_required else None
+        )
         return {
             "loss": {name: value / divisor for name, value in self.loss_sums.items()},
             "road_iou": self._iou(ROAD_NAMES, self.road_intersection, self.road_union),
@@ -129,5 +143,6 @@ class MetricAccumulator:
                 if self.boundary_required
                 else None
             ),
+            "boundary_mean_continuation_pixels": continuation_depth,
             "boundary_road_crossings": self.boundary_required,
         }

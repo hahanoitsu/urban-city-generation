@@ -22,6 +22,7 @@ class DataConfig:
     directions: tuple[str, ...] = ("east", "west", "north", "south")
     boundary_width: int = 3
     guide_length: int = 12
+    pair_limit: int | None = None
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class ModelConfig:
     base_channels: int = 32
     channel_multipliers: tuple[int, ...] = (1, 2, 4, 8)
     dropout: float = 0.0
+    architecture: str = "autoencoder"
 
 
 @dataclass(frozen=True)
@@ -39,7 +41,11 @@ class LossConfig:
     binary: float = 1.0
     height: float = 0.5
     centerline: float = 0.5
+    boundary_centerline: float = 0.0
     dice: float = 0.5
+    centerline_tversky: float = 0.0
+    tversky_alpha: float = 0.3
+    tversky_beta: float = 0.7
     road_class_weights: tuple[float, ...] = (0.2, 1.0, 1.0, 1.0)
     landuse_class_weights: tuple[float, ...] = (0.25, 1.0, 1.0, 1.0, 1.0, 1.0)
     binary_positive_weights: tuple[float, ...] = (4.0, 2.0, 8.0)
@@ -134,20 +140,14 @@ def load_training_config(path: str | Path) -> TrainingConfig:
     run_raw = _mapping(raw, "run")
     base = config_path.parent.parent
 
+    pair_limit_raw = data_raw.get("pair_limit")
     data = DataConfig(
-        train_manifest=_path(
-            data_raw.get("train_manifest"), base=base, name="data.train_manifest"
-        ),
+        train_manifest=_path(data_raw.get("train_manifest"), base=base, name="data.train_manifest"),
         validation_manifest=_path(
-            data_raw.get("validation_manifest"),
-            base=base,
-            name="data.validation_manifest",
+            data_raw.get("validation_manifest"), base=base, name="data.validation_manifest"
         ),
         test_manifest=_path(
-            data_raw.get("test_manifest"),
-            base=base,
-            name="data.test_manifest",
-            required=False,
+            data_raw.get("test_manifest"), base=base, name="data.test_manifest", required=False
         ),
         task=str(data_raw.get("task", "reconstruction")).strip().lower(),
         augment=bool(data_raw.get("augment", True)),
@@ -158,6 +158,7 @@ def load_training_config(path: str | Path) -> TrainingConfig:
         ),
         boundary_width=int(data_raw.get("boundary_width", 3)),
         guide_length=int(data_raw.get("guide_length", 12)),
+        pair_limit=int(pair_limit_raw) if pair_limit_raw is not None else None,
     )
     if data.task not in {"reconstruction", "extension"}:
         raise TrainingConfigError("data.task must be 'reconstruction' or 'extension'")
@@ -166,16 +167,18 @@ def load_training_config(path: str | Path) -> TrainingConfig:
         raise TrainingConfigError("data.directions contains an invalid direction")
     if data.boundary_width <= 0 or data.guide_length <= 0:
         raise TrainingConfigError("boundary_width and guide_length must be positive")
+    if data.pair_limit is not None and data.pair_limit <= 0:
+        raise TrainingConfigError("data.pair_limit must be positive")
 
+    default_architecture = "extension_unet" if data.task == "extension" else "autoencoder"
     model = ModelConfig(
         input_channels=int(model_raw.get("input_channels", 12)),
         base_channels=int(model_raw.get("base_channels", 32)),
         channel_multipliers=_int_tuple(
-            model_raw.get("channel_multipliers"),
-            (1, 2, 4, 8),
-            "model.channel_multipliers",
+            model_raw.get("channel_multipliers"), (1, 2, 4, 8), "model.channel_multipliers"
         ),
         dropout=float(model_raw.get("dropout", 0.0)),
+        architecture=str(model_raw.get("architecture", default_architecture)).strip().lower(),
     )
     if model.input_channels <= 0 or model.base_channels <= 0:
         raise TrainingConfigError("Model channel counts must be positive")
@@ -184,6 +187,13 @@ def load_training_config(path: str | Path) -> TrainingConfig:
         raise TrainingConfigError(
             f"{data.task} expects model.input_channels={expected_input_channels}"
         )
+    allowed_architectures = {"autoencoder", "extension_unet"}
+    if model.architecture not in allowed_architectures:
+        raise TrainingConfigError(
+            f"model.architecture must be one of {sorted(allowed_architectures)}"
+        )
+    if data.task == "reconstruction" and model.architecture != "autoencoder":
+        raise TrainingConfigError("reconstruction currently requires the autoencoder architecture")
     if not 0.0 <= model.dropout < 1.0:
         raise TrainingConfigError("model.dropout must be in [0, 1)")
 
@@ -193,11 +203,13 @@ def load_training_config(path: str | Path) -> TrainingConfig:
         binary=float(loss_raw.get("binary", 1.0)),
         height=float(loss_raw.get("height", 0.5)),
         centerline=float(loss_raw.get("centerline", 0.5)),
+        boundary_centerline=float(loss_raw.get("boundary_centerline", 0.0)),
         dice=float(loss_raw.get("dice", 0.5)),
+        centerline_tversky=float(loss_raw.get("centerline_tversky", 0.0)),
+        tversky_alpha=float(loss_raw.get("tversky_alpha", 0.3)),
+        tversky_beta=float(loss_raw.get("tversky_beta", 0.7)),
         road_class_weights=_float_tuple(
-            loss_raw.get("road_class_weights"),
-            (0.2, 1.0, 1.0, 1.0),
-            "loss.road_class_weights",
+            loss_raw.get("road_class_weights"), (0.2, 1.0, 1.0, 1.0), "loss.road_class_weights"
         ),
         landuse_class_weights=_float_tuple(
             loss_raw.get("landuse_class_weights"),
@@ -205,9 +217,7 @@ def load_training_config(path: str | Path) -> TrainingConfig:
             "loss.landuse_class_weights",
         ),
         binary_positive_weights=_float_tuple(
-            loss_raw.get("binary_positive_weights"),
-            (4.0, 2.0, 8.0),
-            "loss.binary_positive_weights",
+            loss_raw.get("binary_positive_weights"), (4.0, 2.0, 8.0), "loss.binary_positive_weights"
         ),
         centerline_positive_weight=float(loss_raw.get("centerline_positive_weight", 10.0)),
         height_confidence_weights=_float_tuple(
@@ -224,6 +234,8 @@ def load_training_config(path: str | Path) -> TrainingConfig:
         raise TrainingConfigError("loss.binary_positive_weights must have three entries")
     if len(loss.height_confidence_weights) != 4:
         raise TrainingConfigError("loss.height_confidence_weights must have four entries")
+    if not 0.0 <= loss.tversky_alpha <= 1.0 or not 0.0 <= loss.tversky_beta <= 1.0:
+        raise TrainingConfigError("tversky_alpha and tversky_beta must be in [0, 1]")
 
     optimizer = OptimizerConfig(
         learning_rate=float(optimizer_raw.get("learning_rate", 3e-4)),

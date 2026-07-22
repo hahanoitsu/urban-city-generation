@@ -10,7 +10,7 @@ from .config import TrainingConfig
 from .data import dataset_for_task
 from .losses import ReconstructionLoss
 from .metrics import MetricAccumulator
-from .model import ReconstructionAutoencoder
+from .model import build_model
 from .runtime import move_batch, select_device, worker_count, write_json
 
 
@@ -38,6 +38,7 @@ def evaluate(
         directions=config.data.directions,
         boundary_width=config.data.boundary_width,
         guide_length=config.data.guide_length,
+        pair_limit=config.data.pair_limit,
     )
     loader = DataLoader(
         dataset,
@@ -45,7 +46,7 @@ def evaluate(
         shuffle=False,
         num_workers=worker_count(config.run.num_workers),
     )
-    model = ReconstructionAutoencoder(config.model).to(device)
+    model = build_model(config.model).to(device)
     load_checkpoint(checkpoint_path, model=model, device=device)
     criterion = ReconstructionLoss(config.loss).to(device)
     accumulator = MetricAccumulator(height_scale_m=config.data.height_scale_m)

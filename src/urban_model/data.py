@@ -64,7 +64,6 @@ class ReconstructionDataset(Dataset):
         layers = sample["x"]
         if layers.shape[0] != 12:
             raise ValueError(f"Expected 12 channels, found {layers.shape[0]}")
-
         return {
             "input": layers,
             **_targets(layers),
@@ -146,6 +145,7 @@ class ExtensionDataset(Dataset):
         directions: Iterable[str] = DIRECTIONS,
         boundary_width: int = 3,
         guide_length: int = 12,
+        pair_limit: int | None = None,
     ) -> None:
         self.tiles = UrbanTileDataset(manifest, include_auxiliary=True)
         self.augment = augment
@@ -171,6 +171,8 @@ class ExtensionDataset(Dataset):
                 target_index = locations.get(_grid_key(row, neighbour_column, neighbour_row))
                 if target_index is not None:
                     pairs.append((seed_index, target_index, direction))
+        if pair_limit is not None:
+            pairs = pairs[: int(pair_limit)]
         self.pairs = pairs
 
     def __len__(self) -> int:
@@ -247,6 +249,7 @@ def dataset_for_task(
     directions: Iterable[str] = DIRECTIONS,
     boundary_width: int = 3,
     guide_length: int = 12,
+    pair_limit: int | None = None,
 ) -> Dataset:
     if task == "reconstruction":
         return ReconstructionDataset(manifest, augment=augment)
@@ -257,5 +260,6 @@ def dataset_for_task(
             directions=directions,
             boundary_width=boundary_width,
             guide_length=guide_length,
+            pair_limit=pair_limit,
         )
     raise ValueError(f"Unknown training task: {task}")

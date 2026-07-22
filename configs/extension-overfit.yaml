@@ -1,0 +1,51 @@
+data:
+  task: extension
+  train_manifest: data/manifests/singapore-corpus/train.jsonl
+  validation_manifest: data/manifests/singapore-corpus/train.jsonl
+  augment: false
+  height_scale_m: 180.0
+  directions: [east, west, north, south]
+  boundary_width: 3
+  guide_length: 24
+  pair_limit: 4
+
+model:
+  architecture: extension_unet
+  input_channels: 16
+  base_channels: 16
+  channel_multipliers: [1, 2, 4]
+  dropout: 0.0
+
+loss:
+  road: 2.0
+  landuse: 0.6
+  binary: 0.8
+  height: 0.25
+  centerline: 3.0
+  boundary_centerline: 4.0
+  dice: 1.0
+  centerline_tversky: 1.0
+  tversky_alpha: 0.25
+  tversky_beta: 0.75
+  road_class_weights: [0.1, 2.0, 2.5, 3.0]
+  landuse_class_weights: [0.25, 1.0, 1.0, 1.0, 1.0, 1.0]
+  binary_positive_weights: [4.0, 3.0, 10.0]
+  centerline_positive_weight: 24.0
+  height_confidence_weights: [0.25, 0.5, 0.75, 1.0]
+
+optimizer:
+  learning_rate: 0.001
+  weight_decay: 0.0
+
+run:
+  output_dir: runs/extension-overfit
+  epochs: 150
+  batch_size: 4
+  num_workers: 0
+  seed: 5132
+  device: auto
+  amp: true
+  gradient_clip_norm: 5.0
+  checkpoint_every: 25
+  preview_every: 10
+  early_stopping_patience: 150
