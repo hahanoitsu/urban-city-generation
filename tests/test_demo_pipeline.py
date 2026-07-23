@@ -3,7 +3,7 @@ import json
 import numpy as np
 
 from urban_dataset.demo import run_demo
-from urban_dataset.schema import CHANNEL_NAMES
+from urban_dataset.schema import CHANNEL_NAMES, VERTICAL_MODE_NAMES
 
 
 def test_demo_pipeline(tmp_path):
@@ -21,9 +21,15 @@ def test_demo_pipeline(tmp_path):
         assert archive["height_confidence"].shape == (256, 256)
         assert archive["landuse_known_mask"].shape == (256, 256)
         assert archive["road_centerlines"].shape == (3, 256, 256)
+        assert archive["road_vertical_masks"].shape == (len(VERTICAL_MODE_NAMES), 256, 256)
+        assert archive["rail_vertical_masks"].shape == (len(VERTICAL_MODE_NAMES), 256, 256)
+        assert archive["surface_transport_reservation"].shape == (256, 256)
+        assert archive["buildable_surface_mask"].shape == (256, 256)
+        assert archive["buildability_known_mask"].shape == (256, 256)
         assert np.isfinite(archive["layers"]).all()
     metadata = json.loads((tile / "metadata.json").read_text())
     assert metadata["metres_per_pixel"] == 4.0
+    assert metadata["vertical_modes"] == list(VERTICAL_MODE_NAMES)
     city = json.loads((tile / "city.json").read_text())
     assert city["roads"]
     assert "estimated_width_m" in city["roads"][0]["properties"]
