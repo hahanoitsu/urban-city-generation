@@ -5,7 +5,7 @@ This repository contains early research code for learning urban layouts from rea
 1. a dataset pipeline that prepares reusable city GeoPackages and fixed-scale raster tiles;
 2. reconstruction and deterministic extension baselines;
 3. a CityGen-style flat semantic diffusion baseline;
-4. an in-progress layered city-state representation for topology-aware generation and Unreal Engine PCG.
+4. a layered city-state representation for topology-aware generation and Unreal Engine PCG.
 
 The deterministic and flat semantic models are retained as research baselines. The current design direction separates surface, underground and elevated infrastructure, treats transport as a graph, derives blocks and parcels from surface rights-of-way, and constrains buildings to valid buildable envelopes.
 
@@ -24,6 +24,22 @@ The normal data workflow is:
 OSM PBF → prepared city GeoPackage → selected study areas → layered raster/vector corpus
 ```
 
+A corpus config may contain several prepared cities. Each city keeps its own projected CRS,
+and complete cities can be reserved for validation or testing. See
+`configs/corpus-multicity.example.yaml`.
+
+Build a 3D/PCG-ready index after creating the vector corpus:
+
+```bash
+python -m urban_dataset compile-city-state \
+  --dataset data/processed/world-corpus \
+  --output data/processed/world-corpus/city-state-index.json
+```
+
+Each tile `city.json` contains an attributed road/rail graph, boundary continuation ports,
+vertical transport state and building footprint extrusions. The initial Z values are explicit
+procedural defaults, not claimed tunnel depths or bridge elevations.
+
 The target generation workflow is:
 
 ```text
@@ -41,6 +57,7 @@ strategic plan
 - [Code notes](docs/code-notes.md)
 - [Dataset method](docs/methodology/dataset-pipeline.md)
 - [Layered city-state architecture](docs/architecture/layered-city-state.md)
+- [City-state format](docs/reference/city-state-format.md)
 - [Research paper plan](docs/research/paper-plan.md)
 - [Reconstruction baseline](docs/methodology/reconstruction-baseline.md)
 - [Seeded extension baseline](docs/methodology/seeded-extension.md)
