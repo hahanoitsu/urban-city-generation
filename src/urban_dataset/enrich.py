@@ -8,6 +8,7 @@ import pandas as pd
 from .classify import DEFAULT_WIDTH_BY_HIGHWAY_M
 from .config import BuildConfig
 from .extract import CityLayers
+from .vertical import vertical_mode_name
 
 _NUMBER_PATTERN = r"([-+]?\d+(?:[.,]\d+)?)"
 
@@ -55,6 +56,14 @@ def enrich_roads(roads: gpd.GeoDataFrame, config: BuildConfig) -> gpd.GeoDataFra
         lower=config.roads.minimum_width_m,
         upper=config.roads.maximum_width_m,
     ).astype(float)
+    return result
+
+
+def enrich_vertical_modes(frame: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    if frame.empty:
+        return frame.copy()
+    result = frame.copy()
+    result["vertical_mode"] = result.apply(vertical_mode_name, axis=1)
     return result
 
 
@@ -107,6 +116,7 @@ def enrich_buildings(buildings: gpd.GeoDataFrame, config: BuildConfig) -> gpd.Ge
 def enrich_layers(layers: CityLayers, config: BuildConfig) -> CityLayers:
     return replace(
         layers,
-        roads=enrich_roads(layers.roads, config),
+        roads=enrich_vertical_modes(enrich_roads(layers.roads, config)),
+        rail=enrich_vertical_modes(layers.rail),
         buildings=enrich_buildings(layers.buildings, config),
     )

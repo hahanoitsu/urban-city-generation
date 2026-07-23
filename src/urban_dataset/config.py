@@ -11,6 +11,13 @@ class ConfigError(ValueError):
     pass
 
 
+def _config_root(config_path: Path) -> Path:
+    for parent in config_path.parents:
+        if parent.name == "configs":
+            return parent.parent
+    return config_path.parent
+
+
 @dataclass(frozen=True)
 class ProjectConfig:
     city_id: str
@@ -37,6 +44,7 @@ class OutputConfig:
     overwrite: bool = False
     save_extracted_gpkg: bool = True
     save_tile_vectors: bool = True
+    gpkg_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -163,11 +171,16 @@ def load_build_config(path: str | Path) -> BuildConfig:
 
     pbf_path = Path(_required(input_raw, "pbf_path", "input")).expanduser()
     if not pbf_path.is_absolute():
-        pbf_path = (config_path.parent.parent / pbf_path).resolve()
+        pbf_path = (_config_root(config_path) / pbf_path).resolve()
 
     output_root = Path(_required(output_raw, "root", "output")).expanduser()
     if not output_root.is_absolute():
-        output_root = (config_path.parent.parent / output_root).resolve()
+        output_root = (_config_root(config_path) / output_root).resolve()
+    gpkg_path = None
+    if output_raw.get("gpkg_path") is not None:
+        gpkg_path = Path(output_raw["gpkg_path"]).expanduser()
+        if not gpkg_path.is_absolute():
+            gpkg_path = (_config_root(config_path) / gpkg_path).resolve()
 
     return BuildConfig(
         project=project,
@@ -186,6 +199,7 @@ def load_build_config(path: str | Path) -> BuildConfig:
             overwrite=bool(output_raw.get("overwrite", False)),
             save_extracted_gpkg=bool(output_raw.get("save_extracted_gpkg", True)),
             save_tile_vectors=bool(output_raw.get("save_tile_vectors", True)),
+            gpkg_path=gpkg_path,
         ),
         raster=RasterConfig(
             tile_size_m=tile_size,

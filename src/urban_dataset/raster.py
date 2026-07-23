@@ -13,6 +13,7 @@ from .config import BuildConfig
 from .extract import CityLayers
 from .schema import CHANNEL_NAMES
 from .tile import TileSpec
+from .vertical import VERTICAL_MODE_NAMES, VerticalMode, classify_vertical_mode
 
 
 @dataclass
@@ -22,6 +23,11 @@ class RasterResult:
     landuse_known_mask: np.ndarray
     road_centerlines: np.ndarray
     valid_data_mask: np.ndarray
+    road_vertical_masks: np.ndarray
+    rail_vertical_masks: np.ndarray
+    surface_transport_reservation: np.ndarray
+    buildable_surface_mask: np.ndarray
+    buildability_known_mask: np.ndarray
     transform: tuple[float, ...]
     building_heights_m: list[float]
     height_confidence_counts: dict[int, int]
@@ -83,6 +89,34 @@ def _select(frame: gpd.GeoDataFrame, column: str, value: str) -> gpd.GeoDataFram
     return frame[frame[column] == value].copy()
 
 
+def _vertical_subset(frame: gpd.GeoDataFrame, mode: VerticalMode) -> gpd.GeoDataFrame:
+    if frame.empty:
+        return frame.copy()
+    modes = frame.apply(classify_vertical_mode, axis=1)
+    return frame[modes == mode].copy()
+
+
+def _road_widths(frame: gpd.GeoDataFrame, config: BuildConfig) -> list[float]:
+    if frame.empty:
+        return []
+    if "estimated_width_m" in frame.columns:
+        return [float(value) for value in frame["estimated_width_m"]]
+    road_classes = frame.get("road_class")
+    if road_classes is None:
+        return [float(config.roads.widths_m["local"])] * len(frame)
+    return [
+        float(config.roads.widths_m.get(str(road_class), config.roads.widths_m["local"]))
+        for road_class in road_classes
+    ]
+
+
+def _road_buffers(frame: gpd.GeoDataFrame, config: BuildConfig) -> list[BaseGeometry]:
+    return [
+        geometry.buffer(width / 2.0, cap_style="flat", join_style="round")
+        for geometry, width in zip(frame.geometry, _road_widths(frame, config), strict=True)
+    ]
+
+
 def _disjoint_priority(raw_masks: dict[str, np.ndarray], priority: list[str]) -> dict[str, np.ndarray]:
     occupied = np.zeros_like(next(iter(raw_masks.values())), dtype=bool)
     result: dict[str, np.ndarray] = {}
@@ -122,20 +156,25 @@ def rasterize_tile(
         all_touched=config.raster.all_touched,
     )
 
+    road_vertical_masks = np.zeros(
+        (len(VERTICAL_MODE_NAMES), pixels, pixels), dtype=np.float32
+    )
+    for mode in VerticalMode:
+        selected = _vertical_subset(city.roads, mode)
+        road_vertical_masks[int(mode)] = _burn(
+            _road_buffers(selected, config),
+            pixels=pixels,
+            transform=transform,
+            all_touched=config.roads.surface_all_touched,
+        )
+
     road_surfaces: dict[str, np.ndarray] = {}
     road_centers: dict[str, np.ndarray] = {}
     for road_class in ["major", "secondary", "local"]:
         selected = _select(city.roads, "road_class", road_class)
-        if "estimated_width_m" in selected.columns:
-            widths = [float(value) for value in selected["estimated_width_m"]]
-        else:
-            widths = [float(config.roads.widths_m[road_class])] * len(selected)
-        buffers = [
-            geometry.buffer(width / 2.0, cap_style="flat", join_style="round")
-            for geometry, width in zip(selected.geometry, widths, strict=True)
-        ]
+        selected = _vertical_subset(selected, VerticalMode.SURFACE)
         road_surfaces[road_class] = _burn(
-            buffers,
+            _road_buffers(selected, config),
             pixels=pixels,
             transform=transform,
             all_touched=config.roads.surface_all_touched,
@@ -147,7 +186,7 @@ def rasterize_tile(
             all_touched=True,
         )
 
-    # A pixel has one road hierarchy target. Higher-order roads win at junctions.
+    # A surface pixel has one road hierarchy target. Higher-order roads win at junctions.
     roads_disjoint = _disjoint_priority(
         road_surfaces, ["major", "secondary", "local"]
     )
@@ -191,7 +230,6 @@ def rasterize_tile(
     arrays[6] = landuse_disjoint["industrial"]
     arrays[7] = landuse_disjoint["green"]
     arrays[10] = landuse_disjoint["civic"]
-    # Water is not simultaneously a land-use target.
     arrays[[4, 5, 6, 7, 10]] *= (arrays[0] <= 0)[None, :, :]
 
     known_landuse = _polygon_only(city.landuse_known)
@@ -235,21 +273,47 @@ def rasterize_tile(
         dtype="uint8",
     ).astype(np.uint8)
 
-    rail_mask = np.zeros((pixels, pixels), dtype=np.float32)
-    if not city.rail.empty:
-        rail_buffers = city.rail.geometry.buffer(3.0, cap_style="flat")
-        rail_mask = _burn(
+    rail_vertical_masks = np.zeros(
+        (len(VERTICAL_MODE_NAMES), pixels, pixels), dtype=np.float32
+    )
+    for mode in VerticalMode:
+        selected = _vertical_subset(city.rail, mode)
+        rail_buffers = selected.geometry.buffer(3.0, cap_style="flat")
+        rail_vertical_masks[int(mode)] = _burn(
             rail_buffers,
             pixels=pixels,
             transform=transform,
             all_touched=False,
         )
-    arrays[11] = rail_mask
+    arrays[11] = rail_vertical_masks[int(VerticalMode.SURFACE)]
+
+    surface_transport_reservation = np.maximum(
+        road_vertical_masks[int(VerticalMode.SURFACE)],
+        rail_vertical_masks[int(VerticalMode.SURFACE)],
+    ).astype(np.uint8)
+    unknown_transport = np.maximum(
+        road_vertical_masks[int(VerticalMode.UNKNOWN)],
+        rail_vertical_masks[int(VerticalMode.UNKNOWN)],
+    )
+    buildability_known_mask = (
+        (valid_data_mask > 0) & (unknown_transport <= 0)
+    ).astype(np.uint8)
+    buildable_surface_mask = (
+        (valid_data_mask > 0)
+        & (arrays[0] <= 0)
+        & (surface_transport_reservation <= 0)
+    ).astype(np.uint8)
+    buildable_surface_mask *= buildability_known_mask
 
     arrays *= valid_data_mask[None, :, :]
     height_confidence *= valid_data_mask
     landuse_known_mask *= valid_data_mask
     road_centerlines *= valid_data_mask[None, :, :]
+    road_vertical_masks *= valid_data_mask[None, :, :]
+    rail_vertical_masks *= valid_data_mask[None, :, :]
+    surface_transport_reservation *= valid_data_mask
+    buildable_surface_mask *= valid_data_mask
+    buildability_known_mask *= valid_data_mask
 
     counts = {level: sum(value == level for value in confidence_values) for level in range(4)}
     return RasterResult(
@@ -258,6 +322,11 @@ def rasterize_tile(
         landuse_known_mask=landuse_known_mask,
         road_centerlines=road_centerlines,
         valid_data_mask=valid_data_mask,
+        road_vertical_masks=np.clip(road_vertical_masks, 0.0, 1.0).astype(np.uint8),
+        rail_vertical_masks=np.clip(rail_vertical_masks, 0.0, 1.0).astype(np.uint8),
+        surface_transport_reservation=surface_transport_reservation.astype(np.uint8),
+        buildable_surface_mask=buildable_surface_mask.astype(np.uint8),
+        buildability_known_mask=buildability_known_mask.astype(np.uint8),
         transform=tuple(transform)[:6],
         building_heights_m=absolute_heights,
         height_confidence_counts=counts,
