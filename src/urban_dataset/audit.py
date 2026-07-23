@@ -13,9 +13,12 @@ from .utils import write_json
 
 def audit_dataset(dataset_root: str | Path, output: str | Path | None = None) -> dict:
     root = Path(dataset_root).expanduser().resolve()
-    tile_dirs = sorted(path.parent for path in root.glob("tiles/*/layers.npz"))
+    archives = list(root.glob("tiles/*/layers.npz"))
+    if not archives:
+        archives = list(root.glob("*/tiles/*/layers.npz"))
+    tile_dirs = sorted(path.parent for path in archives)
     if not tile_dirs:
-        raise FileNotFoundError(f"No tile archives found below {root / 'tiles'}")
+        raise FileNotFoundError(f"No tile archives found below {root}")
 
     pixel_sum = np.zeros(len(CHANNEL_NAMES), dtype=np.float64)
     positive_sum = np.zeros(len(CHANNEL_NAMES), dtype=np.float64)
@@ -171,9 +174,12 @@ def create_preview_atlas(
     thumbnail_size: int = 192,
 ) -> Path:
     root = Path(dataset_root).expanduser().resolve()
-    previews = sorted(root.glob("tiles/*/preview.png"))[:limit]
+    previews = list(root.glob("tiles/*/preview.png"))
     if not previews:
-        raise FileNotFoundError(f"No preview images found below {root / 'tiles'}")
+        previews = list(root.glob("*/tiles/*/preview.png"))
+    previews = sorted(previews)[:limit]
+    if not previews:
+        raise FileNotFoundError(f"No preview images found below {root}")
     columns = max(1, columns)
     rows = (len(previews) + columns - 1) // columns
     label_height = 28

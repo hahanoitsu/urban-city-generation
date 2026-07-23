@@ -63,6 +63,16 @@ class UrbanTileDataset:
                 result["valid_data_mask"] = torch.from_numpy(
                     archive["valid_data_mask"].astype(np.float32)
                 )
+                optional = {
+                    "road_vertical_masks": np.float32,
+                    "rail_vertical_masks": np.float32,
+                    "surface_transport_reservation": np.float32,
+                    "buildable_surface_mask": np.float32,
+                    "buildability_known_mask": np.float32,
+                }
+                for name, dtype in optional.items():
+                    if name in archive:
+                        result[name] = torch.from_numpy(archive[name].astype(dtype))
         if self.transform is not None:
             result = self.transform(result)
         return result

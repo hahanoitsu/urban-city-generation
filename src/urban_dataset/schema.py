@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-DATASET_VERSION = "0.2.0"
+DATASET_VERSION = "0.3.0"
 
 CHANNEL_NAMES: tuple[str, ...] = (
     "water",
-    "road_major",
-    "road_secondary",
-    "road_local",
+    "road_major_surface",
+    "road_secondary_surface",
+    "road_local_surface",
     "landuse_residential",
     "landuse_commercial_mixed",
     "landuse_industrial",
@@ -14,7 +14,7 @@ CHANNEL_NAMES: tuple[str, ...] = (
     "building_footprint",
     "building_height_normalized",
     "landuse_civic",
-    "rail_transit",
+    "rail_surface",
 )
 
 ROAD_CHANNELS: tuple[int, int, int] = (1, 2, 3)
@@ -26,4 +26,11 @@ HEIGHT_CONFIDENCE_LABELS: tuple[str, ...] = (
     "local_context",
     "levels_derived",
     "explicit_metres",
+)
+
+VERTICAL_MODE_NAMES: tuple[str, ...] = (
+    "surface",
+    "underground",
+    "elevated",
+    "unknown",
 )
