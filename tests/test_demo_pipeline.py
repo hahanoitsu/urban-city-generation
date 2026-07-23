@@ -33,6 +33,9 @@ def test_demo_pipeline(tmp_path):
     city = json.loads((tile / "city.json").read_text())
     assert city["roads"]
     assert "estimated_width_m" in city["roads"][0]["properties"]
+    assert city["roads"][0]["properties"]["vertical_mode"] == "surface"
+    assert city["rail"]
+    assert city["rail"][0]["properties"]["vertical_mode"] == "surface"
     assert city["buildings"]
     assert "estimated_height_m" in city["buildings"][0]["properties"]
     assert "height_confidence" in city["buildings"][0]["properties"]
