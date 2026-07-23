@@ -13,24 +13,30 @@ LANDUSE_SOURCE_CHANNELS = (4, 5, 6, 7, 10)
 BINARY_SOURCE_CHANNELS = (0, 8, 11)
 HEIGHT_SOURCE_CHANNEL = 9
 DIRECTIONS = ("east", "west", "north", "south")
+_AUXILIARY_SPATIAL_KEYS = (
+    "height_confidence",
+    "landuse_known_mask",
+    "road_centerlines",
+    "valid_data_mask",
+    "road_vertical_masks",
+    "rail_vertical_masks",
+    "surface_transport_reservation",
+    "buildable_surface_mask",
+    "buildability_known_mask",
+)
 
 
 class RandomOrientation:
     def __call__(self, sample: dict[str, Any]) -> dict[str, Any]:
         turns = int(torch.randint(0, 4, ()).item())
-        keys = [
-            "x",
-            "height_confidence",
-            "landuse_known_mask",
-            "road_centerlines",
-            "valid_data_mask",
-        ]
         if turns:
-            for key in keys:
-                sample[key] = torch.rot90(sample[key], turns, dims=(-2, -1))
+            for key in ("x", *_AUXILIARY_SPATIAL_KEYS):
+                if key in sample:
+                    sample[key] = torch.rot90(sample[key], turns, dims=(-2, -1))
         if bool(torch.rand(()) < 0.5):
-            for key in keys:
-                sample[key] = torch.flip(sample[key], dims=(-1,))
+            for key in ("x", *_AUXILIARY_SPATIAL_KEYS):
+                if key in sample:
+                    sample[key] = torch.flip(sample[key], dims=(-1,))
         return sample
 
 
@@ -65,7 +71,7 @@ class ReconstructionDataset(Dataset):
         if layers.shape[0] != 12:
             raise ValueError(f"Expected 12 channels, found {layers.shape[0]}")
 
-        return {
+        result = {
             "input": layers,
             **_targets(layers),
             "centerline_target": sample["road_centerlines"],
@@ -74,6 +80,10 @@ class ReconstructionDataset(Dataset):
             "valid_mask": sample["valid_data_mask"],
             "tile_id": sample["tile_id"],
         }
+        for key in _AUXILIARY_SPATIAL_KEYS[4:]:
+            if key in sample:
+                result[key] = sample[key]
+        return result
 
 
 def _grid_key(row: dict[str, Any], column: int, grid_row: int) -> tuple[str, str, int, int]:
@@ -105,14 +115,9 @@ def _rotate_sample(sample: dict[str, Any], turns: int) -> dict[str, Any]:
     if not turns:
         return sample
     result = dict(sample)
-    for key in [
-        "x",
-        "height_confidence",
-        "landuse_known_mask",
-        "road_centerlines",
-        "valid_data_mask",
-    ]:
-        result[key] = torch.rot90(sample[key], turns, dims=(-2, -1))
+    for key in ("x", *_AUXILIARY_SPATIAL_KEYS):
+        if key in sample:
+            result[key] = torch.rot90(sample[key], turns, dims=(-2, -1))
     return result
 
 
@@ -133,6 +138,12 @@ def make_boundary_guide(
     crossings = centerlines[:, :, -boundary_width:].amax(dim=-1) > 0.5
     guide[:, :, width : width + guide_length] = crossings.unsqueeze(-1).to(guide.dtype)
     return guide
+
+
+def _concat_optional(seed: dict[str, Any], target: dict[str, Any], key: str):
+    if key not in seed or key not in target:
+        return None
+    return torch.cat([seed[key], target[key]], dim=-1)
 
 
 class ExtensionDataset(Dataset):
@@ -210,6 +221,12 @@ class ExtensionDataset(Dataset):
         valid_mask = torch.zeros((height, width * 2), dtype=seed_layers.dtype)
         valid_mask[:, width:] = target["valid_data_mask"]
 
+        optional = {
+            key: _concat_optional(seed, target, key)
+            for key in _AUXILIARY_SPATIAL_KEYS[4:]
+        }
+        optional = {key: value for key, value in optional.items() if value is not None}
+
         if self.augment and bool(torch.rand(()) < 0.5):
             full_layers = torch.flip(full_layers, dims=(-2,))
             known_mask = torch.flip(known_mask, dims=(-2,))
@@ -219,6 +236,9 @@ class ExtensionDataset(Dataset):
             landuse_known = torch.flip(landuse_known, dims=(-2,))
             centerline_target = torch.flip(centerline_target, dims=(-2,))
             valid_mask = torch.flip(valid_mask, dims=(-2,))
+            optional = {
+                key: torch.flip(value, dims=(-2,)) for key, value in optional.items()
+            }
 
         return {
             "input": torch.cat([known_layers, known_mask, guide], dim=0),
@@ -236,6 +256,7 @@ class ExtensionDataset(Dataset):
             "seed_tile_id": seed["tile_id"],
             "target_tile_id": target["tile_id"],
             "direction": direction,
+            **optional,
         }
 
 
