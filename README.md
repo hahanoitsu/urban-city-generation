@@ -36,8 +36,17 @@ python -m urban_dataset compile-city-state \
   --output data/processed/world-corpus/city-state-index.json
 ```
 
+Export one tile as a visible OBJ prototype:
+
+```bash
+python -m urban_dataset export-obj \
+  --state data/demo/tiles/<tile-id>/city.json \
+  --output runs/demo-city.obj
+```
+
 Each tile `city.json` contains an attributed road/rail graph, boundary continuation ports,
-vertical transport state and building footprint extrusions. The initial Z values are explicit
+vertical transport state and building footprint extrusions. The OBJ compiler turns those
+records into simple building solids and transport ribbons. The initial Z values are explicit
 procedural defaults, not claimed tunnel depths or bridge elevations.
 
 The target generation workflow is:
