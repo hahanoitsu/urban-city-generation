@@ -1,0 +1,56 @@
+output_root: data/processed/world-corpus
+manifest_root: data/manifests/world-corpus
+overwrite: false
+save_tile_vectors: true
+seed: 5132
+spatial_group_tiles: 4
+
+split_ratios:
+  train: 0.85
+  validation: 0.15
+  test: 0.0
+
+tile:
+  size_m: 1024
+  stride_m: 1024
+  pixels: 256
+  max_height_m: 220
+  include_partial_tiles: false
+
+quality:
+  minimum_buildings: 1
+  minimum_road_length_m: 50
+  minimum_nonempty_fraction: 0.001
+  minimum_valid_fraction: 0.95
+  reject_water_fraction_above: 0.95
+
+atlas:
+  columns: 6
+  limit: 180
+
+# Build each GeoPackage first with `prepare-city`. The corpus loader handles each
+# city's own projected CRS and stores city_id/area_id in every manifest row. A city
+# marked `test` is kept entirely outside training for geographic generalisation.
+cities:
+  - id: singapore
+    gpkg: data/prepared/singapore.gpkg
+    split: auto
+    areas:
+      - id: central
+        bbox_wgs84: [103.80, 1.25, 103.90, 1.35]
+      - id: west
+        bbox_wgs84: [103.68, 1.28, 103.78, 1.38]
+
+  - id: tokyo
+    gpkg: data/prepared/tokyo.gpkg
+    split: auto
+    areas:
+      - id: central
+        bbox_wgs84: [139.70, 35.64, 139.80, 35.74]
+
+  - id: barcelona
+    gpkg: data/prepared/barcelona.gpkg
+    split: test
+    areas:
+      - id: central
+        bbox_wgs84: [2.10, 41.34, 2.22, 41.44]
