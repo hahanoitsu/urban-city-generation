@@ -14,7 +14,7 @@ from .semantic_config import SEMANTIC_NAMES, SemanticDiffusionConfig
 
 
 def layers_to_semantic(layers: torch.Tensor) -> torch.Tensor:
-    """Convert the twelve-channel project tensor to CityGen-style categorical labels."""
+    """Convert the twelve surface channels to CityGen-style categorical labels."""
     if layers.shape[-3] != 12:
         raise ValueError("Expected twelve city channels")
     output_shape = layers.shape[:-3] + layers.shape[-2:]
@@ -27,7 +27,8 @@ def layers_to_semantic(layers: torch.Tensor) -> torch.Tensor:
     road = layers[..., (1, 2, 3), :, :].amax(dim=-3) > threshold
     rail = layers[..., 11, :, :] > threshold
 
-    # Later assignments have priority. Roads and rail remain visible over bridges.
+    # Confirmed surface transport has priority at same-level occupancy conflicts.
+    # Underground and elevated transport remain in separate auxiliary arrays.
     classes = torch.where(vegetation, 1, classes)
     classes = torch.where(water, 5, classes)
     classes = torch.where(building, 2, classes)
@@ -40,7 +41,7 @@ def semantic_to_model_space(
     classes: torch.Tensor,
     class_count: int = len(SEMANTIC_NAMES),
 ) -> torch.Tensor:
-    one_hot = F.one_hot(classes.long(), num_classes=class_count).movedim(-1, -3).float()
+    one_hot = torch.nn.functional.one_hot(classes.long(), num_classes=class_count).movedim(-1, -3).float()
     return one_hot.mul(2.0).sub(1.0)
 
 
