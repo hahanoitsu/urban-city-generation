@@ -16,6 +16,7 @@ from .semantic_diffusion import (
     sample_outpainting_from_checkpoint,
     train_semantic_diffusion,
 )
+from .semantic_topology import evaluate_semantic_topology
 from .train import train
 
 
@@ -59,6 +60,26 @@ def _parser() -> argparse.ArgumentParser:
     semantic_check.add_argument("--config", required=True, type=Path)
     semantic_check.add_argument("--samples-per-split", type=int, default=4)
 
+    semantic_topology = commands.add_parser(
+        "evaluate-semantic-topology",
+        help="Compare real semantic crops with generated layouts",
+    )
+    semantic_topology.add_argument("--config", required=True, type=Path)
+    semantic_topology.add_argument(
+        "--generated",
+        required=True,
+        action="append",
+        type=Path,
+        help="Generated semantic-blocks.npy file or its containing directory",
+    )
+    semantic_topology.add_argument("--output", required=True, type=Path)
+    semantic_topology.add_argument(
+        "--split",
+        choices=["train", "validation"],
+        default="train",
+    )
+    semantic_topology.add_argument("--max-real-samples", type=int, default=1000)
+
     semantic_train = commands.add_parser(
         "train-semantic",
         help="Train CityGen-style semantic diffusion",
@@ -101,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command in {
             "check-semantic-data",
+            "evaluate-semantic-topology",
             "train-semantic",
             "sample-semantic-blocks",
             "sample-semantic-outpainting",
@@ -110,6 +132,14 @@ def main(argv: list[str] | None = None) -> int:
                 result = check_semantic_data(
                     config,
                     samples_per_split=args.samples_per_split,
+                )
+            elif args.command == "evaluate-semantic-topology":
+                result = evaluate_semantic_topology(
+                    config,
+                    args.generated,
+                    args.output,
+                    split=args.split,
+                    max_real_samples=args.max_real_samples,
                 )
             elif args.command == "train-semantic":
                 result = train_semantic_diffusion(
