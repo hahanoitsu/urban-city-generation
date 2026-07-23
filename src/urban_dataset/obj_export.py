@@ -75,7 +75,7 @@ class _ObjMesh:
         rings = [polygon.exterior, *polygon.interiors]
         for ring in rings:
             coordinates = list(ring.coords)
-            for start, end in zip(coordinates, coordinates[1:], strict=True):
+            for start, end in zip(coordinates, coordinates[1:]):
                 self.face(
                     group,
                     material,
