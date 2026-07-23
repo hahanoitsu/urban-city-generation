@@ -11,6 +11,7 @@ from .config import load_build_config
 from .corpus import build_corpus, load_corpus_config
 from .demo import run_demo
 from .manifests import build_manifests
+from .obj_export import export_city_state_obj
 from .pipeline import run_build
 from .prepared import prepare_city
 
@@ -61,6 +62,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     bundle.add_argument("--dataset", required=True, type=Path)
     bundle.add_argument("--output", required=True, type=Path)
+
+    obj = subparsers.add_parser(
+        "export-obj",
+        help="Compile one tile city state into a visible OBJ prototype",
+    )
+    obj.add_argument("--state", required=True, type=Path)
+    obj.add_argument("--output", required=True, type=Path)
     return parser
 
 
@@ -90,6 +98,8 @@ def main(argv: list[str] | None = None) -> int:
             result = {"atlas": str(path)}
         elif args.command == "compile-city-state":
             result = compile_city_state_bundle(args.dataset, args.output)
+        elif args.command == "export-obj":
+            result = export_city_state_obj(args.state, args.output)
         else:
             raise AssertionError(f"Unhandled command: {args.command}")
     except Exception as exc:
