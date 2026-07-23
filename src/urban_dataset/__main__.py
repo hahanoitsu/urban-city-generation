@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .audit import audit_dataset, create_preview_atlas
+from .bundle import compile_city_state_bundle
 from .config import load_build_config
 from .corpus import build_corpus, load_corpus_config
 from .demo import run_demo
@@ -53,6 +54,13 @@ def _parser() -> argparse.ArgumentParser:
     atlas.add_argument("--columns", type=int, default=6)
     atlas.add_argument("--limit", type=int, default=120)
     atlas.add_argument("--thumbnail-size", type=int, default=192)
+
+    bundle = subparsers.add_parser(
+        "compile-city-state",
+        help="Index graph and building tile states for a multi-city 3D/PCG importer",
+    )
+    bundle.add_argument("--dataset", required=True, type=Path)
+    bundle.add_argument("--output", required=True, type=Path)
     return parser
 
 
@@ -80,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
                 thumbnail_size=args.thumbnail_size,
             )
             result = {"atlas": str(path)}
+        elif args.command == "compile-city-state":
+            result = compile_city_state_bundle(args.dataset, args.output)
         else:
             raise AssertionError(f"Unhandled command: {args.command}")
     except Exception as exc:
