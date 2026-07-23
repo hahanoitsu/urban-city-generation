@@ -31,6 +31,8 @@ def test_demo_pipeline(tmp_path):
     assert metadata["metres_per_pixel"] == 4.0
     assert metadata["vertical_modes"] == list(VERTICAL_MODE_NAMES)
     city = json.loads((tile / "city.json").read_text())
+    assert city["format"] == "urban-city-state-tile"
+    assert city["coordinate_system"]["axis_convention"] == "x-east, y-north, z-up"
     assert city["roads"]
     assert "estimated_width_m" in city["roads"][0]["properties"]
     assert city["roads"][0]["properties"]["vertical_mode"] == "surface"
@@ -39,4 +41,6 @@ def test_demo_pipeline(tmp_path):
     assert city["buildings"]
     assert "estimated_height_m" in city["buildings"][0]["properties"]
     assert "height_confidence" in city["buildings"][0]["properties"]
+    assert city["transport_graph"]["edges"]
+    assert city["building_solids"]
     assert (tile / "preview.png").exists()
