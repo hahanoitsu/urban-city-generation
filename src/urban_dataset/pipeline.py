@@ -18,7 +18,7 @@ from .prepared import save_city_gpkg
 from .preview import save_preview
 from .project import choose_metric_crs, project_and_clip_layers
 from .raster import rasterize_tile
-from .schema import CHANNEL_NAMES, DATASET_VERSION
+from .schema import CHANNEL_NAMES, DATASET_VERSION, VERTICAL_MODE_NAMES
 from .tile import clip_layers, iter_tile_specs
 from .utils import file_sha256, write_json
 from .validate import validate_tile
@@ -115,7 +115,13 @@ def _write_tiles(
             landuse_known_mask=raster.landuse_known_mask.astype(np.uint8),
             road_centerlines=raster.road_centerlines.astype(np.uint8),
             valid_data_mask=raster.valid_data_mask.astype(np.uint8),
+            road_vertical_masks=raster.road_vertical_masks.astype(np.uint8),
+            rail_vertical_masks=raster.rail_vertical_masks.astype(np.uint8),
+            surface_transport_reservation=raster.surface_transport_reservation.astype(np.uint8),
+            buildable_surface_mask=raster.buildable_surface_mask.astype(np.uint8),
+            buildability_known_mask=raster.buildability_known_mask.astype(np.uint8),
             channel_names=np.asarray(CHANNEL_NAMES),
+            vertical_mode_names=np.asarray(VERTICAL_MODE_NAMES),
             affine=np.asarray(raster.transform, dtype=np.float64),
         )
         save_preview(raster.layers, tile_dir / "preview.png")
@@ -143,6 +149,7 @@ def _write_tiles(
             "pixels": config.raster.pixels,
             "metres_per_pixel": config.raster.tile_size_m / config.raster.pixels,
             "channels": list(CHANNEL_NAMES),
+            "vertical_modes": list(VERTICAL_MODE_NAMES),
             "height": {
                 "normalization_max_m": config.raster.max_height_m,
                 "confidence_levels": {
@@ -155,8 +162,13 @@ def _write_tiles(
             "auxiliary_arrays": {
                 "height_confidence": "uint8[H,W]",
                 "landuse_known_mask": "uint8[H,W]",
-                "road_centerlines": "uint8[3,H,W] in major/secondary/local order",
+                "road_centerlines": "uint8[3,H,W] surface major/secondary/local",
                 "valid_data_mask": "uint8[H,W]",
+                "road_vertical_masks": "uint8[4,H,W] surface/underground/elevated/unknown",
+                "rail_vertical_masks": "uint8[4,H,W] surface/underground/elevated/unknown",
+                "surface_transport_reservation": "uint8[H,W]",
+                "buildable_surface_mask": "uint8[H,W] excludes water and confirmed surface transport",
+                "buildability_known_mask": "uint8[H,W] excludes ambiguous transport vertical mode",
             },
             "quality": validation.metrics,
         }
@@ -193,6 +205,7 @@ def _write_tiles(
         "accepted_tiles": len(accepted_rows),
         "rejected_tiles": len(rejected_rows),
         "channels": list(CHANNEL_NAMES),
+        "vertical_modes": list(VERTICAL_MODE_NAMES),
         "source_file": source_file,
         "prepared_city": prepared_city,
         "config": raw_config,
