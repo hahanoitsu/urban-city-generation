@@ -1,16 +1,33 @@
 # Urban City Generation
 
-A JSON-first generative city project built from OpenStreetMap data. The intended output is a completely fictional city state containing connected transport graphs, vertical levels, blocks, parcels and buildings. Preview images and OBJ files are derived from that JSON; Unreal Engine PCG is the final renderer and asset assembler.
+A research pipeline for generating completely fictional urban layouts from real OpenStreetMap cities. The active model is a purpose-built 2D diffusion model. It generates surface, underground and elevated layers together, then converts them into structured JSON for Unreal Engine PCG.
 
 Current work is on `dev`. `main` remains stable.
 
-## Layout
+## Architecture
 
 ```text
-configs/            city, corpus and generator configuration
+OpenStreetMap cities
+  -> layered raster and vector corpus
+  -> multilayer 2D diffusion model
+  -> novel surface / underground / elevated layout
+  -> deterministic raster-to-graph conversion
+  -> generated city.json
+  -> Unreal Engine PCG
+```
+
+The neural model chooses the city layout. The conversion stage only translates generated masks into splines, widths, footprints and Z levels.
+
+The earlier autoregressive graph Transformer is retained as a failed research baseline. It generated valid command sequences but did not learn usable geometry from the small corpus.
+
+## Repository layout
+
+```text
+configs/            city, corpus and model configuration
 src/urban_dataset/  OSM preparation and deterministic geometry
-src/urban_ai/       graph-program dataset, model and sampling
-tests/              automated checks
+src/urban_model/    active multilayer diffusion model
+src/urban_ai/       earlier graph-program experiment
+Tests/              automated checks
 docs/               format and architecture notes
 data/               local source and processed data, ignored by Git
 runs/               checkpoints and generated cities, ignored by Git
@@ -25,14 +42,13 @@ git switch dev
 
 conda env create -f environment.yml
 conda activate urban-city
-python -m pip install -e .
-pytest -q
+python -m pip install -e '.[diffusion]'
 ```
 
-The geometry pipeline does not require PyTorch. On a training machine with PyTorch installed:
+The geometry pipeline can still be installed without PyTorch:
 
 ```bash
-python -m pip install -e '.[ml]'
+python -m pip install -e .
 ```
 
 ## Build the city corpus
@@ -49,86 +65,125 @@ Then run:
 python -m urban_dataset build-corpus --config configs/corpus.yaml
 ```
 
-Each accepted tile contains raster inspection arrays and an authoritative vector `city.json`. The JSON records road and rail connectivity, hierarchy, width, surface/underground/elevated mode, buildings, land use, water and green space.
+Each accepted tile stores the original twelve surface channels plus independent road and rail masks for:
 
-## Prepare the AI dataset
-
-The model does not learn from coloured road pixels or raw JSON text. Each `city.json` graph is converted into a compact sequence of structured graph commands.
-
-```bash
-python -m urban_ai prepare --config configs/generator.yaml --overwrite
-python -m urban_ai check --config configs/generator.yaml
+```text
+surface
+underground
+elevated
+unknown
 ```
 
-The commands are:
+It also stores an authoritative real `city.json` used for data checking and Unreal-format development.
 
-- `root`: start a transport component;
-- `add`: create a node connected to an existing node;
-- `connect`: close a loop between existing nodes.
+## Model output
 
-Edge commands include transport type, road or rail class, width and vertical level. This makes connectivity part of the representation rather than a property inferred from touching pixels.
+The diffusion model generates thirteen channels at once.
 
-## Check the representation before training
+Surface is one categorical map:
 
-Convert one real tile to the graph program and back:
-
-```bash
-STATE=$(find data/processed/corpus -name city.json | head -n 1)
-python -m urban_ai roundtrip --state "$STATE" --output runs/roundtrip
+```text
+terrain
+vegetation
+building
+major road
+secondary road
+local road
+surface rail
+water
 ```
 
-This writes `program.json`, reconstructed `city.json`, `preview.png` and `city.obj`.
+Additional overlapping channels preserve the third dimension:
 
-## Train the complete-city graph model
+```text
+underground roads
+elevated roads
+underground rail
+elevated rail
+building height
+```
 
-A one-epoch CUDA smoke test:
+Because vertical layers are separate, an underground railway may pass beneath a building or surface road without either feature being erased.
+
+## Check the training tensors
 
 ```bash
-python -m urban_ai train \
-  --config configs/generator.yaml \
+python -m urban_model check --config configs/layered.yaml
+```
+
+This verifies the manifests, crop count, tensor shape and channel coverage. Crops containing underground or elevated transport are repeated during training so the sparse vertical layers are not ignored.
+
+## Train
+
+Run a one-epoch CUDA smoke test first:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python -m urban_model train \
+  --config configs/layered.yaml \
   --epochs 1 \
   --overwrite
 ```
 
-The first model is a decoder-only Transformer. It starts from a blank site and a morphology vector, then generates a complete fictional transport graph command by command. It is not given a real tile to continue.
+The model writes checkpoints, losses and generated previews to:
 
-## Generate fictional cities
+```text
+runs/layered/
+```
+
+A real run can then start cleanly:
 
 ```bash
-python -m urban_ai sample \
-  --config configs/generator.yaml \
-  --checkpoint runs/generator/best.pt \
-  --output runs/generated \
-  --count 4 \
-  --mix singapore=1.0 \
+CUDA_VISIBLE_DEVICES=0 \
+python -m urban_model train \
+  --config configs/layered.yaml \
+  --epochs 100 \
   --overwrite
 ```
 
-Each sample contains:
+The training loop uses BF16, a cosine diffusion schedule, weighted vertical-channel loss and an EMA with warm-up. Early stopping uses validation loss rather than assuming that more epochs are always better.
+
+## Generate new cities
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python -m urban_model sample \
+  --config configs/layered.yaml \
+  --checkpoint runs/layered/best.pt \
+  --output runs/layered-samples \
+  --count 8 \
+  --overwrite
+```
+
+Every sample contains:
 
 ```text
-program.json   model command sequence
-city.json      generated structured city state
-preview.png    top-down inspection image
-city.obj       simple structural 3D preview
-city.mtl       OBJ materials
+layers.npz    generated multilayer tensor
+preview.png   surface, underground and elevated panels
+city.json     vector roads, rail, buildings, water and green space
+city.obj      simple structural 3D preview
+city.mtl      OBJ materials
 ```
 
-When more cities are added, style vectors can be mixed without using any source map as a seed:
+Road centre-lines are skeletonised from the generated masks. Surface hierarchy supplies standard widths; vertical-road width is estimated from the thickness generated by the model. The resulting JSON uses metres and `x-east, y-north, z-up`, with procedural defaults of `-12 m` underground and `+8 m` elevated.
 
-```bash
---mix singapore=0.6 --mix amsterdam=0.25 --mix kuala-lumpur=0.15
+## Unreal Engine path
+
+Unreal consumes the generated JSON rather than reading the preview image. The importer can map:
+
+```text
+transport edges -> road and rail splines
+width_m          -> spline cross-section width
+vertical_mode    -> surface, tunnel or elevated system
+building solids  -> PCG building volumes
+water and green  -> landscape and vegetation masks
 ```
 
-Individual morphology values can also be overridden, for example:
+The OBJ exporter is only a structural inspection tool. Unreal Engine PCG remains responsible for final roads, intersections, buildings, terrain, vegetation, traffic and rendering.
 
-```bash
---set building_coverage=0.35 --set elevated_fraction=0.08
-```
+## Deterministic source-scene compiler
 
-## Deterministic scene compiler
-
-The existing compiler can still stitch and inspect real source tiles:
+The existing compiler remains useful for checking real source data:
 
 ```bash
 python -m urban_dataset build-scene \
@@ -139,22 +194,4 @@ python -m urban_dataset build-scene \
   --output runs/central-scene-small
 ```
 
-It is used to validate the data representation and geometry code. It is not the generative model.
-
-## Architecture
-
-The current path is:
-
-```text
-OSM cities
-  -> layered city JSON
-  -> graph-program corpus
-  -> fictional transport graph Transformer
-  -> deterministic topology and geometry checks
-  -> blocks and parcels
-  -> buildings
-  -> generated city JSON
-  -> Unreal Engine PCG
-```
-
-The first model works at one neighbourhood scale. A later global planner will generate terrain, water, districts, density, major roads and rail for a larger city, while the local graph model fills coordinated regions. See `docs/architecture/json-generator.md`.
+It is a validation utility, not the generative model.
