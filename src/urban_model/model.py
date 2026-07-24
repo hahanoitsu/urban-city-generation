@@ -1,100 +1,160 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+from typing import Any
+
 import torch
 from torch import nn
-from torch.nn import functional as F
 
-from .config import ModelConfig
-
-
-def _groups(channels: int) -> int:
-    for value in (8, 4, 2):
-        if channels % value == 0:
-            return value
-    return 1
+from .config import LayeredDiffusionConfig
+from .data import MODEL_CHANNELS
 
 
-class ResidualBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, dropout: float = 0.0) -> None:
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False)
-        self.norm1 = nn.GroupNorm(_groups(out_channels), out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False)
-        self.norm2 = nn.GroupNorm(_groups(out_channels), out_channels)
-        self.dropout = nn.Dropout2d(dropout) if dropout else nn.Identity()
-        self.skip = (
-            nn.Identity()
-            if in_channels == out_channels
-            else nn.Conv2d(in_channels, out_channels, 1, bias=False)
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        residual = self.skip(x)
-        x = F.silu(self.norm1(self.conv1(x)))
-        x = self.dropout(x)
-        x = self.norm2(self.conv2(x))
-        return F.silu(x + residual)
+def _require_diffusers():
+    try:
+        from diffusers import DDIMScheduler, DDPMScheduler, UNet2DModel
+    except ImportError as exc:
+        raise RuntimeError(
+            "Install the project with the 'diffusion' extra to train or sample the layered model"
+        ) from exc
+    return UNet2DModel, DDPMScheduler, DDIMScheduler
 
 
-class DownStage(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, dropout: float) -> None:
-        super().__init__()
-        self.down = nn.Conv2d(in_channels, out_channels, 4, stride=2, padding=1, bias=False)
-        self.block = ResidualBlock(out_channels, out_channels, dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.block(self.down(x))
-
-
-class UpStage(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, dropout: float) -> None:
-        super().__init__()
-        self.reduce = nn.Conv2d(in_channels, out_channels, 1, bias=False)
-        self.block = ResidualBlock(out_channels, out_channels, dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
-        return self.block(self.reduce(x))
+def _block_types(config: LayeredDiffusionConfig) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    down = tuple(
+        "AttnDownBlock2D" if attention else "DownBlock2D"
+        for attention in config.attention_levels
+    )
+    up = tuple(
+        "AttnUpBlock2D" if attention else "UpBlock2D"
+        for attention in reversed(config.attention_levels)
+    )
+    return down, up
 
 
-class ReconstructionAutoencoder(nn.Module):
-    def __init__(self, config: ModelConfig) -> None:
-        super().__init__()
-        channels = [config.base_channels * value for value in config.channel_multipliers]
-        self.stem = ResidualBlock(config.input_channels, channels[0], config.dropout)
-        self.down = nn.ModuleList(
-            DownStage(channels[index], channels[index + 1], config.dropout)
-            for index in range(len(channels) - 1)
-        )
-        self.bottleneck = ResidualBlock(channels[-1], channels[-1], config.dropout)
-        self.up = nn.ModuleList(
-            UpStage(channels[index], channels[index - 1], config.dropout)
-            for index in range(len(channels) - 1, 0, -1)
-        )
-        output_channels = channels[0]
-        self.road_head = nn.Conv2d(output_channels, 4, 1)
-        self.landuse_head = nn.Conv2d(output_channels, 6, 1)
-        self.binary_head = nn.Conv2d(output_channels, 3, 1)
-        self.height_head = nn.Conv2d(output_channels, 1, 1)
-        self.centerline_head = nn.Conv2d(output_channels, 3, 1)
+def build_model(config: LayeredDiffusionConfig) -> nn.Module:
+    UNet2DModel, _, _ = _require_diffusers()
+    down, up = _block_types(config)
+    return UNet2DModel(
+        sample_size=config.resolution,
+        in_channels=MODEL_CHANNELS,
+        out_channels=MODEL_CHANNELS,
+        layers_per_block=config.layers_per_block,
+        block_out_channels=config.block_out_channels,
+        down_block_types=down,
+        up_block_types=up,
+        norm_num_groups=config.norm_num_groups,
+        add_attention=True,
+    )
 
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.stem(x)
-        for stage in self.down:
-            x = stage(x)
-        return self.bottleneck(x)
 
-    def decode(self, latent: torch.Tensor) -> dict[str, torch.Tensor]:
-        x = latent
-        for stage in self.up:
-            x = stage(x)
-        return {
-            "road_logits": self.road_head(x),
-            "landuse_logits": self.landuse_head(x),
-            "binary_logits": self.binary_head(x),
-            "height_logits": self.height_head(x),
-            "centerline_logits": self.centerline_head(x),
+def build_noise_scheduler(config: LayeredDiffusionConfig):
+    _, DDPMScheduler, _ = _require_diffusers()
+    return DDPMScheduler(
+        num_train_timesteps=config.diffusion_steps,
+        beta_schedule=config.beta_schedule,
+        prediction_type="epsilon",
+        clip_sample=True,
+    )
+
+
+def build_inference_scheduler(config: LayeredDiffusionConfig, noise_scheduler):
+    _, _, DDIMScheduler = _require_diffusers()
+    return DDIMScheduler.from_config(noise_scheduler.config)
+
+
+def autocast_context(config: LayeredDiffusionConfig, device: torch.device):
+    if device.type != "cuda" or config.precision == "fp32":
+        return nullcontext()
+    dtype = torch.float16 if config.precision == "fp16" else torch.bfloat16
+    return torch.autocast(device_type="cuda", dtype=dtype)
+
+
+def weighted_diffusion_loss(
+    prediction: torch.Tensor,
+    target_noise: torch.Tensor,
+    valid_mask: torch.Tensor,
+    channel_weights: tuple[float, ...],
+) -> torch.Tensor:
+    weights = prediction.new_tensor(channel_weights).reshape(1, -1, 1, 1)
+    mask = valid_mask.to(dtype=prediction.dtype)
+    squared = (prediction - target_noise).square() * weights * mask
+    denominator = (mask.sum() * weights.sum()).clamp_min(1.0)
+    return squared.sum() / denominator
+
+
+class ModelEMA:
+    """EMA with warm-up so early checkpoints are not mostly random weights."""
+
+    def __init__(self, model: nn.Module, decay: float) -> None:
+        self.decay = float(decay)
+        self.updates = 0
+        self.shadow = {
+            name: value.detach().clone()
+            for name, value in model.state_dict().items()
         }
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
-        return self.decode(self.encode(x))
+    @torch.no_grad()
+    def update(self, model: nn.Module) -> None:
+        self.updates += 1
+        warm_decay = (1.0 + self.updates) / (10.0 + self.updates)
+        decay = min(self.decay, warm_decay)
+        for name, value in model.state_dict().items():
+            source = value.detach()
+            if source.is_floating_point():
+                self.shadow[name].mul_(decay).add_(source, alpha=1.0 - decay)
+            else:
+                self.shadow[name].copy_(source)
+
+    def state_dict(self, *, cpu: bool = False) -> dict[str, Any]:
+        values = self.shadow
+        if cpu:
+            values = {name: value.detach().cpu() for name, value in values.items()}
+        return {"updates": self.updates, "shadow": values}
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        self.updates = int(state.get("updates", 0))
+        values = state.get("shadow", state)
+        for name, value in values.items():
+            self.shadow[name].copy_(value.to(self.shadow[name].device))
+
+    def copy_model(self, config: LayeredDiffusionConfig, device: torch.device) -> nn.Module:
+        model = build_model(config).to(device)
+        model.load_state_dict(self.shadow)
+        model.eval()
+        return model
+
+
+def _initial_noise(shape: tuple[int, ...], seed: int, device: torch.device) -> torch.Tensor:
+    generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    return torch.randn(shape, generator=generator, dtype=torch.float32).to(device)
+
+
+@torch.inference_mode()
+def sample_model(
+    model: nn.Module,
+    config: LayeredDiffusionConfig,
+    *,
+    batch_size: int,
+    device: torch.device,
+    seed: int,
+) -> torch.Tensor:
+    noise_scheduler = build_noise_scheduler(config)
+    scheduler = build_inference_scheduler(config, noise_scheduler)
+    scheduler.set_timesteps(config.inference_steps, device=device)
+    sample = _initial_noise(
+        (batch_size, MODEL_CHANNELS, *config.resolution),
+        seed,
+        device,
+    )
+    model.eval()
+    for timestep in scheduler.timesteps:
+        with autocast_context(config, device):
+            prediction = model(sample, timestep).sample
+        sample = scheduler.step(
+            prediction.float(),
+            timestep,
+            sample,
+            eta=0.0,
+        ).prev_sample
+    return sample.clamp(-1.0, 1.0)
