@@ -98,6 +98,33 @@ def _connect_candidates(
     return candidates
 
 
+def _add_parent_candidates(
+    node_components: list[int],
+    component_signatures: list[tuple[str, str, int]],
+    component_sizes: list[int],
+    *,
+    surface_road_edges: int,
+    minimum_surface_road_edges: int,
+) -> list[int]:
+    incomplete = {
+        component_id for component_id, size in enumerate(component_sizes) if size < 2
+    }
+    if incomplete:
+        return [
+            node_id
+            for node_id, component_id in enumerate(node_components)
+            if component_id in incomplete
+        ]
+    if surface_road_edges < minimum_surface_road_edges:
+        return [
+            node_id
+            for node_id, component_id in enumerate(node_components)
+            if component_signatures[component_id][0] == "road"
+            and component_signatures[component_id][1] == "surface"
+        ]
+    return list(range(len(node_components)))
+
+
 @torch.no_grad()
 def generate_program(
     model: GraphProgramTransformer,
@@ -155,35 +182,57 @@ def generate_program(
         edge_count = len(edge_pairs)
         surface_road_edges = sum(
             1
-            for left, right in edge_pairs
+            for left, _right in edge_pairs
             if component_signatures[node_components[left]][0] == "road"
             and component_signatures[node_components[left]][1] == "surface"
         )
-        complete_components = all(size >= 2 for size in component_sizes)
+        incomplete_components = {
+            component_id
+            for component_id, size in enumerate(component_sizes)
+            if size < 2
+        }
+        complete_components = not incomplete_components
         can_finish = (
             node_count >= minimum_nodes
             and edge_count >= minimum_edges
             and surface_road_edges >= minimum_surface_road_edges
             and complete_components
         )
-        if len(encoded) == maximum_commands - 1:
+        remaining_slots = maximum_commands - len(encoded)
+        nodes_needed = max(0, minimum_nodes - node_count)
+        must_grow = bool(incomplete_components) or nodes_needed >= remaining_slots - 1
+
+        if remaining_slots == 1:
             if not can_finish:
-                raise RuntimeError("Generation exhausted its command budget before the graph was complete")
+                raise RuntimeError(
+                    "Generation exhausted its command budget before the graph was complete: "
+                    f"nodes={node_count}/{minimum_nodes}, edges={edge_count}/{minimum_edges}, "
+                    f"surface_road_edges={surface_road_edges}/{minimum_surface_road_edges}, "
+                    f"incomplete_components={len(incomplete_components)}"
+                )
             op = OP_EOS
+        elif node_count == 0:
+            op = OP_ROOT
+        elif must_grow:
+            op = OP_ADD
         else:
             allowed_ops: list[int] = []
             if can_finish:
                 allowed_ops.append(OP_EOS)
+            root_nodes_after = node_count + 1
+            nodes_still_needed_after_root = max(0, minimum_nodes - root_nodes_after)
+            slots_needed_after_root = max(1, nodes_still_needed_after_root) + 1
             if (
                 component_count < maximum_components
-                and node_count < codec.maximum_nodes
+                and root_nodes_after < codec.maximum_nodes
                 and complete_components
                 and (component_count == 0 or surface_road_edges >= minimum_surface_road_edges)
+                and remaining_slots - 1 >= slots_needed_after_root
             ):
                 allowed_ops.append(OP_ROOT)
-            if node_count and node_count < codec.maximum_nodes:
+            if node_count < codec.maximum_nodes:
                 allowed_ops.append(OP_ADD)
-            if candidates:
+            if node_count >= minimum_nodes and candidates:
                 allowed_ops.append(OP_CONNECT)
             op = _sample(last["op"], allowed_ops, temperature=temperature, generator=generator)
 
@@ -238,9 +287,16 @@ def generate_program(
                 }
             )
         elif op == OP_ADD:
+            parents = _add_parent_candidates(
+                node_components,
+                component_signatures,
+                component_sizes,
+                surface_road_edges=surface_road_edges,
+                minimum_surface_road_edges=minimum_surface_road_edges,
+            )
             parent = _sample(
                 last["id1"],
-                list(range(len(node_components))),
+                parents,
                 temperature=temperature,
                 generator=generator,
             )
