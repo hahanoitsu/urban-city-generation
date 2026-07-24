@@ -23,5 +23,7 @@ jobs:
           pip install -e '.[dev]'
       - name: Test
         run: pytest -q --ignore=tests/model
+      - name: Compile
+        run: python -m compileall -q src
       - name: Lint
-        run: ruff check src/urban_dataset tests --exclude tests/model
+        run: ruff check src tests --exclude tests/model
