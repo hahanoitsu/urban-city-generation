@@ -34,6 +34,8 @@ from .model import (
 from .preview import render_triptych, save_sheet
 from .vectorize import generated_layers_to_city_state
 
+PREVIEW_SEED_OFFSET = 200_000
+
 
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,6 +93,10 @@ def _to_device(value: torch.Tensor, device: torch.device) -> torch.Tensor:
     return value.to(device, non_blocking=device.type == "cuda")
 
 
+def _preview_seed(config: LayeredDiffusionConfig) -> int:
+    return int(config.seed + PREVIEW_SEED_OFFSET)
+
+
 def _save_checkpoint(
     path: Path,
     *,
@@ -131,7 +137,7 @@ def _validation_loss(
     with torch.inference_mode():
         for batch in loader:
             x0 = _to_device(batch["x0"], device)
-            valid_mask = _to_device(batch["valid_mask"], device)
+            supervision = _to_device(batch["valid_mask"], device)
             timesteps = torch.randint(
                 0,
                 config.diffusion_steps,
@@ -151,7 +157,7 @@ def _validation_loss(
                 loss = weighted_diffusion_loss(
                     prediction,
                     noise,
-                    valid_mask,
+                    supervision,
                     config.channel_loss_weights,
                 )
             total += float(loss.detach())
@@ -232,6 +238,14 @@ def train_layered_diffusion(
 
     _write_json(output / "config.json", asdict(config))
     _write_json(output / "environment.json", _environment(device))
+    _write_json(
+        output / "preview.json",
+        {
+            "seed": _preview_seed(config),
+            "count": 4,
+            "note": "The same initial noise is used for every epoch preview.",
+        },
+    )
     metrics_path = output / "metrics.jsonl"
     started = time.time()
     patience = 0
@@ -244,7 +258,7 @@ def train_layered_diffusion(
         progress = tqdm(train_loader, desc=f"epoch {epoch}/{config.epochs}", leave=False)
         for batch in progress:
             x0 = _to_device(batch["x0"], device)
-            valid_mask = _to_device(batch["valid_mask"], device)
+            supervision = _to_device(batch["valid_mask"], device)
             timesteps = torch.randint(
                 0,
                 config.diffusion_steps,
@@ -260,7 +274,7 @@ def train_layered_diffusion(
                 loss = weighted_diffusion_loss(
                     prediction,
                     noise,
-                    valid_mask,
+                    supervision,
                     config.channel_loss_weights,
                 )
             scaler.scale(loss).backward()
@@ -325,7 +339,7 @@ def train_layered_diffusion(
                 config,
                 batch_size=4,
                 device=device,
-                seed=config.seed + epoch,
+                seed=_preview_seed(config),
             )
             save_sheet(generated, output / "previews" / f"epoch-{epoch:04d}.png")
             del generated, preview_model
@@ -345,6 +359,7 @@ def train_layered_diffusion(
         "validation_samples": len(validation_dataset),
         "layers": list(LAYER_NAMES),
         "parameters": sum(parameter.numel() for parameter in model.parameters()),
+        "preview_seed": _preview_seed(config),
     }
     _write_json(output / "summary.json", summary)
     return summary
@@ -409,7 +424,13 @@ def sample_layered_checkpoint(
         sample_dir = destination / f"sample-{index + 1:03d}"
         sample_dir.mkdir(parents=True, exist_ok=True)
         values = generated[index].detach().cpu()
-        decoded = model_space_to_layers(values)
+        decoded = model_space_to_layers(
+            values,
+            auxiliary_threshold=config.auxiliary_threshold,
+            max_surface_offset_m=config.max_surface_offset_m,
+            max_underground_depth_m=config.max_underground_depth_m,
+            max_elevated_height_m=config.max_elevated_height_m,
+        )
         np.savez_compressed(
             sample_dir / "layers.npz",
             model_values=values.numpy().astype(np.float32),
@@ -419,6 +440,12 @@ def sample_layered_checkpoint(
             rail_underground=decoded["rail_underground"].numpy().astype(np.uint8),
             rail_elevated=decoded["rail_elevated"].numpy().astype(np.uint8),
             building_height=decoded["building_height"].numpy().astype(np.float32),
+            road_surface_offset_m=decoded["road_surface_offset_m"].numpy().astype(np.float32),
+            road_underground_depth_m=decoded["road_underground_depth_m"].numpy().astype(np.float32),
+            road_elevated_height_m=decoded["road_elevated_height_m"].numpy().astype(np.float32),
+            rail_surface_offset_m=decoded["rail_surface_offset_m"].numpy().astype(np.float32),
+            rail_underground_depth_m=decoded["rail_underground_depth_m"].numpy().astype(np.float32),
+            rail_elevated_height_m=decoded["rail_elevated_height_m"].numpy().astype(np.float32),
             layer_names=np.asarray(LAYER_NAMES),
         )
         render_triptych(values).save(sample_dir / "preview.png", optimize=True)
