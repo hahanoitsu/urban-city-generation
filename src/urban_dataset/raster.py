@@ -14,6 +14,7 @@ from .extract import CityLayers
 from .schema import CHANNEL_NAMES
 from .tile import TileSpec
 from .vertical import VERTICAL_MODE_NAMES, VerticalMode, classify_vertical_mode
+from .vertical_profile import build_vertical_profiles
 
 
 @dataclass
@@ -25,6 +26,11 @@ class RasterResult:
     valid_data_mask: np.ndarray
     road_vertical_masks: np.ndarray
     rail_vertical_masks: np.ndarray
+    road_vertical_profiles_m: np.ndarray
+    rail_vertical_profiles_m: np.ndarray
+    road_vertical_profile_confidence: np.ndarray
+    rail_vertical_profile_confidence: np.ndarray
+    vertical_profile_evidence: dict[str, dict[str, int]]
     surface_transport_reservation: np.ndarray
     buildable_surface_mask: np.ndarray
     buildability_known_mask: np.ndarray
@@ -34,16 +40,11 @@ class RasterResult:
 
     @property
     def height_known_mask(self) -> np.ndarray:
-        """Compatibility view for older consumers."""
         return (self.height_confidence >= 2).astype(np.uint8)
 
     @property
     def observed_building_heights(self) -> int:
         return self.height_confidence_counts.get(2, 0) + self.height_confidence_counts.get(3, 0)
-
-
-def _valid_geometries(geometries: Iterable[BaseGeometry]) -> list[BaseGeometry]:
-    return [geometry for geometry in geometries if geometry is not None and not geometry.is_empty]
 
 
 def _burn(
@@ -58,13 +59,11 @@ def _burn(
     geometry_list = list(geometries)
     if values is not None and len(values) != len(geometry_list):
         raise ValueError("Raster values must match geometry count")
-
     pairs: list[tuple[BaseGeometry, float | int]] = []
     for index, geometry in enumerate(geometry_list):
         if geometry is None or geometry.is_empty:
             continue
-        value = 1 if values is None else values[index]
-        pairs.append((geometry, value))
+        pairs.append((geometry, 1 if values is None else values[index]))
     if not pairs:
         return np.zeros((pixels, pixels), dtype=dtype)
     return rasterize(
@@ -168,11 +167,21 @@ def rasterize_tile(
             all_touched=config.roads.surface_all_touched,
         )
 
+    road_profile = build_vertical_profiles(
+        city.roads,
+        transport_mode="road",
+        tile=tile,
+        config=config,
+        pixels=pixels,
+        transform=transform,
+    )
+
     road_surfaces: dict[str, np.ndarray] = {}
     road_centers: dict[str, np.ndarray] = {}
     for road_class in ["major", "secondary", "local"]:
-        selected = _select(city.roads, "road_class", road_class)
-        selected = _vertical_subset(selected, VerticalMode.SURFACE)
+        selected = _vertical_subset(
+            _select(city.roads, "road_class", road_class), VerticalMode.SURFACE
+        )
         road_surfaces[road_class] = _burn(
             _road_buffers(selected, config),
             pixels=pixels,
@@ -186,13 +195,8 @@ def rasterize_tile(
             all_touched=True,
         )
 
-    # A surface pixel has one road hierarchy target. Higher-order roads win at junctions.
-    roads_disjoint = _disjoint_priority(
-        road_surfaces, ["major", "secondary", "local"]
-    )
-    centers_disjoint = _disjoint_priority(
-        road_centers, ["major", "secondary", "local"]
-    )
+    roads_disjoint = _disjoint_priority(road_surfaces, ["major", "secondary", "local"])
+    centers_disjoint = _disjoint_priority(road_centers, ["major", "secondary", "local"])
     arrays[1] = roads_disjoint["major"]
     arrays[2] = roads_disjoint["secondary"]
     arrays[3] = roads_disjoint["local"]
@@ -220,8 +224,6 @@ def rasterize_tile(
             all_touched=config.raster.all_touched,
         ),
     )
-
-    # Specific overlays take precedence over broad residential/commercial polygons.
     landuse_disjoint = _disjoint_priority(
         raw_landuse, ["green", "civic", "industrial", "commercial_mixed", "residential"]
     )
@@ -248,7 +250,6 @@ def rasterize_tile(
         transform=transform,
         all_touched=config.raster.all_touched,
     )
-
     if "estimated_height_m" not in buildings.columns or "height_confidence" not in buildings.columns:
         raise ValueError("Buildings must be enriched before rasterisation")
     absolute_heights = [float(value) for value in buildings["estimated_height_m"]]
@@ -285,6 +286,14 @@ def rasterize_tile(
             transform=transform,
             all_touched=False,
         )
+    rail_profile = build_vertical_profiles(
+        city.rail,
+        transport_mode="rail",
+        tile=tile,
+        config=config,
+        pixels=pixels,
+        transform=transform,
+    )
     arrays[11] = rail_vertical_masks[int(VerticalMode.SURFACE)]
 
     surface_transport_reservation = np.maximum(
@@ -311,6 +320,10 @@ def rasterize_tile(
     road_centerlines *= valid_data_mask[None, :, :]
     road_vertical_masks *= valid_data_mask[None, :, :]
     rail_vertical_masks *= valid_data_mask[None, :, :]
+    road_profiles = road_profile.offsets_m * valid_data_mask[None, :, :]
+    rail_profiles = rail_profile.offsets_m * valid_data_mask[None, :, :]
+    road_profile_confidence = road_profile.confidence * valid_data_mask[None, :, :]
+    rail_profile_confidence = rail_profile.confidence * valid_data_mask[None, :, :]
     surface_transport_reservation *= valid_data_mask
     buildable_surface_mask *= valid_data_mask
     buildability_known_mask *= valid_data_mask
@@ -324,6 +337,14 @@ def rasterize_tile(
         valid_data_mask=valid_data_mask,
         road_vertical_masks=np.clip(road_vertical_masks, 0.0, 1.0).astype(np.uint8),
         rail_vertical_masks=np.clip(rail_vertical_masks, 0.0, 1.0).astype(np.uint8),
+        road_vertical_profiles_m=road_profiles.astype(np.float32),
+        rail_vertical_profiles_m=rail_profiles.astype(np.float32),
+        road_vertical_profile_confidence=road_profile_confidence.astype(np.uint8),
+        rail_vertical_profile_confidence=rail_profile_confidence.astype(np.uint8),
+        vertical_profile_evidence={
+            "road": road_profile.evidence_counts,
+            "rail": rail_profile.evidence_counts,
+        },
         surface_transport_reservation=surface_transport_reservation.astype(np.uint8),
         buildable_surface_mask=buildable_surface_mask.astype(np.uint8),
         buildability_known_mask=buildability_known_mask.astype(np.uint8),
