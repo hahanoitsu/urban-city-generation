@@ -18,7 +18,7 @@ class LayeredDiffusionConfig:
     crop_size_pixels: int = 128
     crop_stride_pixels: int = 32
     augment: bool = True
-    vertical_crop_repeat: int = 4
+    vertical_crop_repeat: int = 2
     block_out_channels: tuple[int, ...] = (64, 128, 256, 256)
     layers_per_block: int = 2
     attention_levels: tuple[bool, ...] = (False, False, False, True)
@@ -39,24 +39,36 @@ class LayeredDiffusionConfig:
     gradient_clip_norm: float = 1.0
     checkpoint_every: int = 5
     preview_every: int = 5
-    early_stopping_patience: int = 25
+    early_stopping_patience: int = 20
     channel_loss_weights: tuple[float, ...] = (
         1.0,
         1.0,
         1.0,
+        1.1,
+        1.1,
+        1.1,
         1.2,
-        1.2,
-        1.2,
-        1.3,
         1.0,
-        2.0,
-        2.0,
-        2.5,
-        2.5,
-        0.7,
+        1.2,
+        1.2,
+        1.4,
+        1.4,
+        0.6,
+        0.5,
+        0.8,
+        0.8,
+        0.5,
+        1.0,
+        1.0,
     )
     max_height_m: float = 180.0
-    minimum_vector_component_pixels: int = 3
+    max_surface_offset_m: float = 12.0
+    max_underground_depth_m: float = 40.0
+    max_elevated_height_m: float = 30.0
+    road_max_grade: float = 0.08
+    rail_max_grade: float = 0.035
+    auxiliary_threshold: float = 0.35
+    minimum_vector_component_pixels: int = 4
 
 
 class LayeredDiffusionConfigError(ValueError):
@@ -113,7 +125,27 @@ def load_layered_diffusion_config(path: str | Path) -> LayeredDiffusionConfig:
     weights = _tuple(
         run.get(
             "channel_loss_weights",
-            [1, 1, 1, 1.2, 1.2, 1.2, 1.3, 1, 2, 2, 2.5, 2.5, 0.7],
+            [
+                1.0,
+                1.0,
+                1.0,
+                1.1,
+                1.1,
+                1.1,
+                1.2,
+                1.0,
+                1.2,
+                1.2,
+                1.4,
+                1.4,
+                0.6,
+                0.5,
+                0.8,
+                0.8,
+                0.5,
+                1.0,
+                1.0,
+            ],
         ),
         name="run.channel_loss_weights",
         cast=float,
@@ -131,7 +163,7 @@ def load_layered_diffusion_config(path: str | Path) -> LayeredDiffusionConfig:
         crop_size_pixels=int(data.get("crop_size_pixels", 128)),
         crop_stride_pixels=int(data.get("crop_stride_pixels", 32)),
         augment=bool(data.get("augment", True)),
-        vertical_crop_repeat=int(data.get("vertical_crop_repeat", 4)),
+        vertical_crop_repeat=int(data.get("vertical_crop_repeat", 2)),
         block_out_channels=block_channels,
         layers_per_block=int(model.get("layers_per_block", 2)),
         attention_levels=attention,
@@ -152,10 +184,16 @@ def load_layered_diffusion_config(path: str | Path) -> LayeredDiffusionConfig:
         gradient_clip_norm=float(run.get("gradient_clip_norm", 1.0)),
         checkpoint_every=int(run.get("checkpoint_every", 5)),
         preview_every=int(run.get("preview_every", 5)),
-        early_stopping_patience=int(run.get("early_stopping_patience", 25)),
+        early_stopping_patience=int(run.get("early_stopping_patience", 20)),
         channel_loss_weights=weights,
         max_height_m=float(vector.get("max_height_m", 180.0)),
-        minimum_vector_component_pixels=int(vector.get("minimum_component_pixels", 3)),
+        max_surface_offset_m=float(vector.get("max_surface_offset_m", 12.0)),
+        max_underground_depth_m=float(vector.get("max_underground_depth_m", 40.0)),
+        max_elevated_height_m=float(vector.get("max_elevated_height_m", 30.0)),
+        road_max_grade=float(vector.get("road_max_grade", 0.08)),
+        rail_max_grade=float(vector.get("rail_max_grade", 0.035)),
+        auxiliary_threshold=float(vector.get("auxiliary_threshold", 0.35)),
+        minimum_vector_component_pixels=int(vector.get("minimum_component_pixels", 4)),
     )
     _validate(config)
     return config
@@ -177,8 +215,8 @@ def _validate(config: LayeredDiffusionConfig) -> None:
         raise LayeredDiffusionConfigError(
             "model.norm_num_groups must divide every block channel count"
         )
-    if len(config.channel_loss_weights) != 13:
-        raise LayeredDiffusionConfigError("run.channel_loss_weights must contain 13 values")
+    if len(config.channel_loss_weights) != 19:
+        raise LayeredDiffusionConfigError("run.channel_loss_weights must contain 19 values")
     if any(weight <= 0 for weight in config.channel_loss_weights):
         raise LayeredDiffusionConfigError("Channel loss weights must be positive")
     if config.crop_size_pixels <= 0 or config.crop_stride_pixels <= 0:
@@ -195,3 +233,17 @@ def _validate(config: LayeredDiffusionConfig) -> None:
         raise LayeredDiffusionConfigError("run.precision must be fp32, fp16 or bf16")
     if not 0.0 < config.ema_decay < 1.0:
         raise LayeredDiffusionConfigError("run.ema_decay must be between 0 and 1")
+    if not 0.0 <= config.auxiliary_threshold < 1.0:
+        raise LayeredDiffusionConfigError("vector.auxiliary_threshold must be in [0,1)")
+    if config.road_max_grade <= 0 or config.rail_max_grade <= 0:
+        raise LayeredDiffusionConfigError("Vector grade limits must be positive")
+    if any(
+        value <= 0
+        for value in (
+            config.max_height_m,
+            config.max_surface_offset_m,
+            config.max_underground_depth_m,
+            config.max_elevated_height_m,
+        )
+    ):
+        raise LayeredDiffusionConfigError("Vector height and depth limits must be positive")
