@@ -1,6 +1,6 @@
 # Urban City Generation
 
-A research pipeline for generating completely fictional urban layouts from real OpenStreetMap cities. The active model is a purpose-built 2D diffusion model. It generates surface, underground and elevated layers together, then converts them into structured JSON for Unreal Engine PCG.
+A research pipeline for generating completely fictional urban layouts from real OpenStreetMap cities. The active model is a purpose-built 2D diffusion model. It generates surface structure and continuous underground/elevated transport profiles together, then converts them into structured JSON for Unreal Engine PCG.
 
 Current work is on `dev`. `main` remains stable.
 
@@ -8,15 +8,15 @@ Current work is on `dev`. `main` remains stable.
 
 ```text
 OpenStreetMap cities
-  -> layered raster and vector corpus
-  -> multilayer 2D diffusion model
-  -> novel surface / underground / elevated layout
-  -> deterministic raster-to-graph conversion
+  -> tagged layered raster and vector corpus
+  -> 19-channel 2D diffusion model
+  -> novel surface layout + transport height/depth fields
+  -> grade-limited raster-to-spline conversion
   -> generated city.json
   -> Unreal Engine PCG
 ```
 
-The neural model chooses the city layout. The conversion stage only translates generated masks into splines, widths, footprints and Z levels.
+The neural model chooses the city layout and its vertical profiles. The deterministic conversion stage traces masks into splines, smooths noisy Z predictions and enforces configured road/rail grade limits.
 
 The earlier autoregressive graph Transformer is retained as a failed research baseline. It generated valid command sequences but did not learn usable geometry from the small corpus.
 
@@ -24,10 +24,10 @@ The earlier autoregressive graph Transformer is retained as a failed research ba
 
 ```text
 configs/            city, corpus and model configuration
-src/urban_dataset/  OSM preparation and deterministic geometry
+src/urban_dataset/  OSM extraction, profile targets and deterministic geometry
 src/urban_model/    active multilayer diffusion model
 src/urban_ai/       earlier graph-program experiment
-Tests/              automated checks
+tests/              automated checks
 docs/               format and architecture notes
 data/               local source and processed data, ignored by Git
 runs/               checkpoints and generated cities, ignored by Git
@@ -51,36 +51,40 @@ The geometry pipeline can still be installed without PyTorch:
 python -m pip install -e .
 ```
 
-## Build the city corpus
+## Rebuild the prepared city after this schema change
 
-Place the prepared Singapore GeoPackage at:
-
-```text
-data/cities/singapore.gpkg
-```
-
-Then run:
+The older `singapore.gpkg` discarded several OSM fields that are now used for vertical profiles. Recreate it from the source PBF before rebuilding the corpus:
 
 ```bash
+python -m urban_dataset prepare-city --config configs/cities/singapore.yaml
 python -m urban_dataset build-corpus --config configs/corpus.yaml
 ```
 
-Each accepted tile stores the original twelve surface channels plus independent road and rail masks for:
+The extractor now retains transport evidence including:
 
 ```text
-surface
-underground
-elevated
-unknown
+bridge / bridge:structure / bridge:movable
+tunnel / location / layer / level
+incline / ele / height / min_height / depth
+embankment / cutting
+maxheight / maxheight:physical
 ```
 
-It also stores an authoritative real `city.json` used for data checking and Unreal-format development.
+OSM does not provide complete engineering-grade elevation profiles. Explicit metric tags receive stronger confidence; bridge/tunnel/layer evidence is converted into smooth inferred ramps with lower confidence. A terrain DEM can later replace the zero-ground reference without changing the model schema.
+
+Each accepted tile stores:
+
+- the original twelve surface channels;
+- independent surface/underground/elevated/unknown road and rail masks;
+- signed road and rail Z-profile rasters for surface, underground and elevated modes;
+- confidence rasters describing whether each profile is missing, inferred, tag-derived or measured;
+- an authoritative real `city.json` used for data checking and Unreal-format development.
 
 ## Model output
 
-The diffusion model generates thirteen channels at once.
+The diffusion model generates nineteen channels at once.
 
-Surface is one categorical map:
+Surface is one categorical map represented by eight channels:
 
 ```text
 terrain
@@ -93,7 +97,7 @@ surface rail
 water
 ```
 
-Additional overlapping channels preserve the third dimension:
+Five overlapping channels contain:
 
 ```text
 underground roads
@@ -103,7 +107,18 @@ elevated rail
 building height
 ```
 
-Because vertical layers are separate, an underground railway may pass beneath a building or surface road without either feature being erased.
+Six continuous channels contain:
+
+```text
+surface-road offset
+underground-road depth
+elevated-road height
+surface-rail offset
+underground-rail depth
+elevated-rail height
+```
+
+Because these are independent layers, an underground railway may pass beneath a building or surface road without either feature being erased. Bridges and tunnels can ramp continuously instead of occupying one fixed Z plane.
 
 ## Check the training tensors
 
@@ -111,7 +126,7 @@ Because vertical layers are separate, an underground railway may pass beneath a 
 python -m urban_model check --config configs/layered.yaml
 ```
 
-This verifies the manifests, crop count, tensor shape and channel coverage. Crops containing underground or elevated transport are repeated during training so the sparse vertical layers are not ignored.
+This verifies manifests, crop counts, `[19, 128, 128]` tensors, channel coverage and the supervised fraction of each confidence-weighted profile channel.
 
 ## Train
 
@@ -125,13 +140,13 @@ python -m urban_model train \
   --overwrite
 ```
 
-The model writes checkpoints, losses and generated previews to:
+The new model writes to:
 
 ```text
-runs/layered/
+runs/layered-v2/
 ```
 
-A real run can then start cleanly:
+A longer run can then start cleanly:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
@@ -141,7 +156,7 @@ python -m urban_model train \
   --overwrite
 ```
 
-The training loop uses BF16, a cosine diffusion schedule, weighted vertical-channel loss and an EMA with warm-up. Early stopping uses validation loss rather than assuming that more epochs are always better.
+The training loop uses BF16, a cosine diffusion schedule, per-channel confidence masks, reduced vertical oversampling and an EMA with warm-up. Early stopping uses validation loss.
 
 ## Generate new cities
 
@@ -149,8 +164,8 @@ The training loop uses BF16, a cosine diffusion schedule, weighted vertical-chan
 CUDA_VISIBLE_DEVICES=0 \
 python -m urban_model sample \
   --config configs/layered.yaml \
-  --checkpoint runs/layered/best.pt \
-  --output runs/layered-samples \
+  --checkpoint runs/layered-v2/best.pt \
+  --output runs/layered-v2-samples \
   --count 8 \
   --overwrite
 ```
@@ -158,23 +173,24 @@ python -m urban_model sample \
 Every sample contains:
 
 ```text
-layers.npz    generated multilayer tensor
-preview.png   surface, underground and elevated panels
-city.json     vector roads, rail, buildings, water and green space
+layers.npz    generated 19-channel tensor
+preview.png   surface, underground-depth and elevated-height panels
+city.json     variable-Z roads, rail, buildings, water and green space
 city.obj      simple structural 3D preview
 city.mtl      OBJ materials
 ```
 
-Road centre-lines are skeletonised from the generated masks. Surface hierarchy supplies standard widths; vertical-road width is estimated from the thickness generated by the model. The resulting JSON uses metres and `x-east, y-north, z-up`, with procedural defaults of `-12 m` underground and `+8 m` elevated.
+The vectoriser skeletonises generated transport masks, samples the learned height/depth field along each path, smooths it and clamps gradients to configured limits. JSON edge geometry therefore contains full `[x, y, z]` points plus minimum/maximum Z and maximum grade.
 
 ## Unreal Engine path
 
 Unreal consumes the generated JSON rather than reading the preview image. The importer can map:
 
 ```text
-transport edges -> road and rail splines
+geometry_local_m -> 3D road and rail spline points
 width_m          -> spline cross-section width
-vertical_mode    -> surface, tunnel or elevated system
+vertical_mode    -> surface, tunnel, elevated or transition system
+maximum_grade    -> validation/debug information
 building solids  -> PCG building volumes
 water and green  -> landscape and vegetation masks
 ```
