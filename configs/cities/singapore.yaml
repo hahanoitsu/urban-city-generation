@@ -50,6 +50,19 @@ heights:
     school: 12.4
     hospital: 18.6
 
+vertical_profiles:
+  road_default_elevated_m: 7.0
+  rail_default_elevated_m: 8.0
+  road_default_tunnel_depth_m: 8.0
+  rail_default_tunnel_depth_m: 14.0
+  layer_step_m: 5.0
+  deck_thickness_m: 1.0
+  embankment_offset_m: 3.0
+  cutting_depth_m: 3.0
+  road_max_grade: 0.08
+  rail_max_grade: 0.035
+  sample_step_m: 2.0
+
 quality:
   minimum_buildings: 0
   minimum_road_length_m: 0
