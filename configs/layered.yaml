@@ -5,7 +5,7 @@ data:
   crop_size_pixels: 128
   crop_stride_pixels: 32
   augment: true
-  vertical_crop_repeat: 4
+  vertical_crop_repeat: 2
 
 model:
   block_out_channels: [64, 128, 256, 256]
@@ -19,7 +19,7 @@ diffusion:
   beta_schedule: squaredcos_cap_v2
 
 run:
-  output_dir: runs/layered
+  output_dir: runs/layered-v2
   epochs: 100
   batch_size: 16
   learning_rate: 0.0001
@@ -33,9 +33,18 @@ run:
   gradient_clip_norm: 1.0
   checkpoint_every: 5
   preview_every: 5
-  early_stopping_patience: 25
-  channel_loss_weights: [1.0, 1.0, 1.0, 1.2, 1.2, 1.2, 1.3, 1.0, 2.0, 2.0, 2.5, 2.5, 0.7]
+  early_stopping_patience: 20
+  channel_loss_weights:
+    [1.0, 1.0, 1.0, 1.1, 1.1, 1.1, 1.2, 1.0,
+     1.2, 1.2, 1.4, 1.4, 0.6,
+     0.5, 0.8, 0.8, 0.5, 1.0, 1.0]
 
 vector:
   max_height_m: 180
-  minimum_component_pixels: 3
+  max_surface_offset_m: 12
+  max_underground_depth_m: 40
+  max_elevated_height_m: 30
+  road_max_grade: 0.08
+  rail_max_grade: 0.035
+  auxiliary_threshold: 0.35
+  minimum_component_pixels: 4
