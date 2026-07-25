@@ -15,6 +15,7 @@ from .network_scene import build_network_scene
 from .obj_export import export_city_state_obj
 from .pipeline import run_build
 from .prepared import prepare_city
+from .vertical_audit import audit_vertical_tags
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -36,6 +37,13 @@ def _parser() -> argparse.ArgumentParser:
         "build-corpus", help="Build several study areas from prepared city GeoPackages"
     )
     corpus.add_argument("--config", required=True, type=Path)
+
+    vertical_audit = subparsers.add_parser(
+        "audit-vertical",
+        help="Report retained OSM bridge, tunnel, incline and elevation tag coverage",
+    )
+    vertical_audit.add_argument("--city", required=True, type=Path)
+    vertical_audit.add_argument("--examples", type=int, default=8)
 
     demo = subparsers.add_parser("demo", help="Run the full path on built-in synthetic data")
     demo.add_argument("--output", default="data/demo", type=Path)
@@ -96,6 +104,8 @@ def main(argv: list[str] | None = None) -> int:
             result = prepare_city(load_build_config(args.config))
         elif args.command == "build-corpus":
             result = build_corpus(load_corpus_config(args.config))
+        elif args.command == "audit-vertical":
+            result = audit_vertical_tags(args.city, examples=args.examples)
         elif args.command == "demo":
             result = run_demo(args.output, overwrite=args.overwrite)
         elif args.command == "manifests":
