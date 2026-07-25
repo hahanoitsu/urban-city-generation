@@ -23,6 +23,7 @@ from .tile import clip_layers, iter_tile_specs
 from .utils import file_sha256, write_json
 from .validate import validate_tile
 from .vectors import tile_vector_payload
+from .vertical_profile import PROFILE_CONFIDENCE_NAMES, PROFILE_MODE_NAMES
 
 
 def _portable_path(path: Path) -> str:
@@ -117,11 +118,21 @@ def _write_tiles(
             valid_data_mask=raster.valid_data_mask.astype(np.uint8),
             road_vertical_masks=raster.road_vertical_masks.astype(np.uint8),
             rail_vertical_masks=raster.rail_vertical_masks.astype(np.uint8),
+            road_vertical_profiles_m=raster.road_vertical_profiles_m.astype(np.float32),
+            rail_vertical_profiles_m=raster.rail_vertical_profiles_m.astype(np.float32),
+            road_vertical_profile_confidence=(
+                raster.road_vertical_profile_confidence.astype(np.uint8)
+            ),
+            rail_vertical_profile_confidence=(
+                raster.rail_vertical_profile_confidence.astype(np.uint8)
+            ),
             surface_transport_reservation=raster.surface_transport_reservation.astype(np.uint8),
             buildable_surface_mask=raster.buildable_surface_mask.astype(np.uint8),
             buildability_known_mask=raster.buildability_known_mask.astype(np.uint8),
             channel_names=np.asarray(CHANNEL_NAMES),
             vertical_mode_names=np.asarray(VERTICAL_MODE_NAMES),
+            profile_mode_names=np.asarray(PROFILE_MODE_NAMES),
+            profile_confidence_names=np.asarray(PROFILE_CONFIDENCE_NAMES),
             affine=np.asarray(raster.transform, dtype=np.float64),
         )
         save_preview(raster.layers, tile_dir / "preview.png")
@@ -150,6 +161,9 @@ def _write_tiles(
             "metres_per_pixel": config.raster.tile_size_m / config.raster.pixels,
             "channels": list(CHANNEL_NAMES),
             "vertical_modes": list(VERTICAL_MODE_NAMES),
+            "vertical_profile_modes": list(PROFILE_MODE_NAMES),
+            "vertical_profile_confidence": list(PROFILE_CONFIDENCE_NAMES),
+            "vertical_profile_evidence": raster.vertical_profile_evidence,
             "height": {
                 "normalization_max_m": config.raster.max_height_m,
                 "confidence_levels": {
@@ -166,6 +180,14 @@ def _write_tiles(
                 "valid_data_mask": "uint8[H,W]",
                 "road_vertical_masks": "uint8[4,H,W] surface/underground/elevated/unknown",
                 "rail_vertical_masks": "uint8[4,H,W] surface/underground/elevated/unknown",
+                "road_vertical_profiles_m": (
+                    "float32[3,H,W] signed surface/underground/elevated local z offsets"
+                ),
+                "rail_vertical_profiles_m": (
+                    "float32[3,H,W] signed surface/underground/elevated local z offsets"
+                ),
+                "road_vertical_profile_confidence": "uint8[3,H,W] 0 missing, 1 inferred, 2 tag-derived, 3 measured",
+                "rail_vertical_profile_confidence": "uint8[3,H,W] 0 missing, 1 inferred, 2 tag-derived, 3 measured",
                 "surface_transport_reservation": "uint8[H,W]",
                 "buildable_surface_mask": "uint8[H,W] excludes water and confirmed surface transport",
                 "buildability_known_mask": "uint8[H,W] excludes ambiguous transport vertical mode",
@@ -206,6 +228,7 @@ def _write_tiles(
         "rejected_tiles": len(rejected_rows),
         "channels": list(CHANNEL_NAMES),
         "vertical_modes": list(VERTICAL_MODE_NAMES),
+        "vertical_profile_modes": list(PROFILE_MODE_NAMES),
         "source_file": source_file,
         "prepared_city": prepared_city,
         "config": raw_config,
