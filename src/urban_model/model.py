@@ -78,9 +78,16 @@ def weighted_diffusion_loss(
 ) -> torch.Tensor:
     weights = prediction.new_tensor(channel_weights).reshape(1, -1, 1, 1)
     mask = valid_mask.to(dtype=prediction.dtype)
-    squared = (prediction - target_noise).square() * weights * mask
-    denominator = (mask.sum() * weights.sum()).clamp_min(1.0)
-    return squared.sum() / denominator
+    if mask.shape[1] == 1:
+        mask = mask.expand(-1, prediction.shape[1], -1, -1)
+    if mask.shape != prediction.shape:
+        raise ValueError(
+            f"Supervision mask shape {tuple(mask.shape)} does not match prediction "
+            f"shape {tuple(prediction.shape)}"
+        )
+    weighted_mask = weights * mask
+    squared = (prediction - target_noise).square() * weighted_mask
+    return squared.sum() / weighted_mask.sum().clamp_min(1.0)
 
 
 class ModelEMA:
