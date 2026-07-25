@@ -7,7 +7,9 @@ import torch
 from torch import nn
 
 from .config import LayeredDiffusionConfig
-from .data import MODEL_CHANNELS
+from .data import MODEL_CHANNELS, PROFILE_NAMES
+
+PROFILE_BACKGROUND_WEIGHT = 0.05
 
 
 def _require_diffusers():
@@ -70,6 +72,18 @@ def autocast_context(config: LayeredDiffusionConfig, device: torch.device):
     return torch.autocast(device_type="cuda", dtype=dtype)
 
 
+def _add_profile_background_supervision(mask: torch.Tensor) -> torch.Tensor:
+    """Give empty profile pixels a weak target instead of leaving them as free noise."""
+    if mask.ndim != 4 or mask.shape[1] != MODEL_CHANNELS:
+        raise ValueError(f"Expected supervision mask [B,{MODEL_CHANNELS},H,W], found {mask.shape}")
+    result = mask.clone()
+    valid = result[:, :1].clamp(0.0, 1.0)
+    profile_start = MODEL_CHANNELS - len(PROFILE_NAMES)
+    background = valid * PROFILE_BACKGROUND_WEIGHT
+    result[:, profile_start:] = torch.maximum(result[:, profile_start:], background)
+    return result
+
+
 def weighted_diffusion_loss(
     prediction: torch.Tensor,
     target_noise: torch.Tensor,
@@ -85,6 +99,7 @@ def weighted_diffusion_loss(
             f"Supervision mask shape {tuple(mask.shape)} does not match prediction "
             f"shape {tuple(prediction.shape)}"
         )
+    mask = _add_profile_background_supervision(mask)
     weighted_mask = weights * mask
     squared = (prediction - target_noise).square() * weighted_mask
     return squared.sum() / weighted_mask.sum().clamp_min(1.0)
