@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-DATASET_VERSION = "0.3.0"
+DATASET_VERSION = "0.4.0"
 
 CHANNEL_NAMES: tuple[str, ...] = (
     "water",
@@ -33,4 +33,17 @@ VERTICAL_MODE_NAMES: tuple[str, ...] = (
     "underground",
     "elevated",
     "unknown",
+)
+
+VERTICAL_PROFILE_MODE_NAMES: tuple[str, ...] = (
+    "surface",
+    "underground",
+    "elevated",
+)
+
+VERTICAL_PROFILE_CONFIDENCE_LABELS: tuple[str, ...] = (
+    "missing",
+    "inferred_from_structure",
+    "tag_derived",
+    "measured",
 )
