@@ -12,7 +12,6 @@ from shapely.geometry import LineString, shape
 from .data import model_space_to_layers
 
 ROAD_WIDTHS_M = {"major": 18.0, "secondary": 12.0, "local": 7.0}
-VERTICAL_Z_M = {"surface": 0.0, "underground": -12.0, "elevated": 8.0}
 
 
 def _require_image_tools():
@@ -151,24 +150,57 @@ def _road_class_for_path(path: list[tuple[int, int]], class_map: np.ndarray) -> 
     return {1: "major", 2: "secondary", 3: "local"}[value]
 
 
-def _simplified_coordinates(
+def _smooth_grade(z: np.ndarray, xy: np.ndarray, max_grade: float) -> np.ndarray:
+    if len(z) <= 2:
+        return z
+    kernel = np.ones(5, dtype=np.float64) / 5.0
+    padded = np.pad(z.astype(np.float64), (2, 2), mode="edge")
+    result = np.convolve(padded, kernel, mode="valid")
+    distances = np.linalg.norm(np.diff(xy, axis=0), axis=1)
+    for index in range(1, len(result)):
+        limit = max_grade * max(float(distances[index - 1]), 1e-6)
+        result[index] = np.clip(result[index], result[index - 1] - limit, result[index - 1] + limit)
+    for index in range(len(result) - 2, -1, -1):
+        limit = max_grade * max(float(distances[index]), 1e-6)
+        result[index] = np.clip(result[index], result[index + 1] - limit, result[index + 1] + limit)
+    return result.astype(np.float32)
+
+
+def _coordinates_3d(
     path: list[tuple[int, int]],
     *,
+    z_field: np.ndarray,
     shape_value: tuple[int, int],
     bounds: list[float],
+    max_grade: float,
 ) -> list[list[float]]:
-    coordinates = [_pixel_xy(pixel, shape_value=shape_value, bounds=bounds) for pixel in path]
-    if len(coordinates) <= 2:
-        return [[float(x), float(y)] for x, y in coordinates]
+    xy = np.asarray(
+        [_pixel_xy(pixel, shape_value=shape_value, bounds=bounds) for pixel in path],
+        dtype=np.float64,
+    )
+    z = np.asarray([float(z_field[pixel]) for pixel in path], dtype=np.float32)
+    z = _smooth_grade(z, xy, max_grade)
+    if len(path) <= 2:
+        return [[float(x), float(y), float(height)] for (x, y), height in zip(xy, z, strict=True)]
+
     metres_per_pixel = max(
         (bounds[2] - bounds[0]) / shape_value[1],
         (bounds[3] - bounds[1]) / shape_value[0],
     )
-    line = LineString(coordinates).simplify(metres_per_pixel * 0.65, preserve_topology=False)
-    simplified = list(line.coords)
+    simplified = list(LineString(xy).simplify(metres_per_pixel * 0.65, preserve_topology=False).coords)
     if len(simplified) < 2:
-        simplified = [coordinates[0], coordinates[-1]]
-    return [[float(x), float(y)] for x, y in simplified]
+        simplified = [tuple(xy[0]), tuple(xy[-1])]
+
+    result: list[list[float]] = []
+    lower = 0
+    for x, y in simplified:
+        candidate = xy[lower:]
+        distances = np.square(candidate[:, 0] - x) + np.square(candidate[:, 1] - y)
+        relative = int(np.argmin(distances))
+        index = lower + relative
+        result.append([float(x), float(y), float(z[index])])
+        lower = min(index, len(xy) - 1)
+    return result
 
 
 def _append_network(
@@ -178,10 +210,12 @@ def _append_network(
     node_lookup: dict[tuple[str, str, tuple[int, int]], str],
     mask: np.ndarray,
     class_map: np.ndarray | None,
+    z_field: np.ndarray,
     transport_mode: str,
     vertical_mode: str,
     bounds: list[float],
     minimum_pixels: int,
+    max_grade: float,
 ) -> None:
     _binary_closing, distance_transform_edt, _label, _disk, _skeletonize = _require_image_tools()
     paths, cleaned = _skeleton_paths(mask, minimum_pixels)
@@ -191,38 +225,37 @@ def _append_network(
         (bounds[2] - bounds[0]) / shape_value[1]
         + (bounds[3] - bounds[1]) / shape_value[0]
     ) / 2.0
-    z = VERTICAL_Z_M[vertical_mode]
 
-    def node_id(pixel: tuple[int, int]) -> str:
+    def node_id(pixel: tuple[int, int], position: list[float]) -> str:
         key = (transport_mode, vertical_mode, pixel)
         existing = node_lookup.get(key)
         if existing is not None:
             return existing
         identifier = f"node_{len(nodes):05d}"
-        x, y = _pixel_xy(pixel, shape_value=shape_value, bounds=bounds)
         node_lookup[key] = identifier
         nodes.append(
             {
                 "id": identifier,
                 "transport_mode": transport_mode,
                 "vertical_mode": vertical_mode,
-                "position_local_m": [x, y, z],
+                "position_local_m": position,
             }
         )
         return identifier
 
     for path in paths:
-        coordinates_2d = _simplified_coordinates(
+        coordinates = _coordinates_3d(
             path,
+            z_field=z_field,
             shape_value=shape_value,
             bounds=bounds,
+            max_grade=max_grade,
         )
-        if len(coordinates_2d) < 2:
+        if len(coordinates) < 2:
             continue
-        line = LineString(coordinates_2d)
+        line = LineString([(value[0], value[1]) for value in coordinates])
         if line.length <= 1e-6:
             continue
-
         sampled_width = float(
             np.median([max(1.0, distances[pixel] * 2.0 * metres_per_pixel) for pixel in path])
         )
@@ -244,8 +277,14 @@ def _append_network(
             width_m = float(np.clip(sampled_width, 4.0, 10.0))
             edge_class = "rail"
 
-        left = node_id(path[0])
-        right = node_id(path[-1])
+        left = node_id(path[0], coordinates[0])
+        right = node_id(path[-1], coordinates[-1])
+        z_values = [value[2] for value in coordinates]
+        grades = []
+        for first, second in zip(coordinates[:-1], coordinates[1:], strict=True):
+            horizontal = float(np.hypot(second[0] - first[0], second[1] - first[1]))
+            if horizontal > 1e-6:
+                grades.append(abs(second[2] - first[2]) / horizontal)
         edges.append(
             {
                 "id": f"edge_{len(edges):05d}",
@@ -256,9 +295,59 @@ def _append_network(
                 "vertical_mode": vertical_mode,
                 "width_m": width_m,
                 "length_m": float(line.length),
-                "geometry_local_m": [[x, y, z] for x, y in coordinates_2d],
+                "minimum_z_m": float(min(z_values)),
+                "maximum_z_m": float(max(z_values)),
+                "maximum_grade": float(max(grades, default=0.0)),
+                "z_source": "generated_profile",
+                "geometry_local_m": coordinates,
             }
         )
+
+
+def _merge_transition_nodes(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    tolerance_m: float,
+) -> list[dict[str, Any]]:
+    replacements: dict[str, str] = {}
+    for index, first in enumerate(nodes):
+        if first["id"] in replacements:
+            continue
+        first_position = np.asarray(first["position_local_m"], dtype=float)
+        for second in nodes[index + 1 :]:
+            if second["id"] in replacements:
+                continue
+            if first["transport_mode"] != second["transport_mode"]:
+                continue
+            if first["vertical_mode"] == second["vertical_mode"]:
+                continue
+            second_position = np.asarray(second["position_local_m"], dtype=float)
+            if np.linalg.norm(first_position[:2] - second_position[:2]) > tolerance_m:
+                continue
+            if abs(float(first_position[2] - second_position[2])) > 2.5:
+                continue
+            canonical, duplicate = (
+                (first, second)
+                if first["vertical_mode"] == "surface"
+                else (second, first)
+                if second["vertical_mode"] == "surface"
+                else (first, second)
+            )
+            replacements[duplicate["id"]] = canonical["id"]
+            canonical["vertical_mode"] = "transition"
+
+    if not replacements:
+        return nodes
+    lookup = {node["id"]: node for node in nodes}
+    for edge in edges:
+        for key, coordinate_index in (("from_node", 0), ("to_node", -1)):
+            node_id = edge[key]
+            while node_id in replacements:
+                node_id = replacements[node_id]
+            edge[key] = node_id
+            edge["geometry_local_m"][coordinate_index] = lookup[node_id]["position_local_m"]
+    return [node for node in nodes if node["id"] not in replacements]
 
 
 def _polygon_features(
@@ -317,10 +406,22 @@ def generated_layers_to_city_state(
     *,
     bounds_m: Iterable[float] = (0.0, 0.0, 1024.0, 1024.0),
     max_height_m: float = 180.0,
-    minimum_component_pixels: int = 3,
+    max_surface_offset_m: float = 12.0,
+    max_underground_depth_m: float = 40.0,
+    max_elevated_height_m: float = 30.0,
+    road_max_grade: float = 0.08,
+    rail_max_grade: float = 0.035,
+    auxiliary_threshold: float = 0.35,
+    minimum_component_pixels: int = 4,
     seed: int | None = None,
 ) -> dict[str, Any]:
-    decoded = model_space_to_layers(values)
+    decoded = model_space_to_layers(
+        values,
+        auxiliary_threshold=auxiliary_threshold,
+        max_surface_offset_m=max_surface_offset_m,
+        max_underground_depth_m=max_underground_depth_m,
+        max_elevated_height_m=max_elevated_height_m,
+    )
     surface = decoded["surface"].detach().cpu().numpy().astype(np.int16)
     bounds = [float(value) for value in bounds_m]
     nodes: list[dict[str, Any]] = []
@@ -332,54 +433,76 @@ def generated_layers_to_city_state(
     surface_class_map[surface == 4] = 2
     surface_class_map[surface == 5] = 3
 
-    _append_network(
-        nodes=nodes,
-        edges=edges,
-        node_lookup=node_lookup,
-        mask=surface_class_map > 0,
-        class_map=surface_class_map,
-        transport_mode="road",
-        vertical_mode="surface",
-        bounds=bounds,
-        minimum_pixels=minimum_component_pixels,
-    )
-    _append_network(
-        nodes=nodes,
-        edges=edges,
-        node_lookup=node_lookup,
-        mask=surface == 6,
-        class_map=None,
-        transport_mode="rail",
-        vertical_mode="surface",
-        bounds=bounds,
-        minimum_pixels=minimum_component_pixels,
-    )
-    for vertical_mode, road_key, rail_key in (
-        ("underground", "road_underground", "rail_underground"),
-        ("elevated", "road_elevated", "rail_elevated"),
-    ):
+    networks = [
+        (
+            surface_class_map > 0,
+            surface_class_map,
+            decoded["road_surface_offset_m"],
+            "road",
+            "surface",
+            road_max_grade,
+        ),
+        (
+            surface == 6,
+            None,
+            decoded["rail_surface_offset_m"],
+            "rail",
+            "surface",
+            rail_max_grade,
+        ),
+        (
+            decoded["road_underground"],
+            None,
+            -decoded["road_underground_depth_m"],
+            "road",
+            "underground",
+            road_max_grade,
+        ),
+        (
+            decoded["road_elevated"],
+            None,
+            decoded["road_elevated_height_m"],
+            "road",
+            "elevated",
+            road_max_grade,
+        ),
+        (
+            decoded["rail_underground"],
+            None,
+            -decoded["rail_underground_depth_m"],
+            "rail",
+            "underground",
+            rail_max_grade,
+        ),
+        (
+            decoded["rail_elevated"],
+            None,
+            decoded["rail_elevated_height_m"],
+            "rail",
+            "elevated",
+            rail_max_grade,
+        ),
+    ]
+    for mask, class_map, z_field, transport_mode, vertical_mode, max_grade in networks:
         _append_network(
             nodes=nodes,
             edges=edges,
             node_lookup=node_lookup,
-            mask=decoded[road_key].detach().cpu().numpy(),
-            class_map=None,
-            transport_mode="road",
+            mask=mask.detach().cpu().numpy() if isinstance(mask, torch.Tensor) else mask,
+            class_map=class_map,
+            z_field=z_field.detach().cpu().numpy(),
+            transport_mode=transport_mode,
             vertical_mode=vertical_mode,
             bounds=bounds,
             minimum_pixels=minimum_component_pixels,
+            max_grade=max_grade,
         )
-        _append_network(
-            nodes=nodes,
-            edges=edges,
-            node_lookup=node_lookup,
-            mask=decoded[rail_key].detach().cpu().numpy(),
-            class_map=None,
-            transport_mode="rail",
-            vertical_mode=vertical_mode,
-            bounds=bounds,
-            minimum_pixels=minimum_component_pixels,
-        )
+
+    metres_per_pixel = max(
+        (bounds[2] - bounds[0]) / surface.shape[1],
+        (bounds[3] - bounds[1]) / surface.shape[0],
+    )
+    nodes = _merge_transition_nodes(nodes, edges, tolerance_m=metres_per_pixel * 1.5)
 
     degree: dict[str, int] = defaultdict(int)
     for edge in edges:
@@ -396,9 +519,8 @@ def generated_layers_to_city_state(
         )
 
     height_values = decoded["building_height"].detach().cpu().numpy()
-    building_mask = surface == 2
     buildings = _building_solids(
-        building_mask,
+        surface == 2,
         height_values,
         bounds=bounds,
         max_height_m=max_height_m,
@@ -408,7 +530,7 @@ def generated_layers_to_city_state(
 
     return {
         "format": "urban-city-state-tile",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "tile": {
             "city_id": "generated",
             "area_id": "generated",
@@ -422,6 +544,7 @@ def generated_layers_to_city_state(
         "generation": {
             "kind": "multilayer_diffusion",
             "seed": seed,
+            "vertical_profiles": "generated_continuous_z",
         },
         "transport_graph": {
             "nodes": nodes,
@@ -440,5 +563,6 @@ def generated_layers_to_city_state(
                 edge["vertical_mode"] == "underground" for edge in edges
             ),
             "elevated_edges": sum(edge["vertical_mode"] == "elevated" for edge in edges),
+            "transition_nodes": sum(node["vertical_mode"] == "transition" for node in nodes),
         },
     }
