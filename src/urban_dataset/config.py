@@ -11,6 +11,13 @@ class ConfigError(ValueError):
     pass
 
 
+def _config_root(config_path: Path) -> Path:
+    for parent in config_path.parents:
+        if parent.name == "configs":
+            return parent.parent
+    return config_path.parent
+
+
 @dataclass(frozen=True)
 class ProjectConfig:
     city_id: str
@@ -37,6 +44,7 @@ class OutputConfig:
     overwrite: bool = False
     save_extracted_gpkg: bool = True
     save_tile_vectors: bool = True
+    gpkg_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +77,21 @@ class HeightConfig:
 
 
 @dataclass(frozen=True)
+class VerticalProfileConfig:
+    road_default_elevated_m: float = 7.0
+    rail_default_elevated_m: float = 8.0
+    road_default_tunnel_depth_m: float = 8.0
+    rail_default_tunnel_depth_m: float = 14.0
+    layer_step_m: float = 5.0
+    deck_thickness_m: float = 1.0
+    embankment_offset_m: float = 3.0
+    cutting_depth_m: float = 3.0
+    road_max_grade: float = 0.08
+    rail_max_grade: float = 0.035
+    sample_step_m: float = 2.0
+
+
+@dataclass(frozen=True)
 class QualityConfig:
     minimum_buildings: int = 3
     minimum_road_length_m: float = 80.0
@@ -86,6 +109,7 @@ class BuildConfig:
     roads: RoadConfig
     heights: HeightConfig
     quality: QualityConfig
+    vertical_profiles: VerticalProfileConfig = field(default_factory=VerticalProfileConfig)
 
 
 def _required(mapping: dict[str, Any], key: str, section: str) -> Any:
@@ -113,6 +137,13 @@ def _parse_workers(value: Any) -> int | str | None:
     return number
 
 
+def _positive_float(mapping: dict[str, Any], key: str, default: float, section: str) -> float:
+    value = float(mapping.get(key, default))
+    if value <= 0:
+        raise ConfigError(f"{section}.{key} must be positive")
+    return value
+
+
 def load_build_config(path: str | Path) -> BuildConfig:
     config_path = Path(path).expanduser().resolve()
     with config_path.open("r", encoding="utf-8") as handle:
@@ -124,6 +155,7 @@ def load_build_config(path: str | Path) -> BuildConfig:
     raster_raw = raw.get("raster", {})
     road_raw = raw.get("roads", {})
     height_raw = raw.get("heights", {})
+    vertical_raw = raw.get("vertical_profiles", {})
     quality_raw = raw.get("quality", {})
 
     bbox = tuple(float(value) for value in _required(input_raw, "bbox_wgs84", "input"))
@@ -163,11 +195,48 @@ def load_build_config(path: str | Path) -> BuildConfig:
 
     pbf_path = Path(_required(input_raw, "pbf_path", "input")).expanduser()
     if not pbf_path.is_absolute():
-        pbf_path = (config_path.parent.parent / pbf_path).resolve()
+        pbf_path = (_config_root(config_path) / pbf_path).resolve()
 
     output_root = Path(_required(output_raw, "root", "output")).expanduser()
     if not output_root.is_absolute():
-        output_root = (config_path.parent.parent / output_root).resolve()
+        output_root = (_config_root(config_path) / output_root).resolve()
+    gpkg_path = None
+    if output_raw.get("gpkg_path") is not None:
+        gpkg_path = Path(output_raw["gpkg_path"]).expanduser()
+        if not gpkg_path.is_absolute():
+            gpkg_path = (_config_root(config_path) / gpkg_path).resolve()
+
+    vertical_profiles = VerticalProfileConfig(
+        road_default_elevated_m=_positive_float(
+            vertical_raw, "road_default_elevated_m", 7.0, "vertical_profiles"
+        ),
+        rail_default_elevated_m=_positive_float(
+            vertical_raw, "rail_default_elevated_m", 8.0, "vertical_profiles"
+        ),
+        road_default_tunnel_depth_m=_positive_float(
+            vertical_raw, "road_default_tunnel_depth_m", 8.0, "vertical_profiles"
+        ),
+        rail_default_tunnel_depth_m=_positive_float(
+            vertical_raw, "rail_default_tunnel_depth_m", 14.0, "vertical_profiles"
+        ),
+        layer_step_m=_positive_float(vertical_raw, "layer_step_m", 5.0, "vertical_profiles"),
+        deck_thickness_m=_positive_float(
+            vertical_raw, "deck_thickness_m", 1.0, "vertical_profiles"
+        ),
+        embankment_offset_m=_positive_float(
+            vertical_raw, "embankment_offset_m", 3.0, "vertical_profiles"
+        ),
+        cutting_depth_m=_positive_float(
+            vertical_raw, "cutting_depth_m", 3.0, "vertical_profiles"
+        ),
+        road_max_grade=_positive_float(vertical_raw, "road_max_grade", 0.08, "vertical_profiles"),
+        rail_max_grade=_positive_float(
+            vertical_raw, "rail_max_grade", 0.035, "vertical_profiles"
+        ),
+        sample_step_m=_positive_float(vertical_raw, "sample_step_m", 2.0, "vertical_profiles"),
+    )
+    if vertical_profiles.road_max_grade > 0.25 or vertical_profiles.rail_max_grade > 0.15:
+        raise ConfigError("Configured transport grades are implausibly large")
 
     return BuildConfig(
         project=project,
@@ -186,6 +255,7 @@ def load_build_config(path: str | Path) -> BuildConfig:
             overwrite=bool(output_raw.get("overwrite", False)),
             save_extracted_gpkg=bool(output_raw.get("save_extracted_gpkg", True)),
             save_tile_vectors=bool(output_raw.get("save_tile_vectors", True)),
+            gpkg_path=gpkg_path,
         ),
         raster=RasterConfig(
             tile_size_m=tile_size,
@@ -214,6 +284,7 @@ def load_build_config(path: str | Path) -> BuildConfig:
                 str(k): float(v) for k, v in height_raw.get("default_by_building", {}).items()
             },
         ),
+        vertical_profiles=vertical_profiles,
         quality=QualityConfig(
             minimum_buildings=int(quality_raw.get("minimum_buildings", 3)),
             minimum_road_length_m=float(quality_raw.get("minimum_road_length_m", 80.0)),

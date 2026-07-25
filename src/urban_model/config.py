@@ -1,247 +1,249 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
-
-class TrainingConfigError(ValueError):
-    pass
+Precision = Literal["fp32", "fp16", "bf16"]
 
 
 @dataclass(frozen=True)
-class DataConfig:
+class LayeredDiffusionConfig:
     train_manifest: Path
     validation_manifest: Path
-    test_manifest: Path | None = None
-    augment: bool = True
-    height_scale_m: float = 180.0
-
-
-@dataclass(frozen=True)
-class ModelConfig:
-    input_channels: int = 12
-    base_channels: int = 32
-    channel_multipliers: tuple[int, ...] = (1, 2, 4, 8)
-    dropout: float = 0.0
-
-
-@dataclass(frozen=True)
-class LossConfig:
-    road: float = 1.0
-    landuse: float = 1.0
-    binary: float = 1.0
-    height: float = 0.5
-    centerline: float = 0.5
-    dice: float = 0.5
-    road_class_weights: tuple[float, ...] = (0.2, 1.0, 1.0, 1.0)
-    landuse_class_weights: tuple[float, ...] = (0.25, 1.0, 1.0, 1.0, 1.0, 1.0)
-    binary_positive_weights: tuple[float, ...] = (4.0, 2.0, 8.0)
-    centerline_positive_weight: float = 10.0
-    height_confidence_weights: tuple[float, ...] = (0.25, 0.5, 0.75, 1.0)
-
-
-@dataclass(frozen=True)
-class OptimizerConfig:
-    learning_rate: float = 3e-4
-    weight_decay: float = 1e-4
-
-
-@dataclass(frozen=True)
-class RunConfig:
     output_dir: Path
+    resolution: tuple[int, int] = (128, 128)
+    crop_size_pixels: int = 128
+    crop_stride_pixels: int = 32
+    augment: bool = True
+    vertical_crop_repeat: int = 2
+    block_out_channels: tuple[int, ...] = (64, 128, 256, 256)
+    layers_per_block: int = 2
+    attention_levels: tuple[bool, ...] = (False, False, False, True)
+    norm_num_groups: int = 8
+    diffusion_steps: int = 1000
+    inference_steps: int = 100
+    beta_schedule: str = "squaredcos_cap_v2"
     epochs: int = 100
-    batch_size: int = 4
-    num_workers: int = 0
+    batch_size: int = 16
+    learning_rate: float = 1e-4
+    weight_decay: float = 1e-4
+    num_workers: int = 8
+    pin_memory: bool = True
+    precision: Precision = "bf16"
     seed: int = 5132
-    device: str = "auto"
-    amp: bool = True
+    device: str = "cuda"
+    ema_decay: float = 0.999
     gradient_clip_norm: float = 1.0
     checkpoint_every: int = 5
     preview_every: int = 5
     early_stopping_patience: int = 20
-    max_train_steps_per_epoch: int | None = None
-    max_validation_steps: int | None = None
+    channel_loss_weights: tuple[float, ...] = (
+        1.0,
+        1.0,
+        1.0,
+        1.1,
+        1.1,
+        1.1,
+        1.2,
+        1.0,
+        1.2,
+        1.2,
+        1.4,
+        1.4,
+        0.6,
+        0.5,
+        0.8,
+        0.8,
+        0.5,
+        1.0,
+        1.0,
+    )
+    max_height_m: float = 180.0
+    max_surface_offset_m: float = 12.0
+    max_underground_depth_m: float = 40.0
+    max_elevated_height_m: float = 30.0
+    road_max_grade: float = 0.08
+    rail_max_grade: float = 0.035
+    auxiliary_threshold: float = 0.35
+    minimum_vector_component_pixels: int = 4
 
 
-@dataclass(frozen=True)
-class TrainingConfig:
-    data: DataConfig
-    model: ModelConfig
-    loss: LossConfig
-    optimizer: OptimizerConfig
-    run: RunConfig
-    source_path: Path
-    raw: dict[str, Any] = field(repr=False)
+class LayeredDiffusionConfigError(ValueError):
+    pass
 
 
-def _mapping(raw: dict[str, Any], key: str) -> dict[str, Any]:
-    value = raw.get(key, {})
-    if not isinstance(value, dict):
-        raise TrainingConfigError(f"'{key}' must be a mapping")
-    return value
-
-
-def _path(value: Any, *, base: Path, name: str, required: bool = True) -> Path | None:
+def _resolve(value: Any, *, base: Path, name: str) -> Path:
     if value is None:
-        if required:
-            raise TrainingConfigError(f"Missing required path '{name}'")
-        return None
+        raise LayeredDiffusionConfigError(f"Missing '{name}'")
     path = Path(str(value)).expanduser()
     if not path.is_absolute():
         path = base / path
     return path.resolve()
 
 
-def _float_tuple(value: Any, default: tuple[float, ...], name: str) -> tuple[float, ...]:
-    if value is None:
-        return default
+def _tuple(value: Any, *, name: str, cast) -> tuple:
+    if not isinstance(value, (list, tuple)):
+        raise LayeredDiffusionConfigError(f"'{name}' must be a list")
     try:
-        return tuple(float(item) for item in value)
+        result = tuple(cast(item) for item in value)
     except (TypeError, ValueError) as exc:
-        raise TrainingConfigError(f"'{name}' must be a list of numbers") from exc
-
-
-def _int_tuple(value: Any, default: tuple[int, ...], name: str) -> tuple[int, ...]:
-    if value is None:
-        return default
-    try:
-        result = tuple(int(item) for item in value)
-    except (TypeError, ValueError) as exc:
-        raise TrainingConfigError(f"'{name}' must be a list of integers") from exc
-    if not result or any(item <= 0 for item in result):
-        raise TrainingConfigError(f"'{name}' must contain positive integers")
+        raise LayeredDiffusionConfigError(f"Invalid values in '{name}'") from exc
+    if not result:
+        raise LayeredDiffusionConfigError(f"'{name}' cannot be empty")
     return result
 
 
-def load_training_config(path: str | Path) -> TrainingConfig:
+def load_layered_diffusion_config(path: str | Path) -> LayeredDiffusionConfig:
     config_path = Path(path).expanduser().resolve()
-    with config_path.open("r", encoding="utf-8") as handle:
-        raw = yaml.safe_load(handle) or {}
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
-        raise TrainingConfigError("The training config must be a mapping")
+        raise LayeredDiffusionConfigError("The config must be a mapping")
 
-    data_raw = _mapping(raw, "data")
-    model_raw = _mapping(raw, "model")
-    loss_raw = _mapping(raw, "loss")
-    optimizer_raw = _mapping(raw, "optimizer")
-    run_raw = _mapping(raw, "run")
+    data = raw.get("data", {})
+    model = raw.get("model", {})
+    diffusion = raw.get("diffusion", {})
+    run = raw.get("run", {})
+    vector = raw.get("vector", {})
+    if not all(isinstance(section, dict) for section in (data, model, diffusion, run, vector)):
+        raise LayeredDiffusionConfigError("Config sections must be mappings")
+
     base = config_path.parent.parent
-
-    data = DataConfig(
-        train_manifest=_path(
-            data_raw.get("train_manifest"), base=base, name="data.train_manifest"
+    resolution = _tuple(data.get("resolution", [128, 128]), name="data.resolution", cast=int)
+    block_channels = _tuple(
+        model.get("block_out_channels", [64, 128, 256, 256]),
+        name="model.block_out_channels",
+        cast=int,
+    )
+    attention = _tuple(
+        model.get("attention_levels", [False, False, False, True]),
+        name="model.attention_levels",
+        cast=bool,
+    )
+    weights = _tuple(
+        run.get(
+            "channel_loss_weights",
+            [
+                1.0,
+                1.0,
+                1.0,
+                1.1,
+                1.1,
+                1.1,
+                1.2,
+                1.0,
+                1.2,
+                1.2,
+                1.4,
+                1.4,
+                0.6,
+                0.5,
+                0.8,
+                0.8,
+                0.5,
+                1.0,
+                1.0,
+            ],
         ),
-        validation_manifest=_path(
-            data_raw.get("validation_manifest"),
+        name="run.channel_loss_weights",
+        cast=float,
+    )
+
+    config = LayeredDiffusionConfig(
+        train_manifest=_resolve(data.get("train_manifest"), base=base, name="data.train_manifest"),
+        validation_manifest=_resolve(
+            data.get("validation_manifest"),
             base=base,
             name="data.validation_manifest",
         ),
-        test_manifest=_path(
-            data_raw.get("test_manifest"),
-            base=base,
-            name="data.test_manifest",
-            required=False,
-        ),
-        augment=bool(data_raw.get("augment", True)),
-        height_scale_m=float(data_raw.get("height_scale_m", 180.0)),
+        output_dir=_resolve(run.get("output_dir"), base=base, name="run.output_dir"),
+        resolution=(int(resolution[0]), int(resolution[1])),
+        crop_size_pixels=int(data.get("crop_size_pixels", 128)),
+        crop_stride_pixels=int(data.get("crop_stride_pixels", 32)),
+        augment=bool(data.get("augment", True)),
+        vertical_crop_repeat=int(data.get("vertical_crop_repeat", 2)),
+        block_out_channels=block_channels,
+        layers_per_block=int(model.get("layers_per_block", 2)),
+        attention_levels=attention,
+        norm_num_groups=int(model.get("norm_num_groups", 8)),
+        diffusion_steps=int(diffusion.get("train_steps", 1000)),
+        inference_steps=int(diffusion.get("inference_steps", 100)),
+        beta_schedule=str(diffusion.get("beta_schedule", "squaredcos_cap_v2")),
+        epochs=int(run.get("epochs", 100)),
+        batch_size=int(run.get("batch_size", 16)),
+        learning_rate=float(run.get("learning_rate", 1e-4)),
+        weight_decay=float(run.get("weight_decay", 1e-4)),
+        num_workers=int(run.get("num_workers", 8)),
+        pin_memory=bool(run.get("pin_memory", True)),
+        precision=str(run.get("precision", "bf16")).lower(),
+        seed=int(run.get("seed", 5132)),
+        device=str(run.get("device", "cuda")),
+        ema_decay=float(run.get("ema_decay", 0.999)),
+        gradient_clip_norm=float(run.get("gradient_clip_norm", 1.0)),
+        checkpoint_every=int(run.get("checkpoint_every", 5)),
+        preview_every=int(run.get("preview_every", 5)),
+        early_stopping_patience=int(run.get("early_stopping_patience", 20)),
+        channel_loss_weights=weights,
+        max_height_m=float(vector.get("max_height_m", 180.0)),
+        max_surface_offset_m=float(vector.get("max_surface_offset_m", 12.0)),
+        max_underground_depth_m=float(vector.get("max_underground_depth_m", 40.0)),
+        max_elevated_height_m=float(vector.get("max_elevated_height_m", 30.0)),
+        road_max_grade=float(vector.get("road_max_grade", 0.08)),
+        rail_max_grade=float(vector.get("rail_max_grade", 0.035)),
+        auxiliary_threshold=float(vector.get("auxiliary_threshold", 0.35)),
+        minimum_vector_component_pixels=int(vector.get("minimum_component_pixels", 4)),
     )
+    _validate(config)
+    return config
 
-    model = ModelConfig(
-        input_channels=int(model_raw.get("input_channels", 12)),
-        base_channels=int(model_raw.get("base_channels", 32)),
-        channel_multipliers=_int_tuple(
-            model_raw.get("channel_multipliers"),
-            (1, 2, 4, 8),
-            "model.channel_multipliers",
-        ),
-        dropout=float(model_raw.get("dropout", 0.0)),
-    )
-    if model.input_channels <= 0 or model.base_channels <= 0:
-        raise TrainingConfigError("Model channel counts must be positive")
-    if not 0.0 <= model.dropout < 1.0:
-        raise TrainingConfigError("model.dropout must be in [0, 1)")
 
-    loss = LossConfig(
-        road=float(loss_raw.get("road", 1.0)),
-        landuse=float(loss_raw.get("landuse", 1.0)),
-        binary=float(loss_raw.get("binary", 1.0)),
-        height=float(loss_raw.get("height", 0.5)),
-        centerline=float(loss_raw.get("centerline", 0.5)),
-        dice=float(loss_raw.get("dice", 0.5)),
-        road_class_weights=_float_tuple(
-            loss_raw.get("road_class_weights"),
-            (0.2, 1.0, 1.0, 1.0),
-            "loss.road_class_weights",
-        ),
-        landuse_class_weights=_float_tuple(
-            loss_raw.get("landuse_class_weights"),
-            (0.25, 1.0, 1.0, 1.0, 1.0, 1.0),
-            "loss.landuse_class_weights",
-        ),
-        binary_positive_weights=_float_tuple(
-            loss_raw.get("binary_positive_weights"),
-            (4.0, 2.0, 8.0),
-            "loss.binary_positive_weights",
-        ),
-        centerline_positive_weight=float(loss_raw.get("centerline_positive_weight", 10.0)),
-        height_confidence_weights=_float_tuple(
-            loss_raw.get("height_confidence_weights"),
-            (0.25, 0.5, 0.75, 1.0),
-            "loss.height_confidence_weights",
-        ),
-    )
-    if len(loss.road_class_weights) != 4:
-        raise TrainingConfigError("loss.road_class_weights must have four entries")
-    if len(loss.landuse_class_weights) != 6:
-        raise TrainingConfigError("loss.landuse_class_weights must have six entries")
-    if len(loss.binary_positive_weights) != 3:
-        raise TrainingConfigError("loss.binary_positive_weights must have three entries")
-    if len(loss.height_confidence_weights) != 4:
-        raise TrainingConfigError("loss.height_confidence_weights must have four entries")
-
-    optimizer = OptimizerConfig(
-        learning_rate=float(optimizer_raw.get("learning_rate", 3e-4)),
-        weight_decay=float(optimizer_raw.get("weight_decay", 1e-4)),
-    )
-
-    output_dir = _path(run_raw.get("output_dir"), base=base, name="run.output_dir")
-    run = RunConfig(
-        output_dir=output_dir,
-        epochs=int(run_raw.get("epochs", 100)),
-        batch_size=int(run_raw.get("batch_size", 4)),
-        num_workers=int(run_raw.get("num_workers", 0)),
-        seed=int(run_raw.get("seed", 5132)),
-        device=str(run_raw.get("device", "auto")),
-        amp=bool(run_raw.get("amp", True)),
-        gradient_clip_norm=float(run_raw.get("gradient_clip_norm", 1.0)),
-        checkpoint_every=int(run_raw.get("checkpoint_every", 5)),
-        preview_every=int(run_raw.get("preview_every", 5)),
-        early_stopping_patience=int(run_raw.get("early_stopping_patience", 20)),
-        max_train_steps_per_epoch=(
-            int(run_raw["max_train_steps_per_epoch"])
-            if run_raw.get("max_train_steps_per_epoch") is not None
-            else None
-        ),
-        max_validation_steps=(
-            int(run_raw["max_validation_steps"])
-            if run_raw.get("max_validation_steps") is not None
-            else None
-        ),
-    )
-    if run.epochs <= 0 or run.batch_size <= 0 or run.num_workers < 0:
-        raise TrainingConfigError(
-            "epochs and batch_size must be positive; num_workers cannot be negative"
+def _validate(config: LayeredDiffusionConfig) -> None:
+    if len(config.resolution) != 2 or config.resolution[0] != config.resolution[1]:
+        raise LayeredDiffusionConfigError("data.resolution must be a square [height, width]")
+    scale = 2 ** (len(config.block_out_channels) - 1)
+    if any(size <= 0 or size % scale for size in config.resolution):
+        raise LayeredDiffusionConfigError(
+            f"Resolution dimensions must be positive and divisible by {scale}"
         )
-
-    return TrainingConfig(
-        data=data,
-        model=model,
-        loss=loss,
-        optimizer=optimizer,
-        run=run,
-        source_path=config_path,
-        raw=raw,
-    )
+    if len(config.attention_levels) != len(config.block_out_channels):
+        raise LayeredDiffusionConfigError(
+            "model.attention_levels must match model.block_out_channels"
+        )
+    if any(channel <= 0 or channel % config.norm_num_groups for channel in config.block_out_channels):
+        raise LayeredDiffusionConfigError(
+            "model.norm_num_groups must divide every block channel count"
+        )
+    if len(config.channel_loss_weights) != 19:
+        raise LayeredDiffusionConfigError("run.channel_loss_weights must contain 19 values")
+    if any(weight <= 0 for weight in config.channel_loss_weights):
+        raise LayeredDiffusionConfigError("Channel loss weights must be positive")
+    if config.crop_size_pixels <= 0 or config.crop_stride_pixels <= 0:
+        raise LayeredDiffusionConfigError("Crop size and stride must be positive")
+    if config.vertical_crop_repeat <= 0:
+        raise LayeredDiffusionConfigError("vertical_crop_repeat must be positive")
+    if config.diffusion_steps < 2:
+        raise LayeredDiffusionConfigError("diffusion.train_steps must be at least 2")
+    if not 1 <= config.inference_steps <= config.diffusion_steps:
+        raise LayeredDiffusionConfigError("Invalid inference step count")
+    if config.epochs <= 0 or config.batch_size <= 0 or config.num_workers < 0:
+        raise LayeredDiffusionConfigError("Invalid run dimensions")
+    if config.precision not in {"fp32", "fp16", "bf16"}:
+        raise LayeredDiffusionConfigError("run.precision must be fp32, fp16 or bf16")
+    if not 0.0 < config.ema_decay < 1.0:
+        raise LayeredDiffusionConfigError("run.ema_decay must be between 0 and 1")
+    if not 0.0 <= config.auxiliary_threshold < 1.0:
+        raise LayeredDiffusionConfigError("vector.auxiliary_threshold must be in [0,1)")
+    if config.road_max_grade <= 0 or config.rail_max_grade <= 0:
+        raise LayeredDiffusionConfigError("Vector grade limits must be positive")
+    if any(
+        value <= 0
+        for value in (
+            config.max_height_m,
+            config.max_surface_offset_m,
+            config.max_underground_depth_m,
+            config.max_elevated_height_m,
+        )
+    ):
+        raise LayeredDiffusionConfigError("Vector height and depth limits must be positive")

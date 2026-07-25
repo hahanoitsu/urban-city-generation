@@ -1,38 +1,48 @@
 # Code notes
 
-These notes explain the parts of the project that are most likely to be changed during the research.
+These notes cover the parts of the project that are most likely to change during the research.
 
-## Dataset code
+## Dataset package
 
 The dataset package is in `src/urban_dataset`.
 
-- `config.py` reads the YAML build files.
-- `extract.py` reads an OSM PBF and separates roads, buildings, land use, water, green areas and rail.
-- `classify.py` maps OSM tags to the classes used by the dataset.
+- `config.py` reads dataset YAML files.
+- `extract.py` reads OSM PBF data.
+- `classify.py` maps OSM tags to the project classes.
 - `enrich.py` estimates road widths and missing building heights.
-- `project.py` repairs invalid geometry, projects it into metres and clips it to the selected area.
-- `tile.py` creates the fixed 1,024 m grid.
-- `raster.py` converts vector features into the twelve model channels and the auxiliary masks.
-- `pipeline.py` runs one complete dataset build.
-- `audit.py` checks saved tensors and creates summary statistics.
-- `manifests.py` creates the train, validation and test lists.
+- `project.py` repairs and projects geometry.
+- `tile.py` creates the fixed metric grid.
+- `raster.py` writes the twelve channels and auxiliary masks.
+- `pipeline.py` runs single-area builds.
+- `prepared.py` and `corpus.py` handle reusable GeoPackages and multiple study areas.
+- `audit.py` checks saved tensors.
+- `manifests.py` creates train, validation and test lists.
 
-A build currently starts from a PBF. The next data refactor should prepare one GeoPackage per city and then build several manually selected coordinate boxes from that file. This avoids repeating the expensive extraction step whenever a box changes.
+## Baseline models
 
-## Model code
+The older model code is in `src/urban_model`.
 
-The reconstruction model is in `src/urban_model`.
+- `model.py` contains the reconstruction autoencoder.
+- `data.py` creates reconstruction and adjacent-tile extension samples.
+- `losses.py` and `metrics.py` implement the baseline objectives.
+- `train.py`, `evaluate.py` and `extend.py` run the deterministic experiments.
 
-- `data.py` converts the twelve saved channels into the targets used during training.
-- `model.py` contains the encoder, decoder and output heads.
-- `losses.py` combines the road, land-use, binary-mask, height and centre-line losses.
-- `metrics.py` calculates IoU and height error.
-- `train.py` runs training, validation, checkpointing and preview generation.
-- `evaluate.py` evaluates a saved checkpoint without changing it.
-- `config.py` reads the model YAML file.
+These models remain useful as comparison points, but they are no longer the active generation design.
 
-The encoder reduces a 256 × 256 tile to a 32 × 32 latent map. There are no encoder-to-decoder skip connections, so the reconstruction must pass through the latent representation.
+## Semantic diffusion
 
-## Current limitations
+`semantic_diffusion.py` is the public import surface for the active paper-based experiment. The implementation is split into `semantic_config.py`, `semantic_data.py`, `semantic_model.py` and `semantic_train.py`.
 
-The current corpus contains one central Singapore study area. It is useful for checking the software and the representation, but it is too small for a final model comparison. Local roads, rail and individual building shapes are also reconstructed less accurately than broad land-use regions.
+Together these modules:
+
+- converts twelve raster channels to one categorical semantic field;
+- creates dense crops for block generation;
+- creates adjacent masked pairs for outpainting;
+- builds a Hugging Face Diffusers U-Net and schedulers;
+- trains with DDPM epsilon prediction;
+- maintains exponential moving average weights;
+- transfers a block checkpoint into the wider outpainting input layer;
+- preserves the known semantic seed throughout denoising;
+- samples complete blocks or OSM-seeded extensions.
+
+The command-line entry points are kept in `urban_model.__main__` so experiments can be run with direct Python commands rather than wrapper scripts.

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "urban-city-generation"
-version = "0.3.0"
-description = "Tools for preparing urban map data and testing a reconstruction model."
+version = "0.9.0"
+description = "Multilayer 2D urban diffusion and structured city compilation."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{name = "Suvigya Goyal"}]
@@ -25,13 +25,28 @@ dependencies = [
 
 [project.optional-dependencies]
 osm = ["pyrosm>=0.11.0"]
-train = ["torch>=2.5"]
-dev = ["pytest>=8", "ruff>=0.9"]
-all = ["pyrosm>=0.11.0", "torch>=2.5", "pytest>=8", "ruff>=0.9"]
+ml = ["torch>=2.7"]
+diffusion = [
+  "torch>=2.7",
+  "diffusers>=0.35",
+  "scipy>=1.15",
+  "scikit-image>=0.25",
+]
+dev = ["pytest>=8", "ruff>=0.9", "scipy>=1.15", "scikit-image>=0.25"]
+all = [
+  "pyrosm>=0.11.0",
+  "torch>=2.7",
+  "diffusers>=0.35",
+  "scipy>=1.15",
+  "scikit-image>=0.25",
+  "pytest>=8",
+  "ruff>=0.9",
+]
 
 [project.scripts]
 urban-dataset = "urban_dataset.__main__:main"
-urban-train = "urban_model.__main__:main"
+urban-ai = "urban_ai.__main__:main"
+urban-model = "urban_model.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -39,6 +54,9 @@ where = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

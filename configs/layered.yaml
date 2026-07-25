@@ -1,0 +1,50 @@
+data:
+  train_manifest: data/manifests/corpus/train.jsonl
+  validation_manifest: data/manifests/corpus/validation.jsonl
+  resolution: [128, 128]
+  crop_size_pixels: 128
+  crop_stride_pixels: 32
+  augment: true
+  vertical_crop_repeat: 2
+
+model:
+  block_out_channels: [64, 128, 256, 256]
+  layers_per_block: 2
+  attention_levels: [false, false, false, true]
+  norm_num_groups: 8
+
+diffusion:
+  train_steps: 1000
+  inference_steps: 100
+  beta_schedule: squaredcos_cap_v2
+
+run:
+  output_dir: runs/layered-v2
+  epochs: 100
+  batch_size: 16
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  num_workers: 8
+  pin_memory: true
+  precision: bf16
+  seed: 5132
+  device: cuda
+  ema_decay: 0.999
+  gradient_clip_norm: 1.0
+  checkpoint_every: 5
+  preview_every: 5
+  early_stopping_patience: 20
+  channel_loss_weights:
+    [1.0, 1.0, 1.0, 1.1, 1.1, 1.1, 1.2, 1.0,
+     1.2, 1.2, 1.4, 1.4, 0.6,
+     0.5, 0.8, 0.8, 0.5, 1.0, 1.0]
+
+vector:
+  max_height_m: 180
+  max_surface_offset_m: 12
+  max_underground_depth_m: 40
+  max_elevated_height_m: 30
+  road_max_grade: 0.08
+  rail_max_grade: 0.035
+  auxiliary_threshold: 0.35
+  minimum_component_pixels: 4

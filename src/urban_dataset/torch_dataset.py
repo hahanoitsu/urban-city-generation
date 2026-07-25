@@ -38,7 +38,7 @@ class UrbanTileDataset:
         try:
             import torch
         except ImportError as exc:
-            raise RuntimeError("Install the project with the 'train' extra to use this class") from exc
+            raise RuntimeError("Install the project with the 'ml' extra to use this class") from exc
         row = self.rows[index]
         with np.load(self._resolve(row["sample_path"]), allow_pickle=False) as archive:
             layers = archive["layers"].astype(np.float32)
@@ -51,18 +51,28 @@ class UrbanTileDataset:
                 "metadata": row,
             }
             if self.include_auxiliary:
-                result["height_confidence"] = torch.from_numpy(
-                    archive["height_confidence"].astype(np.int64)
-                )
-                result["landuse_known_mask"] = torch.from_numpy(
-                    archive["landuse_known_mask"].astype(np.float32)
-                )
-                result["road_centerlines"] = torch.from_numpy(
-                    archive["road_centerlines"].astype(np.float32)
-                )
-                result["valid_data_mask"] = torch.from_numpy(
-                    archive["valid_data_mask"].astype(np.float32)
-                )
+                required = {
+                    "height_confidence": np.int64,
+                    "landuse_known_mask": np.float32,
+                    "road_centerlines": np.float32,
+                    "valid_data_mask": np.float32,
+                }
+                for name, dtype in required.items():
+                    result[name] = torch.from_numpy(archive[name].astype(dtype))
+                optional = {
+                    "road_vertical_masks": np.float32,
+                    "rail_vertical_masks": np.float32,
+                    "road_vertical_profiles_m": np.float32,
+                    "rail_vertical_profiles_m": np.float32,
+                    "road_vertical_profile_confidence": np.float32,
+                    "rail_vertical_profile_confidence": np.float32,
+                    "surface_transport_reservation": np.float32,
+                    "buildable_surface_mask": np.float32,
+                    "buildability_known_mask": np.float32,
+                }
+                for name, dtype in optional.items():
+                    if name in archive:
+                        result[name] = torch.from_numpy(archive[name].astype(dtype))
         if self.transform is not None:
             result = self.transform(result)
         return result

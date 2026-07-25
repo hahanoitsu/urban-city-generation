@@ -1,9 +1,10 @@
-name: urban-city-dataset
+name: urban-city
 channels:
   - conda-forge
 channel_priority: strict
 dependencies:
   - python=3.12
+  - pip
   - numpy>=2
   - pandas>=2.2
   - geopandas>=1
@@ -16,4 +17,5 @@ dependencies:
   - networkx>=3.3
   - tqdm>=4.66
   - pytest>=8
-  - pip
+  - pip:
+      - ruff>=0.9
