@@ -26,7 +26,8 @@ def test_profile_background_gets_weak_supervision() -> None:
     result = _add_profile_background_supervision(mask)
     profile_start = MODEL_CHANNELS - len(PROFILE_NAMES)
 
-    assert torch.all(result[:, profile_start:] == pytest.approx(PROFILE_BACKGROUND_WEIGHT))
+    expected = torch.full_like(result[:, profile_start:], PROFILE_BACKGROUND_WEIGHT)
+    assert torch.allclose(result[:, profile_start:], expected)
     assert torch.all(result[:, :profile_start] == 1.0)
 
 
@@ -37,8 +38,11 @@ def test_real_profile_confidence_is_not_reduced() -> None:
 
     result = _add_profile_background_supervision(mask)
 
-    assert torch.all(result[:, profile_start + 2] == pytest.approx(0.8))
-    assert torch.all(result[:, profile_start + 1] == pytest.approx(PROFILE_BACKGROUND_WEIGHT))
+    assert torch.allclose(result[:, profile_start + 2], torch.full_like(result[:, 0], 0.8))
+    assert torch.allclose(
+        result[:, profile_start + 1],
+        torch.full_like(result[:, 0], PROFILE_BACKGROUND_WEIGHT),
+    )
 
 
 def test_weighted_loss_includes_profile_background_and_uses_weighted_denominator() -> None:
