@@ -7,6 +7,7 @@ from typing import Any, Literal
 import yaml
 
 Precision = Literal["fp32", "fp16", "bf16"]
+PredictionType = Literal["epsilon", "v_prediction", "sample"]
 
 
 @dataclass(frozen=True)
@@ -14,18 +15,22 @@ class LayeredDiffusionConfig:
     train_manifest: Path
     validation_manifest: Path
     output_dir: Path
+    city_names: tuple[str, ...] = ("singapore",)
     resolution: tuple[int, int] = (128, 128)
     crop_size_pixels: int = 128
     crop_stride_pixels: int = 32
     augment: bool = True
     vertical_crop_repeat: int = 2
+    balance_cities: bool = True
     block_out_channels: tuple[int, ...] = (64, 128, 256, 256)
     layers_per_block: int = 2
     attention_levels: tuple[bool, ...] = (False, False, False, True)
     norm_num_groups: int = 8
+    coordinate_channels: bool = True
     diffusion_steps: int = 1000
     inference_steps: int = 100
     beta_schedule: str = "squaredcos_cap_v2"
+    prediction_type: PredictionType = "v_prediction"
     epochs: int = 100
     batch_size: int = 16
     learning_rate: float = 1e-4
@@ -111,6 +116,11 @@ def load_layered_diffusion_config(path: str | Path) -> LayeredDiffusionConfig:
         raise LayeredDiffusionConfigError("Config sections must be mappings")
 
     base = config_path.parent.parent
+    city_names = _tuple(
+        data.get("cities", ["singapore"]),
+        name="data.cities",
+        cast=lambda value: str(value).strip(),
+    )
     resolution = _tuple(data.get("resolution", [128, 128]), name="data.resolution", cast=int)
     block_channels = _tuple(
         model.get("block_out_channels", [64, 128, 256, 256]),
@@ -159,18 +169,22 @@ def load_layered_diffusion_config(path: str | Path) -> LayeredDiffusionConfig:
             name="data.validation_manifest",
         ),
         output_dir=_resolve(run.get("output_dir"), base=base, name="run.output_dir"),
+        city_names=city_names,
         resolution=(int(resolution[0]), int(resolution[1])),
         crop_size_pixels=int(data.get("crop_size_pixels", 128)),
         crop_stride_pixels=int(data.get("crop_stride_pixels", 32)),
         augment=bool(data.get("augment", True)),
         vertical_crop_repeat=int(data.get("vertical_crop_repeat", 2)),
+        balance_cities=bool(data.get("balance_cities", True)),
         block_out_channels=block_channels,
         layers_per_block=int(model.get("layers_per_block", 2)),
         attention_levels=attention,
         norm_num_groups=int(model.get("norm_num_groups", 8)),
+        coordinate_channels=bool(model.get("coordinate_channels", True)),
         diffusion_steps=int(diffusion.get("train_steps", 1000)),
         inference_steps=int(diffusion.get("inference_steps", 100)),
         beta_schedule=str(diffusion.get("beta_schedule", "squaredcos_cap_v2")),
+        prediction_type=str(diffusion.get("prediction_type", "v_prediction")),
         epochs=int(run.get("epochs", 100)),
         batch_size=int(run.get("batch_size", 16)),
         learning_rate=float(run.get("learning_rate", 1e-4)),
@@ -200,6 +214,10 @@ def load_layered_diffusion_config(path: str | Path) -> LayeredDiffusionConfig:
 
 
 def _validate(config: LayeredDiffusionConfig) -> None:
+    if len(set(config.city_names)) != len(config.city_names) or any(
+        not name for name in config.city_names
+    ):
+        raise LayeredDiffusionConfigError("data.cities must contain unique non-empty names")
     if len(config.resolution) != 2 or config.resolution[0] != config.resolution[1]:
         raise LayeredDiffusionConfigError("data.resolution must be a square [height, width]")
     scale = 2 ** (len(config.block_out_channels) - 1)
@@ -227,6 +245,8 @@ def _validate(config: LayeredDiffusionConfig) -> None:
         raise LayeredDiffusionConfigError("diffusion.train_steps must be at least 2")
     if not 1 <= config.inference_steps <= config.diffusion_steps:
         raise LayeredDiffusionConfigError("Invalid inference step count")
+    if config.prediction_type not in {"epsilon", "v_prediction", "sample"}:
+        raise LayeredDiffusionConfigError("Invalid diffusion.prediction_type")
     if config.epochs <= 0 or config.batch_size <= 0 or config.num_workers < 0:
         raise LayeredDiffusionConfigError("Invalid run dimensions")
     if config.precision not in {"fp32", "fp16", "bf16"}:
