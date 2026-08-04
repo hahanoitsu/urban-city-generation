@@ -23,6 +23,8 @@ class CityConditionedDataset(LayeredBlockDataset):
         self.city_indices: list[int] = []
         for tile_index, _, _ in self.crops:
             city_id = str(self.tiles.rows[tile_index].get("city_id", "")).strip()
+            if not city_id and len(config.city_names) == 1:
+                city_id = config.city_names[0]
             if city_id not in lookup:
                 raise ValueError(
                     f"Manifest city {city_id!r} is not listed in data.cities"
