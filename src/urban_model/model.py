@@ -6,6 +6,7 @@ from typing import Any
 import torch
 from torch import nn
 
+from .conditioning import build_model_input
 from .config import LayeredDiffusionConfig
 from .data import MODEL_CHANNELS, PROFILE_NAMES
 
@@ -37,9 +38,10 @@ def _block_types(config: LayeredDiffusionConfig) -> tuple[tuple[str, ...], tuple
 def build_model(config: LayeredDiffusionConfig) -> nn.Module:
     UNet2DModel, _, _ = _require_diffusers()
     down, up = _block_types(config)
+    condition_channels = len(config.city_names) + (2 if config.coordinate_channels else 0)
     return UNet2DModel(
         sample_size=config.resolution,
-        in_channels=MODEL_CHANNELS,
+        in_channels=MODEL_CHANNELS + condition_channels,
         out_channels=MODEL_CHANNELS,
         layers_per_block=config.layers_per_block,
         block_out_channels=config.block_out_channels,
@@ -55,7 +57,7 @@ def build_noise_scheduler(config: LayeredDiffusionConfig):
     return DDPMScheduler(
         num_train_timesteps=config.diffusion_steps,
         beta_schedule=config.beta_schedule,
-        prediction_type="epsilon",
+        prediction_type=config.prediction_type,
         clip_sample=True,
     )
 
@@ -73,7 +75,6 @@ def autocast_context(config: LayeredDiffusionConfig, device: torch.device):
 
 
 def _add_profile_background_supervision(mask: torch.Tensor) -> torch.Tensor:
-    """Give empty profile pixels a weak target instead of leaving them as free noise."""
     if mask.ndim != 4 or mask.shape[1] != MODEL_CHANNELS:
         raise ValueError(f"Expected supervision mask [B,{MODEL_CHANNELS},H,W], found {mask.shape}")
     result = mask.clone()
@@ -86,7 +87,7 @@ def _add_profile_background_supervision(mask: torch.Tensor) -> torch.Tensor:
 
 def weighted_diffusion_loss(
     prediction: torch.Tensor,
-    target_noise: torch.Tensor,
+    target: torch.Tensor,
     valid_mask: torch.Tensor,
     channel_weights: tuple[float, ...],
 ) -> torch.Tensor:
@@ -101,13 +102,11 @@ def weighted_diffusion_loss(
         )
     mask = _add_profile_background_supervision(mask)
     weighted_mask = weights * mask
-    squared = (prediction - target_noise).square() * weighted_mask
+    squared = (prediction - target).square() * weighted_mask
     return squared.sum() / weighted_mask.sum().clamp_min(1.0)
 
 
 class ModelEMA:
-    """EMA with warm-up so early checkpoints are not mostly random weights."""
-
     def __init__(self, model: nn.Module, decay: float) -> None:
         self.decay = float(decay)
         self.updates = 0
@@ -157,6 +156,7 @@ def sample_model(
     model: nn.Module,
     config: LayeredDiffusionConfig,
     *,
+    city: torch.Tensor,
     batch_size: int,
     device: torch.device,
     seed: int,
@@ -171,8 +171,10 @@ def sample_model(
     )
     model.eval()
     for timestep in scheduler.timesteps:
+        scaled = scheduler.scale_model_input(sample, timestep)
+        model_input = build_model_input(scaled, city, config)
         with autocast_context(config, device):
-            prediction = model(sample, timestep).sample
+            prediction = model(model_input, timestep).sample
         sample = scheduler.step(
             prediction.float(),
             timestep,
