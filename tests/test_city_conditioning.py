@@ -4,7 +4,12 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from urban_model.conditioning import build_model_input, parse_city_mix
+from urban_model.conditioning import (
+    VERTICAL_BACKGROUND_WEIGHT,
+    balance_vertical_supervision,
+    build_model_input,
+    parse_city_mix,
+)
 from urban_model.config import LayeredDiffusionConfig
 
 
@@ -49,3 +54,15 @@ def test_city_and_coordinate_channels_are_added() -> None:
     assert torch.allclose(model_input[1, 19:22, 0, 0], city[1])
     assert model_input[:, -2:].min().item() == pytest.approx(-1.0)
     assert model_input[:, -2:].max().item() == pytest.approx(1.0)
+
+
+def test_vertical_background_is_weaker_than_positive_pixels() -> None:
+    values = torch.full((19, 2, 2), -1.0)
+    values[9, 0, 1] = 1.0
+    supervision = torch.ones_like(values)
+
+    result = balance_vertical_supervision(values, supervision)
+
+    assert result[9, 0, 1].item() == pytest.approx(1.0)
+    assert result[9, 0, 0].item() == pytest.approx(VERTICAL_BACKGROUND_WEIGHT)
+    assert torch.all(result[:8] == 1.0)
