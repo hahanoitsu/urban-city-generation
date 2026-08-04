@@ -7,13 +7,14 @@ from pathlib import Path
 
 from .config import load_layered_diffusion_config
 from .data import check_layered_data
+from .diagnose import diagnose_layered_diffusion
 from .train import sample_layered_checkpoint, train_layered_diffusion
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="urban-model",
-        description="Train and sample multilayer 2D urban diffusion models.",
+        description="Train, inspect and sample multilayer 2D urban diffusion models.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -37,6 +38,20 @@ def _parser() -> argparse.ArgumentParser:
     sample.add_argument("--seed", type=int)
     sample.add_argument("--device")
     sample.add_argument("--overwrite", action="store_true")
+
+    diagnose = commands.add_parser(
+        "diagnose",
+        help="Inspect checkpoint, denoising and reverse-sampling consistency",
+    )
+    diagnose.add_argument("--config", default="configs/layered.yaml", type=Path)
+    diagnose.add_argument("--checkpoint", required=True, type=Path)
+    diagnose.add_argument("--sample", required=True, type=Path)
+    diagnose.add_argument("--output", default="runs/layered-diagnose", type=Path)
+    diagnose.add_argument("--seed", type=int)
+    diagnose.add_argument("--device")
+    diagnose.add_argument("--crop-top", type=int)
+    diagnose.add_argument("--crop-left", type=int)
+    diagnose.add_argument("--overwrite", action="store_true")
     return parser
 
 
@@ -63,6 +78,18 @@ def main(argv: list[str] | None = None) -> int:
                 count=args.count,
                 seed=args.seed,
                 device_name=args.device,
+                overwrite=args.overwrite,
+            )
+        elif args.command == "diagnose":
+            result = diagnose_layered_diffusion(
+                config,
+                args.checkpoint,
+                args.sample,
+                args.output,
+                device_name=args.device,
+                seed=args.seed,
+                crop_top=args.crop_top,
+                crop_left=args.crop_left,
                 overwrite=args.overwrite,
             )
         else:
