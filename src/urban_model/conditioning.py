@@ -9,6 +9,20 @@ import torch
 from .config import LayeredDiffusionConfig
 from .data import LayeredBlockDataset, check_layered_data
 
+VERTICAL_BACKGROUND_WEIGHT = 0.02
+
+
+def balance_vertical_supervision(
+    values: torch.Tensor,
+    supervision: torch.Tensor,
+) -> torch.Tensor:
+    result = supervision.clone()
+    valid = result[:1].clamp(0.0, 1.0)
+    active = values[8:12] > 0.0
+    background = valid * VERTICAL_BACKGROUND_WEIGHT
+    result[8:12] = torch.where(active, valid, background)
+    return result
+
 
 class CityConditionedDataset(LayeredBlockDataset):
     def __init__(
@@ -38,6 +52,9 @@ class CityConditionedDataset(LayeredBlockDataset):
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         sample = super().__getitem__(index)
+        sample["valid_mask"] = balance_vertical_supervision(
+            sample["x0"], sample["valid_mask"]
+        )
         city = torch.zeros(len(self.config.city_names), dtype=torch.float32)
         city[self.city_indices[index]] = 1.0
         sample["city"] = city
