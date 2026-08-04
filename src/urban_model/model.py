@@ -10,7 +10,7 @@ from .conditioning import build_model_input
 from .config import LayeredDiffusionConfig
 from .data import MODEL_CHANNELS, PROFILE_NAMES
 
-PROFILE_BACKGROUND_WEIGHT = 0.05
+PROFILE_BACKGROUND_WEIGHT = 0.01
 
 
 def _require_diffusers():
@@ -91,7 +91,6 @@ def weighted_diffusion_loss(
     valid_mask: torch.Tensor,
     channel_weights: tuple[float, ...],
 ) -> torch.Tensor:
-    weights = prediction.new_tensor(channel_weights).reshape(1, -1, 1, 1)
     mask = valid_mask.to(dtype=prediction.dtype)
     if mask.shape[1] == 1:
         mask = mask.expand(-1, prediction.shape[1], -1, -1)
@@ -100,10 +99,17 @@ def weighted_diffusion_loss(
             f"Supervision mask shape {tuple(mask.shape)} does not match prediction "
             f"shape {tuple(prediction.shape)}"
         )
+
     mask = _add_profile_background_supervision(mask)
-    weighted_mask = weights * mask
-    squared = (prediction - target).square() * weighted_mask
-    return squared.sum() / weighted_mask.sum().clamp_min(1.0)
+    squared = (prediction - target).square()
+    numerator = (squared * mask).sum(dim=(0, 2, 3))
+    denominator = mask.sum(dim=(0, 2, 3))
+    channel_loss = numerator / denominator.clamp_min(1e-8)
+
+    weights = prediction.new_tensor(channel_weights)
+    active = (denominator > 0).to(dtype=prediction.dtype)
+    weights = weights * active
+    return (channel_loss * weights).sum() / weights.sum().clamp_min(1.0)
 
 
 class ModelEMA:
