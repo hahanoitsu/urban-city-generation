@@ -45,7 +45,7 @@ def test_real_profile_confidence_is_not_reduced() -> None:
     )
 
 
-def test_weighted_loss_includes_profile_background_and_uses_weighted_denominator() -> None:
+def test_weighted_loss_normalises_channels_separately() -> None:
     prediction = torch.zeros((1, MODEL_CHANNELS, 1, 1), dtype=torch.float32)
     target = torch.zeros_like(prediction)
     mask = _base_mask(1, 1)
@@ -54,17 +54,31 @@ def test_weighted_loss_includes_profile_background_and_uses_weighted_denominator
 
     weights = tuple(1.0 for _ in range(MODEL_CHANNELS))
     loss = weighted_diffusion_loss(prediction, target, mask, weights)
-    expected = PROFILE_BACKGROUND_WEIGHT / (
-        profile_start + len(PROFILE_NAMES) * PROFILE_BACKGROUND_WEIGHT
-    )
 
-    assert loss.item() == pytest.approx(expected)
+    assert loss.item() == pytest.approx(1.0 / MODEL_CHANNELS)
 
     prediction.zero_()
     prediction[:, 0] = 1.0
     weighted = (2.0,) + tuple(1.0 for _ in range(MODEL_CHANNELS - 1))
     loss = weighted_diffusion_loss(prediction, target, torch.ones_like(mask), weighted)
     assert loss.item() == pytest.approx(2.0 / (MODEL_CHANNELS + 1.0))
+
+
+def test_sparse_profile_error_is_not_lost_in_dense_channels() -> None:
+    prediction = torch.zeros((1, MODEL_CHANNELS, 4, 4), dtype=torch.float32)
+    target = torch.zeros_like(prediction)
+    mask = torch.zeros_like(prediction)
+    profile_start = MODEL_CHANNELS - len(PROFILE_NAMES)
+
+    mask[:, 0] = 1.0
+    mask[:, profile_start, 0, 0] = 1.0
+    prediction[:, 0] = 1.0
+    prediction[:, profile_start] = 1.0
+
+    weights = tuple(1.0 for _ in range(MODEL_CHANNELS))
+    loss = weighted_diffusion_loss(prediction, target, mask, weights)
+
+    assert loss.item() == pytest.approx(2.0 / (1.0 + len(PROFILE_NAMES)))
 
 
 def test_preview_seed_is_fixed_for_a_run() -> None:
