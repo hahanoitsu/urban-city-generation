@@ -171,8 +171,9 @@ def sample_model(
     )
     model.eval()
     for timestep in scheduler.timesteps:
+        model_input = scheduler.scale_model_input(sample, timestep)
         with autocast_context(config, device):
-            prediction = model(sample, timestep).sample
+            prediction = model(model_input, timestep).sample
         sample = scheduler.step(
             prediction.float(),
             timestep,
