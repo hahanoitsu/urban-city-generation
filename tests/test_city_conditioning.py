@@ -68,7 +68,7 @@ def test_surface_transport_background_uses_moderate_balance() -> None:
     result = balance_surface_transport_supervision(values, supervision)
 
     assert result[3, 0, 1].item() == pytest.approx(1.0)
-    assert result[3, 0, 0].item() == pytest.approx((1.0 / 3.0) ** 0.5)
+    assert result[3, 0, 0].item() == pytest.approx((1.0 / 3.0) ** 0.25)
     assert torch.all(result[:3] == 1.0)
     assert torch.all(result[7:] == 1.0)
 
