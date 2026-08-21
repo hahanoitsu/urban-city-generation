@@ -9,7 +9,8 @@ import torch
 from .config import LayeredDiffusionConfig
 from .data import LayeredBlockDataset, check_layered_data
 
-VERTICAL_BACKGROUND_WEIGHT = 0.02
+VERTICAL_BACKGROUND_MIN = 0.01
+VERTICAL_BACKGROUND_MAX = 0.5
 
 
 def balance_vertical_supervision(
@@ -19,7 +20,20 @@ def balance_vertical_supervision(
     result = supervision.clone()
     valid = result[:1].clamp(0.0, 1.0)
     active = values[8:12] > 0.0
-    background = valid * VERTICAL_BACKGROUND_WEIGHT
+    valid_pixels = valid > 0.0
+
+    positive = (active & valid_pixels).sum(dim=(-2, -1)).float()
+    negative = ((~active) & valid_pixels).sum(dim=(-2, -1)).float()
+    background_weights = (positive / negative.clamp_min(1.0)).clamp(
+        VERTICAL_BACKGROUND_MIN,
+        VERTICAL_BACKGROUND_MAX,
+    )
+    background_weights = torch.where(
+        positive > 0,
+        background_weights,
+        torch.ones_like(background_weights),
+    )
+    background = valid * background_weights[:, None, None]
     result[8:12] = torch.where(active, valid, background)
     return result
 
