@@ -5,8 +5,11 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from urban_model.conditioning import (
+    SURFACE_TRANSPORT_BACKGROUND_MAX,
+    SURFACE_TRANSPORT_BACKGROUND_MIN,
     VERTICAL_BACKGROUND_MAX,
     VERTICAL_BACKGROUND_MIN,
+    balance_surface_transport_supervision,
     balance_vertical_supervision,
     build_model_input,
     parse_city_mix,
@@ -55,6 +58,32 @@ def test_city_and_coordinate_channels_are_added() -> None:
     assert torch.allclose(model_input[1, 19:22, 0, 0], city[1])
     assert model_input[:, -2:].min().item() == pytest.approx(-1.0)
     assert model_input[:, -2:].max().item() == pytest.approx(1.0)
+
+
+def test_surface_transport_background_uses_moderate_balance() -> None:
+    values = torch.full((19, 2, 2), -1.0)
+    values[3, 0, 1] = 1.0
+    supervision = torch.ones_like(values)
+
+    result = balance_surface_transport_supervision(values, supervision)
+
+    assert result[3, 0, 1].item() == pytest.approx(1.0)
+    assert result[3, 0, 0].item() == pytest.approx((1.0 / 3.0) ** 0.5)
+    assert torch.all(result[:3] == 1.0)
+    assert torch.all(result[7:] == 1.0)
+
+
+def test_surface_transport_background_uses_bounds_and_keeps_empty_channels_negative() -> None:
+    values = torch.full((19, 100, 100), -1.0)
+    values[3, 0, 0] = 1.0
+    values[4, :80] = 1.0
+    supervision = torch.ones_like(values)
+
+    result = balance_surface_transport_supervision(values, supervision)
+
+    assert result[3, 1, 1].item() == pytest.approx(SURFACE_TRANSPORT_BACKGROUND_MIN)
+    assert result[4, 90, 0].item() == pytest.approx(SURFACE_TRANSPORT_BACKGROUND_MAX)
+    assert result[5, 0, 0].item() == pytest.approx(1.0)
 
 
 def test_vertical_background_balances_positive_pixels() -> None:
