@@ -11,7 +11,7 @@ from .data import LayeredBlockDataset, check_layered_data
 
 SURFACE_TRANSPORT_BACKGROUND_MIN = 0.10
 SURFACE_TRANSPORT_BACKGROUND_MAX = 0.85
-VERTICAL_BACKGROUND_MIN = 0.01
+VERTICAL_BACKGROUND_MIN = 0.03
 VERTICAL_BACKGROUND_MAX = 0.5
 
 
@@ -63,7 +63,7 @@ def balance_vertical_supervision(
         valid_pixels,
         minimum=VERTICAL_BACKGROUND_MIN,
         maximum=VERTICAL_BACKGROUND_MAX,
-        power=1.0,
+        power=0.5,
     )
     background = valid * background_weights[:, None, None]
     result[8:12] = torch.where(active, valid, background)
