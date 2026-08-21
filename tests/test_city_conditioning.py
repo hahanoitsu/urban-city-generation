@@ -94,18 +94,18 @@ def test_vertical_background_balances_positive_pixels() -> None:
     result = balance_vertical_supervision(values, supervision)
 
     assert result[9, 0, 1].item() == pytest.approx(1.0)
-    assert result[9, 0, 0].item() == pytest.approx(1.0 / 3.0)
+    assert result[9, 0, 0].item() == pytest.approx((1.0 / 3.0) ** 0.5)
     assert torch.all(result[:8] == 1.0)
 
 
 def test_vertical_background_uses_bounds_and_keeps_empty_channels_negative() -> None:
-    values = torch.full((19, 20, 20), -1.0)
+    values = torch.full((19, 100, 100), -1.0)
     values[8, 0, 0] = 1.0
-    values[9, :10] = 1.0
+    values[9, :80] = 1.0
     supervision = torch.ones_like(values)
 
     result = balance_vertical_supervision(values, supervision)
 
     assert result[8, 1, 1].item() == pytest.approx(VERTICAL_BACKGROUND_MIN)
-    assert result[9, 15, 0].item() == pytest.approx(VERTICAL_BACKGROUND_MAX)
+    assert result[9, 90, 0].item() == pytest.approx(VERTICAL_BACKGROUND_MAX)
     assert result[10, 0, 0].item() == pytest.approx(1.0)
