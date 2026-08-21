@@ -9,8 +9,8 @@ import torch
 from .config import LayeredDiffusionConfig
 from .data import LayeredBlockDataset, check_layered_data
 
-SURFACE_TRANSPORT_BACKGROUND_MIN = 0.05
-SURFACE_TRANSPORT_BACKGROUND_MAX = 0.75
+SURFACE_TRANSPORT_BACKGROUND_MIN = 0.10
+SURFACE_TRANSPORT_BACKGROUND_MAX = 0.85
 VERTICAL_BACKGROUND_MIN = 0.01
 VERTICAL_BACKGROUND_MAX = 0.5
 
@@ -21,14 +21,12 @@ def _balanced_background_weights(
     *,
     minimum: float,
     maximum: float,
-    square_root: bool,
+    power: float,
 ) -> torch.Tensor:
     positive = (active & valid_pixels).sum(dim=(-2, -1)).float()
     negative = ((~active) & valid_pixels).sum(dim=(-2, -1)).float()
     ratio = positive / negative.clamp_min(1.0)
-    if square_root:
-        ratio = ratio.sqrt()
-    weights = ratio.clamp(minimum, maximum)
+    weights = ratio.pow(power).clamp(minimum, maximum)
     return torch.where(positive > 0, weights, torch.ones_like(weights))
 
 
@@ -45,7 +43,7 @@ def balance_surface_transport_supervision(
         valid_pixels,
         minimum=SURFACE_TRANSPORT_BACKGROUND_MIN,
         maximum=SURFACE_TRANSPORT_BACKGROUND_MAX,
-        square_root=True,
+        power=0.25,
     )
     background = valid * background_weights[:, None, None]
     result[3:7] = torch.where(active, valid, background)
@@ -65,7 +63,7 @@ def balance_vertical_supervision(
         valid_pixels,
         minimum=VERTICAL_BACKGROUND_MIN,
         maximum=VERTICAL_BACKGROUND_MAX,
-        square_root=False,
+        power=1.0,
     )
     background = valid * background_weights[:, None, None]
     result[8:12] = torch.where(active, valid, background)
