@@ -9,8 +9,47 @@ import torch
 from .config import LayeredDiffusionConfig
 from .data import LayeredBlockDataset, check_layered_data
 
+SURFACE_TRANSPORT_BACKGROUND_MIN = 0.05
+SURFACE_TRANSPORT_BACKGROUND_MAX = 0.75
 VERTICAL_BACKGROUND_MIN = 0.01
 VERTICAL_BACKGROUND_MAX = 0.5
+
+
+def _balanced_background_weights(
+    active: torch.Tensor,
+    valid_pixels: torch.Tensor,
+    *,
+    minimum: float,
+    maximum: float,
+    square_root: bool,
+) -> torch.Tensor:
+    positive = (active & valid_pixels).sum(dim=(-2, -1)).float()
+    negative = ((~active) & valid_pixels).sum(dim=(-2, -1)).float()
+    ratio = positive / negative.clamp_min(1.0)
+    if square_root:
+        ratio = ratio.sqrt()
+    weights = ratio.clamp(minimum, maximum)
+    return torch.where(positive > 0, weights, torch.ones_like(weights))
+
+
+def balance_surface_transport_supervision(
+    values: torch.Tensor,
+    supervision: torch.Tensor,
+) -> torch.Tensor:
+    result = supervision.clone()
+    valid = result[:1].clamp(0.0, 1.0)
+    active = values[3:7] > 0.0
+    valid_pixels = valid > 0.0
+    background_weights = _balanced_background_weights(
+        active,
+        valid_pixels,
+        minimum=SURFACE_TRANSPORT_BACKGROUND_MIN,
+        maximum=SURFACE_TRANSPORT_BACKGROUND_MAX,
+        square_root=True,
+    )
+    background = valid * background_weights[:, None, None]
+    result[3:7] = torch.where(active, valid, background)
+    return result
 
 
 def balance_vertical_supervision(
@@ -21,17 +60,12 @@ def balance_vertical_supervision(
     valid = result[:1].clamp(0.0, 1.0)
     active = values[8:12] > 0.0
     valid_pixels = valid > 0.0
-
-    positive = (active & valid_pixels).sum(dim=(-2, -1)).float()
-    negative = ((~active) & valid_pixels).sum(dim=(-2, -1)).float()
-    background_weights = (positive / negative.clamp_min(1.0)).clamp(
-        VERTICAL_BACKGROUND_MIN,
-        VERTICAL_BACKGROUND_MAX,
-    )
-    background_weights = torch.where(
-        positive > 0,
-        background_weights,
-        torch.ones_like(background_weights),
+    background_weights = _balanced_background_weights(
+        active,
+        valid_pixels,
+        minimum=VERTICAL_BACKGROUND_MIN,
+        maximum=VERTICAL_BACKGROUND_MAX,
+        square_root=False,
     )
     background = valid * background_weights[:, None, None]
     result[8:12] = torch.where(active, valid, background)
@@ -66,6 +100,9 @@ class CityConditionedDataset(LayeredBlockDataset):
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         sample = super().__getitem__(index)
+        sample["valid_mask"] = balance_surface_transport_supervision(
+            sample["x0"], sample["valid_mask"]
+        )
         sample["valid_mask"] = balance_vertical_supervision(
             sample["x0"], sample["valid_mask"]
         )
