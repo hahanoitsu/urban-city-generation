@@ -60,7 +60,7 @@ def test_city_and_coordinate_channels_are_added() -> None:
     assert model_input[:, -2:].max().item() == pytest.approx(1.0)
 
 
-def test_surface_transport_background_uses_moderate_balance() -> None:
+def test_surface_transport_background_uses_mild_balance() -> None:
     values = torch.full((19, 2, 2), -1.0)
     values[3, 0, 1] = 1.0
     supervision = torch.ones_like(values)
@@ -68,21 +68,21 @@ def test_surface_transport_background_uses_moderate_balance() -> None:
     result = balance_surface_transport_supervision(values, supervision)
 
     assert result[3, 0, 1].item() == pytest.approx(1.0)
-    assert result[3, 0, 0].item() == pytest.approx((1.0 / 3.0) ** 0.25)
+    assert result[3, 0, 0].item() == pytest.approx((1.0 / 3.0) ** 0.125)
     assert torch.all(result[:3] == 1.0)
     assert torch.all(result[7:] == 1.0)
 
 
 def test_surface_transport_background_uses_bounds_and_keeps_empty_channels_negative() -> None:
-    values = torch.full((19, 128, 128), -1.0)
+    values = torch.full((19, 256, 256), -1.0)
     values[3, 0, 0] = 1.0
-    values[4, :110] = 1.0
+    values[4, :230] = 1.0
     supervision = torch.ones_like(values)
 
     result = balance_surface_transport_supervision(values, supervision)
 
     assert result[3, 1, 1].item() == pytest.approx(SURFACE_TRANSPORT_BACKGROUND_MIN)
-    assert result[4, 120, 0].item() == pytest.approx(SURFACE_TRANSPORT_BACKGROUND_MAX)
+    assert result[4, 250, 0].item() == pytest.approx(SURFACE_TRANSPORT_BACKGROUND_MAX)
     assert result[5, 0, 0].item() == pytest.approx(1.0)
 
 
@@ -94,18 +94,18 @@ def test_vertical_background_balances_positive_pixels() -> None:
     result = balance_vertical_supervision(values, supervision)
 
     assert result[9, 0, 1].item() == pytest.approx(1.0)
-    assert result[9, 0, 0].item() == pytest.approx((1.0 / 8.0) ** 0.5)
+    assert result[9, 0, 0].item() == pytest.approx((1.0 / 8.0) ** 0.25)
     assert torch.all(result[:8] == 1.0)
 
 
 def test_vertical_background_uses_bounds_and_keeps_empty_channels_negative() -> None:
-    values = torch.full((19, 100, 100), -1.0)
+    values = torch.full((19, 200, 200), -1.0)
     values[8, 0, 0] = 1.0
-    values[9, :80] = 1.0
+    values[9, :180] = 1.0
     supervision = torch.ones_like(values)
 
     result = balance_vertical_supervision(values, supervision)
 
     assert result[8, 1, 1].item() == pytest.approx(VERTICAL_BACKGROUND_MIN)
-    assert result[9, 90, 0].item() == pytest.approx(VERTICAL_BACKGROUND_MAX)
+    assert result[9, 190, 0].item() == pytest.approx(VERTICAL_BACKGROUND_MAX)
     assert result[10, 0, 0].item() == pytest.approx(1.0)
