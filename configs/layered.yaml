@@ -1,25 +1,29 @@
 data:
   train_manifest: data/manifests/corpus/train.jsonl
   validation_manifest: data/manifests/corpus/validation.jsonl
+  cities: [singapore]
   resolution: [128, 128]
   crop_size_pixels: 128
   crop_stride_pixels: 32
   augment: true
   vertical_crop_repeat: 2
+  balance_cities: true
 
 model:
   block_out_channels: [64, 128, 256, 256]
   layers_per_block: 2
   attention_levels: [false, false, false, true]
   norm_num_groups: 8
+  coordinate_channels: true
 
 diffusion:
   train_steps: 1000
   inference_steps: 100
   beta_schedule: squaredcos_cap_v2
+  prediction_type: v_prediction
 
 run:
-  output_dir: runs/layered-v2
+  output_dir: runs/layered-v3
   epochs: 100
   batch_size: 16
   learning_rate: 0.0001
