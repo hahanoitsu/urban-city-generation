@@ -74,15 +74,15 @@ def test_surface_transport_background_uses_mild_balance() -> None:
 
 
 def test_surface_transport_background_uses_bounds_and_keeps_empty_channels_negative() -> None:
-    values = torch.full((19, 256, 256), -1.0)
+    values = torch.full((19, 300, 300), -1.0)
     values[3, 0, 0] = 1.0
-    values[4, :230] = 1.0
+    values[4, :270] = 1.0
     supervision = torch.ones_like(values)
 
     result = balance_surface_transport_supervision(values, supervision)
 
     assert result[3, 1, 1].item() == pytest.approx(SURFACE_TRANSPORT_BACKGROUND_MIN)
-    assert result[4, 250, 0].item() == pytest.approx(SURFACE_TRANSPORT_BACKGROUND_MAX)
+    assert result[4, 290, 0].item() == pytest.approx(SURFACE_TRANSPORT_BACKGROUND_MAX)
     assert result[5, 0, 0].item() == pytest.approx(1.0)
 
 
