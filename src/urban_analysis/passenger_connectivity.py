@@ -5,7 +5,6 @@ import csv
 import json
 import re
 import shutil
-from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -52,6 +51,14 @@ def _value(row: Any, key: str) -> str:
     if direct is not None and _clean(direct):
         return _clean(direct)
     return _clean(_other_tags(row.get("other_tags")).get(key))
+
+
+def _display_value(row: Any, key: str) -> str:
+    direct = row.get(key)
+    if direct is not None and _clean(direct):
+        return str(direct).strip()
+    value = _other_tags(row.get("other_tags")).get(key)
+    return "" if not _clean(value) else str(value).strip()
 
 
 def _rail_station_kind(row: Any) -> str | None:
@@ -115,10 +122,15 @@ def extract_station_features(
             kind = _rail_station_kind(row)
             if kind is None or row.geometry is None or row.geometry.is_empty:
                 continue
-            name = str(row.get("name") or _other_tags(row.get("other_tags")).get("name") or "").strip()
+            name = _display_value(row, "name")
+            source_id = row.get("osm_id")
+            if not _clean(source_id):
+                source_id = row.get("osm_way_id")
+            if not _clean(source_id):
+                source_id = index
             rows.append(
                 {
-                    "source_index": str(row.get("osm_id", row.get("osm_way_id", index))),
+                    "source_index": str(source_id),
                     "kind": kind,
                     "name": name,
                     "name_key": _normalise_name(name),
@@ -265,7 +277,10 @@ def _tile_regions(states: list[dict[str, Any]]) -> tuple[dict[str, int], list[di
             if left.distance(right) <= 0.1:
                 adjacency.add_edge(left_id, right_id)
 
-    components = sorted(nx.connected_components(adjacency), key=lambda values: (-len(values), sorted(values)[0]))
+    components = sorted(
+        nx.connected_components(adjacency),
+        key=lambda values: (-len(values), sorted(values)[0]),
+    )
     mapping: dict[str, int] = {}
     regions: list[dict[str, Any]] = []
     shapes = dict(tiles)
@@ -314,7 +329,9 @@ def attach_station_groups(
                 if current is None or distance < current["distance_m"]:
                     nearest_node = min(
                         (record["left"], record["right"]),
-                        key=lambda node: Point(graph.nodes[node]["position_projected_m"][:2]).distance(point),
+                        key=lambda node: Point(
+                            graph.nodes[node]["position_projected_m"][:2]
+                        ).distance(point),
                     )
                     by_component[component] = {
                         "component": component,
@@ -473,7 +490,6 @@ def audit_passenger_connectivity(
             assisted, attachments, region_of_tile
         )
         attached = [row for row in attachments if row["attachments"]]
-        transfers = [row for row in attachments if len(row["attachments"]) >= 2]
         distances = [
             value["distance_m"]
             for row in attachments
