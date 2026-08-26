@@ -2,8 +2,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from urban_analysis.analyse import _pca
-from urban_analysis.morphology import describe_tile
+from urban_analysis.analyse import _control_frame, _pca
+from urban_analysis.morphology import (
+    MORPHOLOGY_CONTROL_FEATURES,
+    MORPHOLOGY_FEATURES,
+    describe_tile,
+)
 
 
 def _tile():
@@ -61,6 +65,8 @@ def test_descriptor_measures_network_structure_and_density():
     assert result["road_components"] == 1
     assert result["road_junction_count"] == 1
     assert result["road_dead_end_count"] == 4
+    assert result["road_junctions_per_km"] > 0
+    assert result["road_dead_ends_per_km"] > result["road_junctions_per_km"]
     assert result["road_largest_component_fraction"] == pytest.approx(1.0)
 
     assert result["rail_present"] == 1
@@ -81,7 +87,50 @@ def test_dead_ends_on_tile_boundary_are_not_counted():
 
     assert result["road_components"] == 1
     assert result["road_dead_end_count"] == 0
+    assert result["road_dead_ends_per_km"] == pytest.approx(0.0)
     assert result["road_boundary_sides"] == 2
+
+
+def test_control_features_do_not_duplicate_validity_or_height_metrics():
+    assert "road_junctions_per_km" in MORPHOLOGY_FEATURES
+    assert "road_dead_ends_per_km" in MORPHOLOGY_FEATURES
+    assert "road_junctions_per_km" in MORPHOLOGY_CONTROL_FEATURES
+    assert "road_dead_ends_per_km" in MORPHOLOGY_CONTROL_FEATURES
+
+    assert "road_components" not in MORPHOLOGY_CONTROL_FEATURES
+    assert "road_largest_component_fraction" not in MORPHOLOGY_CONTROL_FEATURES
+    assert "rail_components" not in MORPHOLOGY_CONTROL_FEATURES
+    assert "rail_largest_component_fraction" not in MORPHOLOGY_CONTROL_FEATURES
+
+    height_controls = [
+        name for name in MORPHOLOGY_CONTROL_FEATURES if name.startswith("building_height")
+    ]
+    assert height_controls == ["building_height_mean_m"]
+
+
+def test_control_frame_treats_rail_mode_share_as_missing_without_rail():
+    frame = pd.DataFrame(
+        {
+            "rail_present": [0, 1],
+            "rail_length_km_per_km2": [0.0, 2.0],
+            "rail_underground_share": [0.0, 0.75],
+            "rail_elevated_share": [0.0, 0.25],
+        }
+    )
+
+    control = _control_frame(
+        frame,
+        [
+            "rail_length_km_per_km2",
+            "rail_underground_share",
+            "rail_elevated_share",
+        ],
+    )
+
+    assert np.isnan(control.loc[0, "rail_underground_share"])
+    assert np.isnan(control.loc[0, "rail_elevated_share"])
+    assert control.loc[1, "rail_underground_share"] == pytest.approx(0.75)
+    assert control.loc[1, "rail_elevated_share"] == pytest.approx(0.25)
 
 
 def test_pca_drops_constant_features_and_reports_variance():
