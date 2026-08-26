@@ -7,7 +7,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .morphology import MORPHOLOGY_FEATURES, describe_tile
+from .morphology import (
+    MORPHOLOGY_CONTROL_FEATURES,
+    MORPHOLOGY_FEATURES,
+    describe_tile,
+)
 
 
 def _read_manifest(path: Path) -> list[dict[str, Any]]:
@@ -43,6 +47,21 @@ def _feature_summary(frame: pd.DataFrame, features: list[str]) -> dict[str, dict
     return summary
 
 
+def _control_frame(frame: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+    control = frame[features].apply(pd.to_numeric, errors="coerce").astype(float).copy()
+
+    # Mode shares only have meaning when rail exists. Treating absent rail as a
+    # zero underground/elevated share would make several PCA dimensions encode
+    # the same rail-presence fact already captured by rail length.
+    if "rail_present" in frame.columns:
+        absent = pd.to_numeric(frame["rail_present"], errors="coerce").fillna(0) <= 0
+        for name in ("rail_underground_share", "rail_elevated_share"):
+            if name in control.columns:
+                control.loc[absent, name] = np.nan
+
+    return control
+
+
 def _pca(
     frame: pd.DataFrame,
     features: list[str],
@@ -59,6 +78,8 @@ def _pca(
         return pd.DataFrame(index=frame.index), pd.DataFrame(), {
             "features": [],
             "explained_variance_ratio": [],
+            "cumulative_explained_variance": [],
+            "top_loadings": {},
         }
 
     values = (matrix[usable] - means[usable]) / scales[usable]
@@ -136,13 +157,19 @@ def analyse_manifest(
     frame = pd.DataFrame(descriptors)
     frame.to_csv(output_path / "tiles.csv", index=False)
 
-    features = [name for name in MORPHOLOGY_FEATURES if name in frame.columns]
-    summary = _feature_summary(frame, features)
+    evaluation_features = [name for name in MORPHOLOGY_FEATURES if name in frame.columns]
+    control_features = [name for name in MORPHOLOGY_CONTROL_FEATURES if name in frame.columns]
 
-    correlation = frame[features].apply(pd.to_numeric, errors="coerce").corr()
+    summary = _feature_summary(frame, evaluation_features)
+
+    correlation = frame[evaluation_features].apply(pd.to_numeric, errors="coerce").corr()
     correlation.to_csv(output_path / "correlation.csv")
 
-    scores, loadings, pca = _pca(frame, features, pca_components)
+    control = _control_frame(frame, control_features)
+    control_correlation = control.corr()
+    control_correlation.to_csv(output_path / "control_correlation.csv")
+
+    scores, loadings, pca = _pca(control, control_features, pca_components)
     identity = [
         name
         for name in ("tile_id", "city_id", "area_id", "split", "spatial_group")
@@ -154,10 +181,15 @@ def analyse_manifest(
     )
     loadings.to_csv(output_path / "pca_loadings.csv", index_label="feature")
 
-    city_summary = frame.groupby("city_id", dropna=False)[features].mean(numeric_only=True).reset_index()
+    city_summary = (
+        frame.groupby("city_id", dropna=False)[evaluation_features]
+        .mean(numeric_only=True)
+        .reset_index()
+    )
     city_summary.to_csv(output_path / "city_means.csv", index=False)
 
     result = {
+        "analysis_version": 2,
         "manifest": str(manifest_path),
         "output": str(output_path),
         "tiles": int(len(frame)),
@@ -165,12 +197,21 @@ def analyse_manifest(
             str(name): int(count)
             for name, count in frame["city_id"].value_counts().sort_index().items()
         },
-        "features": features,
+        # Keep the old key for compatibility with the first analysis package.
+        "features": evaluation_features,
+        "evaluation_features": evaluation_features,
+        "control_features": control_features,
         "summary": summary,
-        "pca": pca,
+        "pca": {
+            **pca,
+            "conditional_values": {
+                "rail_mode_shares": "missing for rail-absent tiles before median imputation"
+            },
+        },
         "files": {
             "tiles": str(output_path / "tiles.csv"),
             "correlation": str(output_path / "correlation.csv"),
+            "control_correlation": str(output_path / "control_correlation.csv"),
             "pca_scores": str(output_path / "pca_scores.csv"),
             "pca_loadings": str(output_path / "pca_loadings.csv"),
             "city_means": str(output_path / "city_means.csv"),
