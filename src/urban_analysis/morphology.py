@@ -31,6 +31,8 @@ MORPHOLOGY_FEATURES = (
     "road_local_share",
     "road_junction_density_per_km2",
     "road_dead_end_density_per_km2",
+    "road_junctions_per_km",
+    "road_dead_ends_per_km",
     "road_components",
     "road_largest_component_fraction",
     "road_elevated_length_km_per_km2",
@@ -49,6 +51,31 @@ MORPHOLOGY_FEATURES = (
     "road_elevated_mean_height_m",
     "rail_underground_mean_depth_m",
     "rail_elevated_mean_height_m",
+)
+
+# Features used to discover a controllable morphology space. Connectivity and
+# physical-validity measures stay in MORPHOLOGY_FEATURES for evaluation but are
+# deliberately excluded here: they describe whether a city works, not what kind
+# of urban form it has.
+MORPHOLOGY_CONTROL_FEATURES = (
+    "water_coverage",
+    "green_coverage",
+    "landuse_residential_coverage",
+    "landuse_commercial_mixed_coverage",
+    "landuse_industrial_coverage",
+    "landuse_civic_coverage",
+    "building_coverage",
+    "building_density_per_km2",
+    "building_height_mean_m",
+    "road_length_km_per_km2",
+    "road_major_share",
+    "road_local_share",
+    "road_junctions_per_km",
+    "road_dead_ends_per_km",
+    "road_vertical_length_share",
+    "rail_length_km_per_km2",
+    "rail_underground_share",
+    "rail_elevated_share",
 )
 
 
@@ -202,6 +229,7 @@ def describe_tile(
         _skeleton_length_m(skeleton, metres_per_pixel) for skeleton in class_skeletons
     ]
     road_surface_length = _skeleton_length_m(road_surface, metres_per_pixel)
+    road_surface_length_km = road_surface_length / 1000.0
     road_components, road_largest = _component_stats(road_surface)
     road_junctions, road_dead_ends = _node_stats(road_surface)
 
@@ -281,7 +309,7 @@ def describe_tile(
         "building_height_area_p90_m": (
             float(np.quantile(building_heights, 0.9)) if building_heights.size else 0.0
         ),
-        "road_length_km_per_km2": road_surface_length / 1000.0 / valid_area_km2,
+        "road_length_km_per_km2": road_surface_length_km / valid_area_km2,
         "road_major_length_km_per_km2": road_class_lengths[0] / 1000.0 / valid_area_km2,
         "road_secondary_length_km_per_km2": (
             road_class_lengths[1] / 1000.0 / valid_area_km2
@@ -294,8 +322,14 @@ def describe_tile(
         "road_local_share": road_class_lengths[2] / road_class_total if road_class_total else 0.0,
         "road_junction_count": road_junctions,
         "road_junction_density_per_km2": road_junctions / valid_area_km2,
+        "road_junctions_per_km": (
+            road_junctions / road_surface_length_km if road_surface_length_km else 0.0
+        ),
         "road_dead_end_count": road_dead_ends,
         "road_dead_end_density_per_km2": road_dead_ends / valid_area_km2,
+        "road_dead_ends_per_km": (
+            road_dead_ends / road_surface_length_km if road_surface_length_km else 0.0
+        ),
         "road_components": road_components,
         "road_largest_component_fraction": road_largest,
         "road_boundary_sides": _boundary_sides(road_surface),
