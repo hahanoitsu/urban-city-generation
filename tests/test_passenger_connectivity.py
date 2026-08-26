@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import geopandas as gpd
 import networkx as nx
-import pytest
-from shapely.geometry import Point
+from shapely.geometry import LineString, Point
 
 from urban_analysis.passenger_connectivity import (
     _add_station_transfers,
@@ -90,7 +89,7 @@ def test_station_transfer_connects_separate_track_components():
             "component": 0,
             "vertical_mode": "surface",
             "length_m": 100.0,
-            "geometry": __import__("shapely.geometry").geometry.LineString([(0, 0), (100, 0)]),
+            "geometry": LineString([(0, 0), (100, 0)]),
         },
         {
             "tile_id": "tile-a",
@@ -99,7 +98,7 @@ def test_station_transfer_connects_separate_track_components():
             "component": 1,
             "vertical_mode": "underground",
             "length_m": 100.0,
-            "geometry": __import__("shapely.geometry").geometry.LineString([(0, 20), (100, 20)]),
+            "geometry": LineString([(0, 20), (100, 20)]),
         },
     ]
     groups = [
@@ -139,8 +138,6 @@ def test_station_outside_radius_does_not_create_transfer():
     graph.add_node("a", tile_id="tile", position_projected_m=[0.0, 0.0, 0.0])
     graph.add_node("b", tile_id="tile", position_projected_m=[100.0, 0.0, 0.0])
     graph.add_edge("a", "b", kind="transport", length_m=100.0)
-
-    from shapely.geometry import LineString
 
     edges = [
         {
