@@ -11,7 +11,8 @@ import geopandas as gpd
 import pandas as pd
 import pyogrio
 from pyproj import CRS
-from shapely.geometry import box
+from shapely.geometry import GeometryCollection, MultiLineString, MultiPolygon, Polygon, box
+from shapely.ops import polygonize, unary_union
 
 from urban_dataset.audit import audit_dataset
 from urban_dataset.classify import clean_tag
@@ -38,38 +39,166 @@ def _repair(frame: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return result[result.geometry.notna() & ~result.geometry.is_empty].copy()
 
 
+def _relation_id(frame: gpd.GeoDataFrame) -> pd.Series:
+    for name in ("osm_id", "id"):
+        if name in frame.columns:
+            return pd.to_numeric(frame[name], errors="coerce")
+    return pd.Series(float("nan"), index=frame.index)
+
+
+def _polygonal_geometry(geometry):
+    if geometry is None or geometry.is_empty:
+        return None
+    if isinstance(geometry, (Polygon, MultiPolygon)):
+        return geometry
+    if isinstance(geometry, GeometryCollection):
+        polygons = [part for part in geometry.geoms if isinstance(part, (Polygon, MultiPolygon))]
+        if polygons:
+            return unary_union(polygons)
+        lines = [part for part in geometry.geoms if isinstance(part, MultiLineString)]
+        if lines:
+            values = list(polygonize(unary_union(lines)))
+            return unary_union(values) if values else None
+    if isinstance(geometry, MultiLineString):
+        values = list(polygonize(geometry))
+        return unary_union(values) if values else None
+    return None
+
+
+def _boundary_candidates(
+    pbf_path: Path,
+    bbox_wgs84: tuple[float, float, float, float],
+) -> list[tuple[str, gpd.GeoDataFrame]]:
+    wanted = [
+        "boundary",
+        "admin_level",
+        "name",
+        "name:en",
+        "official_name",
+        "short_name",
+        "ISO3166-1",
+        "ISO3166-1:alpha2",
+        "ISO3166-1:alpha3",
+        "type",
+        "place",
+    ]
+    result: list[tuple[str, gpd.GeoDataFrame]] = []
+    for layer in ("multipolygons", "other_relations", "multilinestrings"):
+        try:
+            frame = pyogrio.read_dataframe(pbf_path, layer=layer, bbox=bbox_wgs84)
+        except Exception:
+            continue
+        if frame.empty:
+            continue
+        frame = _expand_other_tags(frame, wanted)
+        if frame.crs is None:
+            frame = frame.set_crs("EPSG:4326")
+        elif frame.crs.to_epsg() != 4326:
+            frame = frame.to_crs("EPSG:4326")
+        result.append((layer, frame))
+    return result
+
+
 def extract_admin_boundary(
     pbf_path: str | Path,
     bbox_wgs84: tuple[float, float, float, float],
     *,
     name: str,
     admin_level: str = "2",
+    relation_id: int | None = None,
+    country_code: str | None = None,
 ) -> gpd.GeoDataFrame:
     path = Path(pbf_path).expanduser().resolve()
-    frame = pyogrio.read_dataframe(path, layer="multipolygons", bbox=bbox_wgs84)
-    frame = _expand_other_tags(frame, ["boundary", "admin_level", "name"])
-    if frame.crs is None:
-        frame = frame.set_crs("EPSG:4326")
-    elif frame.crs.to_epsg() != 4326:
-        frame = frame.to_crs("EPSG:4326")
+    candidates = _boundary_candidates(path, bbox_wgs84)
+    matches: list[tuple[int, str, Any, dict[str, Any]]] = []
+    expected_name = _normalise(name)
+    expected_level = _normalise(admin_level)
+    expected_code = _normalise(country_code)
 
-    boundary = frame.get("boundary", pd.Series(index=frame.index, dtype=object)).map(clean_tag)
-    levels = frame.get("admin_level", pd.Series(index=frame.index, dtype=object)).map(_normalise)
-    names = frame.get("name", pd.Series(index=frame.index, dtype=object)).map(_normalise)
-    selected = frame[
-        boundary.eq("administrative")
-        & levels.eq(_normalise(admin_level))
-        & names.eq(_normalise(name))
-    ].copy()
-    selected = _repair(selected)
-    if selected.empty:
-        raise ValueError(f"Could not find admin_level={admin_level} boundary named {name!r}")
+    for layer, frame in candidates:
+        ids = _relation_id(frame)
+        boundary = frame.get("boundary", pd.Series(index=frame.index, dtype=object)).map(clean_tag)
+        levels = frame.get("admin_level", pd.Series(index=frame.index, dtype=object)).map(_normalise)
+        names = frame.get("name", pd.Series(index=frame.index, dtype=object)).map(_normalise)
+        names_en = frame.get("name:en", pd.Series(index=frame.index, dtype=object)).map(_normalise)
+        official = frame.get("official_name", pd.Series(index=frame.index, dtype=object)).map(_normalise)
+        short = frame.get("short_name", pd.Series(index=frame.index, dtype=object)).map(_normalise)
+        iso = frame.get("ISO3166-1", pd.Series(index=frame.index, dtype=object)).map(_normalise)
+        alpha2 = frame.get("ISO3166-1:alpha2", pd.Series(index=frame.index, dtype=object)).map(_normalise)
 
-    geometry = selected.geometry.union_all()
+        for index, row in frame.iterrows():
+            score = 0
+            rid = ids.loc[index]
+            if relation_id is not None and pd.notna(rid) and int(rid) == int(relation_id):
+                score += 100
+            if expected_code and (iso.loc[index] == expected_code or alpha2.loc[index] == expected_code):
+                score += 60
+            row_names = {names.loc[index], names_en.loc[index], official.loc[index], short.loc[index]}
+            if expected_name in row_names:
+                score += 40
+            elif expected_name and any(expected_name in value for value in row_names if value):
+                score += 20
+            if boundary.loc[index] == "administrative":
+                score += 10
+            if levels.loc[index] == expected_level:
+                score += 10
+            if score < 40:
+                continue
+
+            geometry = _polygonal_geometry(row.geometry)
+            if geometry is None or geometry.is_empty:
+                continue
+            matches.append(
+                (
+                    score,
+                    layer,
+                    geometry,
+                    {
+                        "relation_id": None if pd.isna(rid) else int(rid),
+                        "name": str(row.get("name") or ""),
+                        "name_en": str(row.get("name:en") or ""),
+                        "official_name": str(row.get("official_name") or ""),
+                        "admin_level": str(row.get("admin_level") or ""),
+                        "boundary": str(row.get("boundary") or ""),
+                        "iso": str(row.get("ISO3166-1") or row.get("ISO3166-1:alpha2") or ""),
+                    },
+                )
+            )
+
+    if not matches:
+        diagnostics: list[str] = []
+        for layer, frame in candidates:
+            ids = _relation_id(frame)
+            boundary = frame.get("boundary", pd.Series(index=frame.index, dtype=object)).map(clean_tag)
+            levels = frame.get("admin_level", pd.Series(index=frame.index, dtype=object)).map(_normalise)
+            names = frame.get("name", pd.Series(index=frame.index, dtype=object)).map(_normalise)
+            mask = boundary.eq("administrative") | levels.eq(expected_level) | names.str.contains(expected_name, regex=False)
+            for index in frame.index[mask][:12]:
+                rid = ids.loc[index]
+                diagnostics.append(
+                    f"{layer}: id={None if pd.isna(rid) else int(rid)} "
+                    f"name={frame.loc[index].get('name')!r} "
+                    f"admin_level={frame.loc[index].get('admin_level')!r} "
+                    f"boundary={frame.loc[index].get('boundary')!r}"
+                )
+        detail = "\n".join(diagnostics[:20]) or "no administrative candidates exposed by GDAL"
+        raise ValueError(
+            f"Could not find boundary for {name!r} "
+            f"(relation_id={relation_id}, country_code={country_code}).\nCandidates:\n{detail}"
+        )
+
+    matches.sort(key=lambda item: item[0], reverse=True)
+    best_score = matches[0][0]
+    best = [item for item in matches if item[0] == best_score]
+    geometry = unary_union([item[2] for item in best])
+    metadata = best[0][3]
     return gpd.GeoDataFrame(
         {
             "name": [name],
             "admin_level": [str(admin_level)],
+            "relation_id": [metadata["relation_id"]],
+            "country_code": [country_code or metadata["iso"]],
+            "source_layer": [best[0][1]],
             "geometry": [geometry],
         },
         geometry="geometry",
@@ -83,18 +212,14 @@ def extract_monorail(
 ) -> gpd.GeoDataFrame:
     path = Path(pbf_path).expanduser().resolve()
     lines = pyogrio.read_dataframe(path, layer="lines", bbox=bbox_wgs84)
-    lines = _expand_other_tags(
-        lines,
-        ["railway", "service", "usage", *RAIL_TAGS],
-    )
+    lines = _expand_other_tags(lines, ["railway", "service", "usage", *RAIL_TAGS])
     if lines.crs is None:
         lines = lines.set_crs("EPSG:4326")
     elif lines.crs.to_epsg() != 4326:
         lines = lines.to_crs("EPSG:4326")
 
     railway = lines.get("railway", pd.Series(index=lines.index, dtype=object)).map(clean_tag)
-    result = lines[railway.eq("monorail")].copy()
-    result = _repair(result)
+    result = _repair(lines[railway.eq("monorail")].copy())
     if result.empty:
         raise ValueError("No railway=monorail features were found in the source PBF")
     return result
@@ -120,6 +245,8 @@ def prepare_corrected_city(
     bbox_wgs84: tuple[float, float, float, float],
     boundary_name: str,
     admin_level: str = "2",
+    boundary_relation_id: int | None = None,
+    country_code: str | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     source_path = Path(prepared_city).expanduser().resolve()
@@ -138,13 +265,14 @@ def prepare_corrected_city(
         bbox_wgs84,
         name=boundary_name,
         admin_level=admin_level,
+        relation_id=boundary_relation_id,
+        country_code=country_code,
     )
     boundary = boundary_wgs84.to_crs(metric_crs)
     region = boundary.geometry.iloc[0]
 
     monorail = extract_monorail(pbf_path, bbox_wgs84).to_crs(metric_crs)
-    existing_columns = set(layers.rail.columns)
-    all_columns = sorted(existing_columns | set(monorail.columns))
+    all_columns = sorted(set(layers.rail.columns) | set(monorail.columns))
     existing = layers.rail.copy()
     extra = monorail.copy()
     for column in all_columns:
@@ -160,8 +288,8 @@ def prepare_corrected_city(
 
     corrected = CityLayers(
         **{
-            name: _clip_frame(rail if name == "rail" else frame, region)
-            for name, frame in layers.items()
+            layer_name: _clip_frame(rail if layer_name == "rail" else frame, region)
+            for layer_name, frame in layers.items()
         }
     )
 
@@ -171,10 +299,12 @@ def prepare_corrected_city(
         "added_railway_types": ["monorail"],
         "admin_boundary_name": boundary_name,
         "admin_level": str(admin_level),
+        "boundary_relation_id": boundary_relation_id,
+        "country_code": country_code,
         "boundary_source": Path(pbf_path).name,
     }
     corrected_metadata["feature_counts"] = {
-        name: len(frame) for name, frame in corrected.items()
+        layer_name: len(frame) for layer_name, frame in corrected.items()
     }
     corrected_metadata["monorail_features_added"] = int(len(monorail))
     corrected_metadata["monorail_length_km_added"] = float(monorail.length.sum() / 1000.0)
@@ -189,6 +319,8 @@ def prepare_corrected_city(
         "prepared_city": str(source_path),
         "corrected_city": str(output_path),
         "boundary": str(boundary_path),
+        "boundary_relation_id": boundary_relation_id,
+        "country_code": country_code,
         "monorail_features_added": int(len(monorail)),
         "monorail_length_km_added": float(monorail.length.sum() / 1000.0),
         "feature_counts": corrected_metadata["feature_counts"],
@@ -303,6 +435,8 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--boundary-output", required=True, type=Path)
     prepare.add_argument("--boundary-name", required=True)
     prepare.add_argument("--admin-level", default="2")
+    prepare.add_argument("--boundary-relation-id", type=int)
+    prepare.add_argument("--country-code")
     prepare.add_argument("--bbox", nargs=4, type=float, required=True)
     prepare.add_argument("--overwrite", action="store_true")
 
@@ -325,6 +459,8 @@ def main(argv: list[str] | None = None) -> int:
                 bbox_wgs84=tuple(args.bbox),
                 boundary_name=args.boundary_name,
                 admin_level=args.admin_level,
+                boundary_relation_id=args.boundary_relation_id,
+                country_code=args.country_code,
                 overwrite=args.overwrite,
             )
         else:
