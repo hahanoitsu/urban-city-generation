@@ -280,6 +280,7 @@ def run_probe(
     config_file = Path(config_path).expanduser().resolve()
     checkpoint_file = Path(checkpoint_path).expanduser().resolve()
     output_path = Path(output).expanduser().resolve()
+    config = load_layered_diffusion_config(config_file)
 
     if output_path.exists() and overwrite:
         shutil.rmtree(output_path)
