@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import networkx as nx
 import numpy as np
 
 from .codec import CommandCodecConfig, command_sequence_length
@@ -46,6 +47,86 @@ def _percentiles(values: list[int]) -> dict[str, float]:
     }
 
 
+def _largest_surface_road_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the longest connected surface-road component for structural training."""
+    result = json.loads(json.dumps(payload))
+    graph = result.get("transport_graph", {})
+    nodes = {
+        str(node.get("id")): node
+        for node in graph.get("nodes", [])
+        if node.get("id") is not None
+        and node.get("transport_mode") == "road"
+        and node.get("vertical_mode") == "surface"
+    }
+    edges = [
+        edge
+        for edge in graph.get("edges", [])
+        if edge.get("transport_mode") == "road"
+        and edge.get("vertical_mode") == "surface"
+        and str(edge.get("from_node")) in nodes
+        and str(edge.get("to_node")) in nodes
+    ]
+
+    topology = nx.Graph()
+    topology.add_nodes_from(nodes)
+    for edge in edges:
+        topology.add_edge(
+            str(edge["from_node"]),
+            str(edge["to_node"]),
+            length_m=max(0.0, float(edge.get("length_m", 0.0))),
+        )
+
+    topology.remove_nodes_from(list(nx.isolates(topology)))
+    if topology.number_of_edges() == 0:
+        graph["nodes"] = []
+        graph["edges"] = []
+        graph["statistics"] = {"nodes": 0, "edges": 0}
+        return result
+
+    components = [set(values) for values in nx.connected_components(topology)]
+
+    def component_length(component: set[str]) -> float:
+        return sum(
+            float(data.get("length_m", 0.0))
+            for left, right, data in topology.edges(component, data=True)
+            if left in component and right in component
+        )
+
+    keep = max(components, key=lambda values: (component_length(values), len(values)))
+    kept_edges = [
+        edge
+        for edge in edges
+        if str(edge["from_node"]) in keep and str(edge["to_node"]) in keep
+    ]
+
+    degree: dict[str, int] = {node_id: 0 for node_id in keep}
+    for edge in kept_edges:
+        degree[str(edge["from_node"])] += 1
+        degree[str(edge["to_node"])] += 1
+
+    kept_nodes = []
+    for node_id in sorted(keep):
+        node = dict(nodes[node_id])
+        node["degree"] = degree[node_id]
+        node["node_type"] = (
+            "endpoint"
+            if degree[node_id] <= 1
+            else "intersection"
+            if degree[node_id] >= 3
+            else "continuation"
+        )
+        kept_nodes.append(node)
+
+    graph["nodes"] = kept_nodes
+    graph["edges"] = kept_edges
+    graph["statistics"] = {
+        "nodes": len(kept_nodes),
+        "edges": len(kept_edges),
+        "source_filter": "largest_connected_surface_road_component",
+    }
+    return result
+
+
 def prepare_program_dataset(
     dataset_root: str | Path,
     manifest_root: str | Path,
@@ -55,6 +136,7 @@ def prepare_program_dataset(
     maximum_nodes: int = 512,
     maximum_commands: int = 1024,
     minimum_nodes: int = 4,
+    largest_surface_road_component: bool = False,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     dataset_root = Path(dataset_root).expanduser().resolve()
@@ -78,6 +160,7 @@ def prepare_program_dataset(
         "codec": codec_config.to_dict(),
         "maximum_commands": int(maximum_commands),
         "minimum_nodes": int(minimum_nodes),
+        "largest_surface_road_component": bool(largest_surface_road_component),
         "splits": {},
     }
     train_styles: list[list[float]] = []
@@ -102,6 +185,8 @@ def prepare_program_dataset(
                 continue
             try:
                 payload = json.loads(state_path.read_text(encoding="utf-8"))
+                if largest_surface_road_component:
+                    payload = _largest_surface_road_payload(payload)
                 program = city_state_to_program(payload, program_config)
             except Exception as exc:
                 rejections.append(
@@ -229,6 +314,9 @@ def prepare_from_config(config_file: str | Path, *, overwrite: bool = False) -> 
         maximum_nodes=int(program.get("maximum_nodes", 512)),
         maximum_commands=int(config.get("model", {}).get("maximum_sequence_length", 1024)),
         minimum_nodes=int(program.get("minimum_nodes", 4)),
+        largest_surface_road_component=bool(
+            program.get("largest_surface_road_component", False)
+        ),
         overwrite=overwrite,
     )
 
