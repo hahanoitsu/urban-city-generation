@@ -113,7 +113,11 @@ def _skeleton_paths(mask: np.ndarray, minimum_pixels: int) -> tuple[list[list[tu
                     next_pixel = candidates[0]
                     visited.add(tuple(sorted((current, next_pixel))))
                     previous, current = current, next_pixel
-                if len(path) >= minimum_pixels:
+                # minimum_pixels filters isolated skeleton components above. Do not
+                # apply it again to individual node-to-node branches: short branches
+                # are often the final few pixels joining a side road into a junction.
+                # Dropping them disconnects an otherwise valid network.
+                if len(path) >= 2:
                     paths.append(path)
     return paths, cleaned.astype(bool)
 
