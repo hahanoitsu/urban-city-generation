@@ -308,6 +308,12 @@ def prepare_from_config(config_file: str | Path, *, overwrite: bool = False) -> 
             width_quantum_m=float(program.get("width_quantum_m", 1.0)),
             maximum_width_m=float(program.get("maximum_width_m", 32.0)),
             simplify_tolerance_m=float(program.get("simplify_tolerance_m", 6.0)),
+            maximum_segment_length_m=float(
+                program.get("maximum_segment_length_m", 200.0)
+            ),
+            relative_add_coordinates=bool(
+                program.get("relative_add_coordinates", False)
+            ),
             layer_min=int(program.get("layer_min", -5)),
             layer_max=int(program.get("layer_max", 5)),
         ),
