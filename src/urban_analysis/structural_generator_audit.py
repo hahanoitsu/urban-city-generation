@@ -167,12 +167,36 @@ def _hierarchy_metrics(graph, edges: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
-def audit_state(path: Path, source: str) -> dict[str, Any]:
+def audit_state(
+    path: Path,
+    source: str,
+    *,
+    largest_component_only: bool = False,
+) -> dict[str, Any]:
     state = json.loads(path.read_text(encoding="utf-8"))
     bounds = _bounds(state)
     graph = _transport_graph(state, "road", vertical="surface")
-    graph_metrics = _graph_metrics(graph, bounds)
     edges = _surface_edges(state)
+
+    if largest_component_only and graph.number_of_edges() > 0:
+        components = list(__import__("networkx").connected_components(graph))
+
+        def component_length(nodes):
+            return sum(
+                float(data.get("length_m", 0.0))
+                for left, right, data in graph.edges(nodes, data=True)
+                if left in nodes and right in nodes
+            )
+
+        keep = max(components, key=lambda nodes: (component_length(nodes), len(nodes)))
+        graph = graph.subgraph(keep).copy()
+        edges = [
+            edge
+            for edge in edges
+            if str(edge.get("from_node")) in keep and str(edge.get("to_node")) in keep
+        ]
+
+    graph_metrics = _graph_metrics(graph, bounds)
 
     lengths = [
         max(0.0, float(edge.get("length_m", _line(edge).length)))
@@ -266,11 +290,16 @@ def audit(
         raise ValueError("No real city.json files found")
 
     generated = [audit_state(path, "generated") for path in generated_paths]
-    real = [audit_state(path, "real") for path in real_paths]
-    _write_csv(output / "tiles.csv", [*generated, *real])
+    real_full = [audit_state(path, "real_full") for path in real_paths]
+    real = [
+        audit_state(path, "real_main", largest_component_only=True)
+        for path in real_paths
+    ]
+    _write_csv(output / "tiles.csv", [*generated, *real, *real_full])
 
     generated_summary = _summary(generated)
     real_summary = _summary(real)
+    real_full_summary = _summary(real_full)
     comparison: dict[str, Any] = {}
     for metric, values in generated_summary["metrics"].items():
         if metric not in real_summary["metrics"]:
@@ -288,9 +317,14 @@ def audit(
         "analysis_version": 1,
         "generated": generated_summary,
         "real": real_summary,
+        "real_full": real_full_summary,
         "comparison": comparison,
         "notes": {
             "scope": "surface-road structural geometry only",
+            "comparison_reference": (
+                "Headline comparison uses the largest connected real surface-road component, "
+                "matching the structural-v2 training target. real_full is also reported."
+            ),
             "unnoded_crossing": (
                 "Same-level road geometries intersect although the two edges share no graph node."
             ),
