@@ -17,8 +17,8 @@ conda activate urban-city
 cd "$SOURCE_ROOT"
 
 echo "=== FETCH CLEAN EXPERIMENT CODE ==="
-git fetch origin structural-generator-v1
-COMMIT="$(git rev-parse origin/structural-generator-v1)"
+git fetch origin structural-generator-v2
+COMMIT="$(git rev-parse origin/structural-generator-v2)"
 echo "experiment commit: $COMMIT"
 
 cleanup() {
@@ -62,6 +62,8 @@ python -m py_compile \
 pytest -q \
     tests/test_structural_prepare.py \
     tests/test_structural_generator_audit.py \
+    tests/test_structural_relative_codec.py \
+    tests/test_structural_planarity.py \
     tests/test_graph_program.py \
     tests/test_graph_model.py \
     tests/test_generated_scene.py
