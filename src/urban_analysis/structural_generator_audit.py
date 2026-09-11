@@ -9,6 +9,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
+import networkx as nx
 import numpy as np
 from shapely import STRtree
 from shapely.geometry import LineString, Point, MultiPoint
@@ -179,7 +180,7 @@ def audit_state(
     edges = _surface_edges(state)
 
     if largest_component_only and graph.number_of_edges() > 0:
-        components = list(__import__("networkx").connected_components(graph))
+        components = list(nx.connected_components(graph))
 
         def component_length(nodes):
             return sum(
