@@ -66,6 +66,23 @@ def _expanded_graph(payload: dict[str, Any], config: ProgramConfig) -> nx.MultiG
         points = list(simplified.coords)
         if len(points) < 2:
             points = list(line.coords)
+
+        maximum_segment = max(1.0, float(config.maximum_segment_length_m))
+        densified = [points[0]]
+        for first, second in zip(points[:-1], points[1:], strict=True):
+            dx = float(second[0]) - float(first[0])
+            dy = float(second[1]) - float(first[1])
+            length = math.hypot(dx, dy)
+            steps = max(1, int(math.ceil(length / maximum_segment)))
+            for step in range(1, steps + 1):
+                ratio = step / steps
+                densified.append(
+                    (
+                        float(first[0]) + dx * ratio,
+                        float(first[1]) + dy * ratio,
+                    )
+                )
+        points = densified
         start_id = str(edge.get("from_node"))
         end_id = str(edge.get("to_node"))
         if start_id not in graph:
