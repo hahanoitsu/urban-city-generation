@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+from shapely.geometry import LineString
 
 from .codec import (
     FIELDS,
@@ -93,6 +94,124 @@ def _connect_candidates(
             and right_component == component
             and (min(left, right), max(left, right)) not in edge_pairs
         ]
+        if rights:
+            candidates[left] = rights
+    return candidates
+
+
+def _segment_is_clear(
+    start: int,
+    end: int | None,
+    end_position: tuple[int, int],
+    node_positions: list[tuple[int, int]],
+    edge_pairs: set[tuple[int, int]],
+) -> bool:
+    start_position = node_positions[start]
+    if start_position == end_position:
+        return False
+    candidate = LineString([start_position, end_position])
+    if candidate.length <= 1e-6:
+        return False
+
+    candidate_nodes = {start}
+    if end is not None:
+        candidate_nodes.add(end)
+
+    for left, right in edge_pairs:
+        existing = LineString([node_positions[left], node_positions[right]])
+        intersection = candidate.intersection(existing)
+        if intersection.is_empty:
+            continue
+        shared = candidate_nodes & {left, right}
+        if shared and intersection.geom_type == "Point":
+            point = next(iter(shared))
+            expected = node_positions[point]
+            if abs(intersection.x - expected[0]) <= 1e-9 and abs(intersection.y - expected[1]) <= 1e-9:
+                continue
+        return False
+    return True
+
+
+def _relative_coordinate(
+    x_logits: torch.Tensor,
+    y_logits: torch.Tensor,
+    parent: int,
+    node_positions: list[tuple[int, int]],
+    occupied: set[tuple[int, int]],
+    edge_pairs: set[tuple[int, int]],
+    *,
+    coordinate_bins: int,
+    maximum_step_bins: int,
+    temperature: float,
+    generator: torch.Generator,
+) -> tuple[int, int, int, int]:
+    center = (coordinate_bins - 1) // 2
+    radius = max(1, min(int(maximum_step_bins), center))
+    allowed = list(range(center - radius, center + radius + 1))
+    parent_x, parent_y = node_positions[parent]
+
+    def candidate(x_code: int, y_code: int):
+        dx = x_code - center
+        dy = y_code - center
+        if dx == 0 and dy == 0:
+            return None
+        if dx * dx + dy * dy > radius * radius:
+            return None
+        x = parent_x + dx
+        y = parent_y + dy
+        if not (0 <= x < coordinate_bins and 0 <= y < coordinate_bins):
+            return None
+        if (x, y) in occupied:
+            return None
+        if not _segment_is_clear(parent, None, (x, y), node_positions, edge_pairs):
+            return None
+        return x, y, x_code, y_code
+
+    for _ in range(96):
+        x_code = _sample(x_logits, allowed, temperature=temperature, generator=generator)
+        y_code = _sample(y_logits, allowed, temperature=temperature, generator=generator)
+        value = candidate(x_code, y_code)
+        if value is not None:
+            return value
+
+    x_order = sorted(allowed, key=lambda index: float(x_logits[index]), reverse=True)[:24]
+    y_order = sorted(allowed, key=lambda index: float(y_logits[index]), reverse=True)[:24]
+    pairs = sorted(
+        ((float(x_logits[x]) + float(y_logits[y]), x, y) for x in x_order for y in y_order),
+        reverse=True,
+    )
+    for _score, x_code, y_code in pairs:
+        value = candidate(x_code, y_code)
+        if value is not None:
+            return value
+    raise RuntimeError("Could not place a crossing-free relative road segment")
+
+
+def _safe_connect_candidates(
+    node_components: list[int],
+    edge_pairs: set[tuple[int, int]],
+    node_positions: list[tuple[int, int]],
+    *,
+    maximum_step_bins: int,
+) -> dict[int, list[int]]:
+    candidates: dict[int, list[int]] = {}
+    limit2 = float(maximum_step_bins * maximum_step_bins)
+    for left, component in enumerate(node_components):
+        rights: list[int] = []
+        x1, y1 = node_positions[left]
+        for right, right_component in enumerate(node_components):
+            if right <= left or right_component != component:
+                continue
+            if (left, right) in edge_pairs:
+                continue
+            x2, y2 = node_positions[right]
+            if (x2 - x1) ** 2 + (y2 - y1) ** 2 > limit2:
+                continue
+            if not _segment_is_clear(
+                left, right, node_positions[right], node_positions, edge_pairs
+            ):
+                continue
+            rights.append(right)
         if rights:
             candidates[left] = rights
     return candidates
