@@ -1,0 +1,50 @@
+data:
+  dataset_root: data/processed/corpus-v2
+  manifest_root: data/manifests/corpus-v2
+  program_root: data/programs/structural-v2
+
+program:
+  coordinate_bins: 256
+  width_quantum_m: 1.0
+  maximum_width_m: 32.0
+  simplify_tolerance_m: 12.0
+  maximum_segment_length_m: 200.0
+  relative_add_coordinates: true
+  layer_min: -5
+  layer_max: 5
+  maximum_nodes: 512
+  minimum_nodes: 4
+  largest_surface_road_component: true
+
+model:
+  maximum_sequence_length: 1024
+  model_dimensions: 192
+  attention_heads: 6
+  layers: 4
+  feedforward_dimensions: 768
+  dropout: 0.1
+
+training:
+  output_dir: runs/structural-v2
+  epochs: 80
+  batch_size: 8
+  workers: 4
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  gradient_clip_norm: 1.0
+  seed: 5132
+  device: auto
+  precision: bf16
+  augment: true
+
+sampling:
+  count: 16
+  bounds_m: [0, 0, 1024, 1024]
+  minimum_nodes: 64
+  maximum_components: 1
+  maximum_commands: 512
+  temperature: 0.65
+  seed: 5132
+  minimum_block_area_m2: 400
+  target_parcel_area_m2: 1200
+  minimum_parcel_area_m2: 160
