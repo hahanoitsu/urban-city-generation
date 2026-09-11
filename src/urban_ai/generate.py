@@ -438,28 +438,35 @@ def generate_program(
                 temperature=temperature,
                 generator=generator,
             )
-            component_id = node_components[parent]
-            mode_name_value, vertical_name_value, layer = component_signatures[component_id]
-            edge_class = _sample(
-                last["class"],
-                classes_for_mode(mode_name_value),
-                temperature=temperature,
-                generator=generator,
-            )
-            width = _sample(last["width"], None, temperature=temperature, generator=generator)
             if codec.program.relative_add_coordinates:
-                x, y, x_code, y_code = _relative_coordinate(
-                    last["x"],
-                    last["y"],
-                    parent,
-                    node_positions,
-                    occupied,
-                    edge_pairs,
-                    coordinate_bins=codec.program.coordinate_bins,
-                    maximum_step_bins=maximum_step_bins,
-                    temperature=temperature,
-                    generator=generator,
+                component = node_components[parent]
+                alternatives = sorted(
+                    (value for value in parents if value != parent and node_components[value] == component),
+                    key=lambda value: float(last["id1"][value]),
+                    reverse=True,
                 )
+                placement = None
+                for candidate_parent in [parent, *alternatives]:
+                    try:
+                        placement = _relative_coordinate(
+                            last["x"],
+                            last["y"],
+                            candidate_parent,
+                            node_positions,
+                            occupied,
+                            edge_pairs,
+                            coordinate_bins=codec.program.coordinate_bins,
+                            maximum_step_bins=maximum_step_bins,
+                            temperature=temperature,
+                            generator=generator,
+                        )
+                        parent = candidate_parent
+                        break
+                    except RuntimeError:
+                        continue
+                if placement is None:
+                    raise RuntimeError("Could not place any crossing-free relative road segment")
+                x, y, x_code, y_code = placement
             else:
                 x, y = _free_coordinate(
                     last["x"],
@@ -470,6 +477,16 @@ def generate_program(
                     generator=generator,
                 )
                 x_code, y_code = x, y
+
+            component_id = node_components[parent]
+            mode_name_value, vertical_name_value, layer = component_signatures[component_id]
+            edge_class = _sample(
+                last["class"],
+                classes_for_mode(mode_name_value),
+                temperature=temperature,
+                generator=generator,
+            )
+            width = _sample(last["width"], None, temperature=temperature, generator=generator)
             new_node = len(node_components)
             node_components.append(component_id)
             component_sizes[component_id] += 1
