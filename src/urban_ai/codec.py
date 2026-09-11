@@ -53,6 +53,17 @@ def empty_encoded_command(op: int) -> dict[str, int]:
     return {field: (int(op) if field == "op" else 0) for field in FIELDS}
 
 
+def _encode_relative_delta(value: int, parent: int, bins: int) -> int:
+    center = (bins - 1) // 2
+    encoded = int(value) - int(parent) + center
+    if not 0 <= encoded < bins:
+        raise ValueError(
+            f"Relative coordinate delta {int(value) - int(parent)} exceeds "
+            f"{bins}-bin codec range"
+        )
+    return encoded
+
+
 def encode_program(
     program: dict[str, Any],
     config: CommandCodecConfig | None = None,
@@ -62,25 +73,42 @@ def encode_program(
     )
     validate_program(program, config.program)
     commands = [empty_encoded_command(OP_BOS)]
+    node_positions: list[tuple[int, int]] = []
     for command in program.get("commands", []):
         op = command["op"]
         if op == "root":
             encoded = empty_encoded_command(OP_ROOT)
-            encoded["x"] = int(command["x_bin"]) + 1
-            encoded["y"] = int(command["y_bin"]) + 1
+            x = int(command["x_bin"])
+            y = int(command["y_bin"])
+            encoded["x"] = x + 1
+            encoded["y"] = y + 1
             encoded["mode"] = _MODE_TO_INDEX[command["transport_mode"]] + 1
             encoded["vertical"] = _VERTICAL_TO_INDEX[command["vertical_mode"]] + 1
             encoded["layer"] = int(command["layer_bin"]) + 1
+            node_positions.append((x, y))
         elif op == "add":
             encoded = empty_encoded_command(OP_ADD)
-            encoded["x"] = int(command["x_bin"]) + 1
-            encoded["y"] = int(command["y_bin"]) + 1
-            encoded["id1"] = int(command["parent"]) + 1
+            x = int(command["x_bin"])
+            y = int(command["y_bin"])
+            parent = int(command["parent"])
+            if config.program.relative_add_coordinates:
+                parent_x, parent_y = node_positions[parent]
+                encoded["x"] = _encode_relative_delta(
+                    x, parent_x, config.program.coordinate_bins
+                ) + 1
+                encoded["y"] = _encode_relative_delta(
+                    y, parent_y, config.program.coordinate_bins
+                ) + 1
+            else:
+                encoded["x"] = x + 1
+                encoded["y"] = y + 1
+            encoded["id1"] = parent + 1
             encoded["mode"] = _MODE_TO_INDEX[command["transport_mode"]] + 1
             encoded["class"] = _CLASS_TO_INDEX[command["class"]] + 1
             encoded["width"] = int(command["width_bin"])
             encoded["vertical"] = _VERTICAL_TO_INDEX[command["vertical_mode"]] + 1
             encoded["layer"] = int(command["layer_bin"]) + 1
+            node_positions.append((x, y))
         elif op == "connect":
             encoded = empty_encoded_command(OP_CONNECT)
             encoded["id1"] = int(command["from"]) + 1
