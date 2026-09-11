@@ -40,6 +40,8 @@ class ProgramConfig:
     width_quantum_m: float = 1.0
     maximum_width_m: float = 32.0
     simplify_tolerance_m: float = 6.0
+    maximum_segment_length_m: float = 200.0
+    relative_add_coordinates: bool = False
     layer_min: int = -5
     layer_max: int = 5
 
