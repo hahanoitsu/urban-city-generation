@@ -210,7 +210,8 @@ echo "=== PACKAGE ==="
 mkdir -p \
     "$PACKAGE/training" \
     "$PACKAGE/program-corpus" \
-    "$PACKAGE/sample-previews"
+    "$PACKAGE/sample-previews" \
+    "$PACKAGE/sample-programs"
 
 for name in config.json environment.json metrics.jsonl summary.json; do
     [[ -f "$RUN/$name" ]] && cp "$RUN/$name" "$PACKAGE/training/$name"
@@ -231,6 +232,12 @@ while IFS= read -r preview; do
     safe="${relative//\//__}"
     cp "$preview" "$PACKAGE/sample-previews/$safe"
 done < <(find "$SAMPLES" -path '*/sample-*/preview.png' -type f | sort)
+
+while IFS= read -r program; do
+    relative="${program#$SAMPLES/}"
+    safe="${relative//\//__}"
+    cp "$program" "$PACKAGE/sample-programs/$safe"
+done < <(find "$SAMPLES" -path '*/sample-*/program.json' -type f | sort)
 
 # Keep representative generated programs/cities/OBJs selected by the city audit.
 if [[ -d "$AUDIT/city/representatives" ]]; then
