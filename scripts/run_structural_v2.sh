@@ -64,6 +64,7 @@ pytest -q \
     tests/test_structural_generator_audit.py \
     tests/test_structural_relative_codec.py \
     tests/test_structural_planarity.py \
+    tests/test_structural_densify.py \
     tests/test_graph_program.py \
     tests/test_graph_model.py \
     tests/test_generated_scene.py
