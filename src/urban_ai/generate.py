@@ -263,6 +263,14 @@ def generate_program(
     generator = torch.Generator(device=device)
     generator.manual_seed(int(seed))
     codec: CommandCodecConfig = model.config.codec
+    metres_per_bin = max(
+        (float(bounds_m[2]) - float(bounds_m[0])) / max(codec.program.coordinate_bins - 1, 1),
+        (float(bounds_m[3]) - float(bounds_m[1])) / max(codec.program.coordinate_bins - 1, 1),
+    )
+    maximum_step_bins = max(
+        1,
+        int(round(float(codec.program.maximum_segment_length_m) / metres_per_bin)),
+    )
     maximum_commands = min(
         int(maximum_commands or model.config.maximum_sequence_length),
         model.config.maximum_sequence_length,
@@ -287,6 +295,7 @@ def generate_program(
     component_signatures: list[tuple[str, str, int]] = []
     component_sizes: list[int] = []
     occupied: set[tuple[int, int]] = set()
+    node_positions: list[tuple[int, int]] = []
     edge_pairs: set[tuple[int, int]] = set()
     model.eval()
     style = style.to(device=device, dtype=torch.float32).reshape(1, -1)
@@ -296,7 +305,16 @@ def generate_program(
         last = {field: value[0, -1] for field, value in logits.items()}
         node_count = len(node_components)
         component_count = len(component_signatures)
-        candidates = _connect_candidates(node_components, edge_pairs)
+        candidates = (
+            _safe_connect_candidates(
+                node_components,
+                edge_pairs,
+                node_positions,
+                maximum_step_bins=maximum_step_bins,
+            )
+            if codec.program.relative_add_coordinates and node_positions
+            else _connect_candidates(node_components, edge_pairs)
+        )
 
         edge_count = len(edge_pairs)
         surface_road_edges = sum(
@@ -385,6 +403,7 @@ def generate_program(
             component_sizes.append(1)
             node_components.append(component_id)
             occupied.add((x, y))
+            node_positions.append((x, y))
             record.update(
                 {
                     "x": x + 1,
@@ -428,25 +447,41 @@ def generate_program(
                 generator=generator,
             )
             width = _sample(last["width"], None, temperature=temperature, generator=generator)
-            x, y = _free_coordinate(
-                last["x"],
-                last["y"],
-                occupied,
-                coordinate_bins=codec.program.coordinate_bins,
-                temperature=temperature,
-                generator=generator,
-            )
+            if codec.program.relative_add_coordinates:
+                x, y, x_code, y_code = _relative_coordinate(
+                    last["x"],
+                    last["y"],
+                    parent,
+                    node_positions,
+                    occupied,
+                    edge_pairs,
+                    coordinate_bins=codec.program.coordinate_bins,
+                    maximum_step_bins=maximum_step_bins,
+                    temperature=temperature,
+                    generator=generator,
+                )
+            else:
+                x, y = _free_coordinate(
+                    last["x"],
+                    last["y"],
+                    occupied,
+                    coordinate_bins=codec.program.coordinate_bins,
+                    temperature=temperature,
+                    generator=generator,
+                )
+                x_code, y_code = x, y
             new_node = len(node_components)
             node_components.append(component_id)
             component_sizes[component_id] += 1
             occupied.add((x, y))
+            node_positions.append((x, y))
             edge_pairs.add((min(parent, new_node), max(parent, new_node)))
             mode = mode_index(mode_name_value)
             vertical = vertical_index(vertical_name_value)
             record.update(
                 {
-                    "x": x + 1,
-                    "y": y + 1,
+                    "x": x_code + 1,
+                    "y": y_code + 1,
                     "id1": parent + 1,
                     "mode": mode + 1,
                     "class": edge_class + 1,
@@ -470,7 +505,16 @@ def generate_program(
                 }
             )
         elif op == OP_CONNECT:
-            candidates = _connect_candidates(node_components, edge_pairs)
+            candidates = (
+                _safe_connect_candidates(
+                    node_components,
+                    edge_pairs,
+                    node_positions,
+                    maximum_step_bins=maximum_step_bins,
+                )
+                if codec.program.relative_add_coordinates
+                else _connect_candidates(node_components, edge_pairs)
+            )
             left = _sample(
                 last["id1"],
                 list(candidates),
