@@ -52,6 +52,25 @@ python -m py_compile src/urban_model/whole_city_overfit.py
 pytest -q tests/test_whole_city_overfit.py
 
 echo
+echo "=== MODEL SHAPE SMOKE TEST ==="
+python - <<'PY'
+import torch
+from urban_model.whole_city_overfit import (
+    OVERVIEW_CHANNELS,
+    _build_model,
+    _coordinate_grid,
+)
+
+model = _build_model(64)
+noisy = torch.randn(1, OVERVIEW_CHANNELS, 64, 64)
+coords = _coordinate_grid(64, torch.device("cpu"))
+out = model(torch.cat([noisy, coords], dim=1), torch.tensor([999])).sample
+assert out.shape == noisy.shape, (out.shape, noisy.shape)
+print("model input:", tuple(noisy.shape[:1] + (noisy.shape[1] + 2,) + noisy.shape[2:]))
+print("model output:", tuple(out.shape))
+PY
+
+echo
 echo "=== TARGET PREVIEW ==="
 python - <<PY
 from pathlib import Path
