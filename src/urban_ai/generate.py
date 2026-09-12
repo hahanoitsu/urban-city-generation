@@ -305,16 +305,9 @@ def generate_program(
         last = {field: value[0, -1] for field, value in logits.items()}
         node_count = len(node_components)
         component_count = len(component_signatures)
-        candidates = (
-            _safe_connect_candidates(
-                node_components,
-                edge_pairs,
-                node_positions,
-                maximum_step_bins=maximum_step_bins,
-            )
-            if codec.program.relative_add_coordinates and node_positions
-            else _connect_candidates(node_components, edge_pairs)
-        )
+        # Closure candidates are expensive for planar graphs. Do not build the
+        # all-pairs candidate set while we are still forced to grow the graph.
+        candidates: dict[int, list[int]] = {}
 
         edge_count = len(edge_pairs)
         surface_road_edges = sum(
@@ -369,8 +362,19 @@ def generate_program(
                 allowed_ops.append(OP_ROOT)
             if node_count < codec.maximum_nodes:
                 allowed_ops.append(OP_ADD)
-            if node_count >= minimum_nodes and candidates:
-                allowed_ops.append(OP_CONNECT)
+            if node_count >= minimum_nodes:
+                candidates = (
+                    _safe_connect_candidates(
+                        node_components,
+                        edge_pairs,
+                        node_positions,
+                        maximum_step_bins=maximum_step_bins,
+                    )
+                    if codec.program.relative_add_coordinates and node_positions
+                    else _connect_candidates(node_components, edge_pairs)
+                )
+                if candidates:
+                    allowed_ops.append(OP_CONNECT)
             op = _sample(last["op"], allowed_ops, temperature=temperature, generator=generator)
 
         if op == OP_EOS:
@@ -522,16 +526,8 @@ def generate_program(
                 }
             )
         elif op == OP_CONNECT:
-            candidates = (
-                _safe_connect_candidates(
-                    node_components,
-                    edge_pairs,
-                    node_positions,
-                    maximum_step_bins=maximum_step_bins,
-                )
-                if codec.program.relative_add_coordinates
-                else _connect_candidates(node_components, edge_pairs)
-            )
+            if not candidates:
+                raise RuntimeError("CONNECT selected without a valid crossing-safe candidate")
             left = _sample(
                 last["id1"],
                 list(candidates),
