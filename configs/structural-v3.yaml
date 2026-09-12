@@ -1,0 +1,13 @@
+data:
+  profile_manifest: data/manifests/corpus-v2/train.jsonl
+
+planner:
+  count: 24
+  seed: 9301
+  bounds_m: [0, 0, 1024, 1024]
+  orientation_strength: 0.35
+  interior_margin_m: 45.0
+  maximum_attempts: 12
+  minimum_block_area_m2: 400
+  target_parcel_area_m2: 1200
+  minimum_parcel_area_m2: 160
