@@ -437,21 +437,19 @@ def train_overfit(
         start_step = int(state["step"]) + 1
         best_score = float(state.get("best_score", -math.inf))
 
+    metric_fields = [
+        "step",
+        "train_loss",
+        "accuracy",
+        "mean_iou",
+        "road_iou",
+        "urban_iou",
+        *[f"iou_{name}" for name in OVERVIEW_NAMES],
+    ]
     metrics_path = output / "metrics.csv"
     if start_step == 1:
         with metrics_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=[
-                    "step",
-                    "train_loss",
-                    "accuracy",
-                    "mean_iou",
-                    "road_iou",
-                    "urban_iou",
-                    *[f"iou_{name}" for name in OVERVIEW_NAMES],
-                ],
-            )
+            writer = csv.DictWriter(handle, fieldnames=metric_fields)
             writer.writeheader()
 
     model.train()
@@ -482,13 +480,17 @@ def train_overfit(
 
         should_sample = step == 1 or step % sample_every == 0 or step == steps
         if should_sample:
-            ema_model = copy.deepcopy(model).to(device)
-            ema_model.disable_gradient_checkpointing()
-            ema_model.load_state_dict(ema)
-            ema_model.eval()
+            # Swap EMA weights into the existing model for sampling instead of
+            # holding a second 512px UNet on the GPU.
+            current_state = {
+                name: value.detach().cpu().clone()
+                for name, value in model.state_dict().items()
+            }
+            model.load_state_dict(ema)
+            model.eval()
 
             generated = _sample(
-                ema_model,
+                model,
                 resolution=resolution,
                 train_steps=diffusion_steps,
                 inference_steps=inference_steps,
@@ -509,7 +511,7 @@ def train_overfit(
             )
 
             with metrics_path.open("a", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=list(values))
+                writer = csv.DictWriter(handle, fieldnames=metric_fields)
                 writer.writerow(values)
 
             score = values["accuracy"] + values["urban_iou"] + values["road_iou"]
@@ -537,7 +539,9 @@ def train_overfit(
                     best_score=best_score,
                     config=config,
                 )
-            del generated, ema_model
+            model.load_state_dict(current_state)
+            model.train()
+            del generated, current_state
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
