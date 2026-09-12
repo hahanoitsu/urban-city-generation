@@ -236,9 +236,17 @@ def _build_topology(
         int(round(float(profile["junctions_per_km"]) * target_length / 1000.0)),
     )
 
-    count = int(np.clip((target_length / 900.0) ** 2, 24, 160))
+    # Euclidean MST length in a fixed-area tile scales roughly with sqrt(N).
+    # Sparse real tiles can legitimately have only ~1.5-2 km of main-road
+    # network, so a hard floor of 24 interior points makes their target
+    # impossible: the spanning tree alone is already several kilometres.
+    count = int(np.clip((target_length / 900.0) ** 2, 4, 180))
     last_error: Exception | None = None
-    for _attempt in range(maximum_attempts):
+    best_graph: nx.Graph | None = None
+    best_score = math.inf
+    best_diagnostic: dict[str, float | int] | None = None
+
+    for attempt in range(maximum_attempts):
         interior = _interior_points(count, bounds, rng, margin_m=margin_m)
         boundary = _boundary_points(boundary_count, bounds, rng)
         try:
@@ -308,20 +316,85 @@ def _build_topology(
                     if not (item[0] == left and item[1] == right)
                 ]
 
-            ratio = _total_length(selected) / target_length
+            actual_length = _total_length(selected)
+            ratio = actual_length / target_length
+            actual_dead = _dead_ends(selected, boundary_nodes)
+            actual_junctions = _junctions(selected)
+
+            length_error = abs(math.log(max(ratio, 1e-9)))
+            dead_error = abs(actual_dead - target_dead_ends) / max(target_dead_ends, 4)
+            junction_error = (
+                abs(actual_junctions - target_junctions) / max(target_junctions, 4)
+            )
+            score = length_error + 0.18 * dead_error + 0.18 * junction_error
+
+            if score < best_score:
+                best_score = score
+                best_graph = selected.copy()
+                best_diagnostic = {
+                    "attempt": attempt + 1,
+                    "target_length_m": target_length,
+                    "actual_length_m": actual_length,
+                    "length_ratio": ratio,
+                    "target_dead_ends": target_dead_ends,
+                    "actual_dead_ends": actual_dead,
+                    "target_junctions": target_junctions,
+                    "actual_junctions": actual_junctions,
+                    "interior_points": count,
+                }
+
+            print(
+                "planner attempt "
+                f"{attempt + 1}/{maximum_attempts}: "
+                f"points={count} target={target_length:.0f}m "
+                f"actual={actual_length:.0f}m ratio={ratio:.3f} "
+                f"dead={actual_dead}/{target_dead_ends} "
+                f"junctions={actual_junctions}/{target_junctions}",
+                flush=True,
+            )
+
             if 0.70 <= ratio <= 1.30:
                 return selected
-            if ratio > 1.30:
-                count = max(20, int(round(count / max(ratio, 1.01) ** 2)))
-            else:
-                count = min(180, int(round(count / max(ratio, 0.25) ** 2)))
+
+            # Adjust the number of interior sites gently. The square-law comes
+            # from the sqrt(N) MST scaling, but cap each adjustment so a single
+            # noisy attempt cannot bounce between extremes.
+            desired = count / max(ratio, 0.20) ** 2
+            lower = max(4, int(math.floor(count * 0.55)))
+            upper = min(180, int(math.ceil(count * 1.80)))
+            count = int(np.clip(round(desired), lower, upper))
         except Exception as exc:
             last_error = exc
-            count = max(24, min(180, count + rng.choice((-8, 8))))
+            count = max(4, min(180, count + rng.choice((-4, 4))))
+            print(
+                f"planner attempt {attempt + 1}/{maximum_attempts}: "
+                f"construction error: {exc}",
+                flush=True,
+            )
+
+    # Do not discard a valid connected planar graph just because its scalar
+    # statistics miss the preferred 0.70-1.30 window after the search budget.
+    # The downstream structural audit is the authority on whether the sample
+    # is scientifically acceptable.
+    if best_graph is not None and best_diagnostic is not None:
+        ratio = float(best_diagnostic["length_ratio"])
+        if 0.50 <= ratio <= 1.80:
+            print(
+                "planner using best valid topology after search budget: "
+                + json.dumps(best_diagnostic, sort_keys=True),
+                flush=True,
+            )
+            return best_graph
+
+        detail = json.dumps(best_diagnostic, sort_keys=True)
+        raise RuntimeError(
+            "Could not construct planner topology within a defensible road-length "
+            f"range. Best attempt: {detail}"
+        )
 
     if last_error is not None:
         raise RuntimeError(f"Could not construct planner topology: {last_error}") from last_error
-    raise RuntimeError("Could not construct planner topology")
+    raise RuntimeError("Could not construct planner topology: no valid attempts were produced")
 
 
 def _class_edges(
