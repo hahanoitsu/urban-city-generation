@@ -84,3 +84,25 @@ def test_planner_assigns_all_three_road_classes():
     state = _state_from_topology(graph, _profile(), bounds, seed=71)
     classes = {edge["class"] for edge in state["transport_graph"]["edges"]}
     assert classes == {"major", "secondary", "local"}
+
+
+def test_planner_handles_sparse_realistic_main_road_profile():
+    bounds = [0.0, 0.0, 1024.0, 1024.0]
+    profile = _profile()
+    profile["road_length_m"] = 1700.0
+    profile["boundary_endpoints"] = 2
+    profile["junctions_per_km"] = 1.8
+    profile["interior_dead_ends_per_km"] = 0.5
+
+    graph = _build_topology(
+        profile,
+        bounds,
+        random.Random(19),
+        orientation_strength=0.35,
+        margin_m=45.0,
+        maximum_attempts=12,
+    )
+
+    assert nx.is_connected(graph)
+    total = sum(float(data["length_m"]) for *_ends, data in graph.edges(data=True))
+    assert 850.0 <= total <= 3060.0
