@@ -127,6 +127,8 @@ for key in [
     "best_epoch",
     "mean_nearest_train_agreement_64",
     "max_nearest_train_agreement_64",
+    "mean_nearest_train_mean_iou_64",
+    "max_nearest_train_mean_iou_64",
     "mean_pairwise_generated_agreement_64",
 ]:
     print(f"{key:38s}: {summary[key]}")
