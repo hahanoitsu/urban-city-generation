@@ -57,6 +57,7 @@ echo
 echo "=== TESTS ==="
 cd "$WORKROOT"
 python -m py_compile src/urban_model/surface_distribution_v2.py
+python -m py_compile src/urban_model/layered_distribution_v2.py
 pytest -q tests/test_surface_distribution_v2.py
 
 echo
@@ -84,12 +85,12 @@ echo
 echo "Data:"
 echo "  corrected corpus-v2 train/validation split"
 echo "  256x256, 1 km tiles"
-echo "  surface structure only for this first distribution test"
+echo "  full 19-layer representation: surface + vertical transport + height/Z profiles"
 echo
 echo "Training:"
 echo "  wall-clock budget: 5.25 h"
 echo "  max epochs: 3000"
-echo "  full 1000-step final samples: 12"
+echo "  full 1000-step final samples: 8"
 echo "  no planner, graph repair, vectorizer or post-processing"
 echo
 echo "Existing whole-Singapore v2 checkpoints are untouched."
@@ -97,15 +98,15 @@ echo "Existing whole-Singapore v2 checkpoints are untouched."
 rm -rf "$RUN"
 rm -f "$ZIP"
 
-python -m urban_model.surface_distribution_v2 \
+python -m urban_model.layered_distribution_v2 \
     --config "$CONFIG" \
     --output "$RUN" \
     --max-epochs 3000 \
     --max-hours 5.25 \
     --device cuda \
     --preview-every 100 \
-    --checkpoint-every 25 \
-    --final-samples 12 \
+    --checkpoint-every 50 \
+    --final-samples 8 \
     --final-inference-steps 1000 \
     --overwrite
 
@@ -122,7 +123,7 @@ distribution = json.loads((root / "distribution-metrics.json").read_text())
 for key in [
     "epochs_completed",
     "updates",
-    "training_hours",
+    "total_hours",
     "best_high_noise_loss",
     "best_epoch",
     "mean_nearest_train_agreement_64",
@@ -151,17 +152,20 @@ mkdir -p "$PACKAGE/previews"
 for name in \
     experiment.json metrics.csv \
     real-train.png real-validation.png \
-    final-samples.png nearest-neighbours.png \
-    distribution-metrics.json summary.json; do
+    final-surface.png final-layered.png nearest-neighbours.png \
+    distribution-metrics.json layered-metrics.json summary.json; do
     [[ -f "$RUN/$name" ]] && cp "$RUN/$name" "$PACKAGE/"
 done
 
-if [[ -d "$RUN/previews" ]]; then
-    mapfile -t PREVIEWS < <(find "$RUN/previews" -maxdepth 1 -name '*.png' -type f | sort | tail -6)
-    for preview in "${PREVIEWS[@]}"; do
-        cp "$preview" "$PACKAGE/previews/"
-    done
-fi
+for preview_dir in previews-surface previews-layered; do
+    if [[ -d "$RUN/$preview_dir" ]]; then
+        mkdir -p "$PACKAGE/$preview_dir"
+        mapfile -t PREVIEWS < <(find "$RUN/$preview_dir" -maxdepth 1 -name '*.png' -type f | sort | tail -4)
+        for preview in "${PREVIEWS[@]}"; do
+            cp "$preview" "$PACKAGE/$preview_dir/"
+        done
+    fi
+done
 
 cat > "$PACKAGE/provenance.txt" <<EOF
 experiment_commit=$COMMIT
@@ -169,7 +173,7 @@ experiment=layered-distribution-v2
 config=$CONFIG
 train_manifest=$SOURCE_ROOT/data/manifests/corpus-v2/train.jsonl
 validation_manifest=$SOURCE_ROOT/data/manifests/corpus-v2/validation.jsonl
-representation=8-class surface semantic layout
+representation=19-layer structured city layout
 resolution=256x256
 physical_extent=1km x 1km per tile
 prediction_type=x0/sample
@@ -178,7 +182,7 @@ high_noise_oversampling=true
 class_balanced_loss=true
 training_wallclock_budget_hours=5.25
 final_inference_steps=1000
-final_samples=12
+final_samples=8
 postprocessing=none
 checkpoint_directory=$RUN
 EOF
@@ -189,7 +193,8 @@ zip -qr "$ZIP" "$(basename "$PACKAGE")"
 echo
 echo "=== COMPLETE ==="
 ls -lh "$ZIP"
-echo "Final samples: $RUN/final-samples.png"
+echo "Final surface samples: $RUN/final-surface.png"
+echo "Final layered samples: $RUN/final-layered.png"
 echo "Nearest-neighbour audit: $RUN/nearest-neighbours.png"
 echo "Best checkpoint preserved: $RUN/best.pt"
 echo "Latest checkpoint preserved: $RUN/latest.pt"
