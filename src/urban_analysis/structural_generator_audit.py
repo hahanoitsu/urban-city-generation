@@ -215,6 +215,21 @@ def audit_state(
     crossings = _crossing_metrics(edges)
     hierarchy = _hierarchy_metrics(graph, edges)
 
+    positions = [_position(data) for _node, data in graph.nodes(data=True)]
+    if positions:
+        xs = [value[0] for value in positions]
+        ys = [value[1] for value in positions]
+        width = max(bounds[2] - bounds[0], 1e-9)
+        height = max(bounds[3] - bounds[1], 1e-9)
+        span_x = (max(xs) - min(xs)) / width
+        span_y = (max(ys) - min(ys)) / height
+        hull = MultiPoint([(value[0], value[1]) for value in positions]).convex_hull
+        hull_fraction = float(hull.area / (width * height)) if hasattr(hull, "area") else 0.0
+    else:
+        span_x = 0.0
+        span_y = 0.0
+        hull_fraction = 0.0
+
     return {
         "source": source,
         "sample_id": str(state.get("tile", {}).get("tile_id") or path.parent.name),
@@ -232,6 +247,9 @@ def audit_state(
         if total_length
         else 0.0,
         "boundary_endpoints": int(boundary_endpoints),
+        "network_span_x_fraction": float(span_x),
+        "network_span_y_fraction": float(span_y),
+        "network_hull_area_fraction": float(hull_fraction),
         "edge_length_median_m": float(np.median(lengths)) if lengths else 0.0,
         "edge_length_p90_m": _percentile(lengths, 0.90),
         **hierarchy,
