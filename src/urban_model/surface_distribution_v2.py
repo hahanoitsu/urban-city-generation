@@ -548,6 +548,9 @@ def train_distribution(
         output_dir=output,
         epochs=int(max_epochs),
         device=device_name,
+        # This experiment only models the mutually-exclusive surface classes.
+        # Do not oversample tiles merely because they contain vertical transport.
+        vertical_crop_repeat=1,
     )
 
     _seed_everything(config.seed)
@@ -810,10 +813,9 @@ def train_distribution(
         class_weights=class_weight_values,
     )
 
-    # For the final scientific readout use the best high-noise EMA checkpoint.
-    checkpoint_path = output / "best.pt"
-    if not checkpoint_path.exists():
-        checkpoint_path = output / "latest.pt"
+    # The main readout is the final state after the full wall-clock budget.
+    # Preserve best.pt separately for later checkpoint comparison.
+    checkpoint_path = output / "latest.pt"
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     final_model = _build_model(config).to(device)
     ema_state = checkpoint["ema"]
