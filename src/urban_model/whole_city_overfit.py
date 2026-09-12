@@ -99,7 +99,7 @@ def build_overview_target(
     boundary_geojson: str | Path,
     *,
     resolution: int = 512,
-    padding: float = 0.03,
+    padding: float = 0.0,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     city, metadata = load_city_gpkg(prepared_city)
     crs = city.roads.crs
