@@ -58,7 +58,7 @@ echo "=== TESTS ==="
 cd "$WORKROOT"
 python -m py_compile src/urban_model/surface_distribution_v2.py
 python -m py_compile src/urban_model/layered_distribution_v2.py
-pytest -q tests/test_surface_distribution_v2.py
+pytest -q tests/test_surface_distribution_v2.py tests/test_layered_distribution_v2.py
 
 echo
 echo "=== SELECT GPU ==="
