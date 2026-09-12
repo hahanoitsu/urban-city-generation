@@ -362,7 +362,13 @@ def generate_program(
                 allowed_ops.append(OP_ROOT)
             if node_count < codec.maximum_nodes:
                 allowed_ops.append(OP_ADD)
+            # CONNECT validity is checked lazily after the model actually asks
+            # for a closure. Building the planar all-pairs candidate set here
+            # made every token unnecessarily expensive.
             if node_count >= minimum_nodes:
+                allowed_ops.append(OP_CONNECT)
+            op = _sample(last["op"], allowed_ops, temperature=temperature, generator=generator)
+            if op == OP_CONNECT:
                 candidates = (
                     _safe_connect_candidates(
                         node_components,
@@ -373,9 +379,15 @@ def generate_program(
                     if codec.program.relative_add_coordinates and node_positions
                     else _connect_candidates(node_components, edge_pairs)
                 )
-                if candidates:
-                    allowed_ops.append(OP_CONNECT)
-            op = _sample(last["op"], allowed_ops, temperature=temperature, generator=generator)
+                if not candidates:
+                    if node_count < codec.maximum_nodes:
+                        op = OP_ADD
+                    elif can_finish:
+                        op = OP_EOS
+                    else:
+                        raise RuntimeError(
+                            "CONNECT requested but no legal closure exists and graph cannot finish"
+                        )
 
         if op == OP_EOS:
             encoded.append(empty_encoded_command(OP_EOS))
