@@ -465,20 +465,43 @@ def _distribution_metrics(
     train_small = _downsample_classes(train)
     validation_small = _downsample_classes(validation)
 
+    def mean_iou_against(reference: np.ndarray, item: np.ndarray) -> np.ndarray:
+        scores = []
+        for class_index in range(SURFACE_CLASS_COUNT):
+            expected = reference == class_index
+            predicted = item[None] == class_index
+            intersection = np.logical_and(expected, predicted).sum(axis=(1, 2))
+            union = np.logical_or(expected, predicted).sum(axis=(1, 2))
+            scores.append(
+                np.divide(
+                    intersection,
+                    union,
+                    out=np.ones_like(intersection, dtype=np.float64),
+                    where=union > 0,
+                )
+            )
+        return np.stack(scores, axis=1).mean(axis=1)
+
     nearest = []
     for index, item in enumerate(generated_small):
         train_agreement = (train_small == item[None]).mean(axis=(1, 2))
         validation_agreement = (validation_small == item[None]).mean(axis=(1, 2))
-        best_train = int(np.argmax(train_agreement))
-        best_validation = int(np.argmax(validation_agreement))
+        train_miou = mean_iou_against(train_small, item)
+        validation_miou = mean_iou_against(validation_small, item)
+        best_train = int(np.argmax(train_miou))
+        best_validation = int(np.argmax(validation_miou))
         nearest.append(
             {
                 "sample": index,
                 "best_train_index": best_train,
                 "best_train_agreement_64": float(train_agreement[best_train]),
+                "best_train_mean_iou_64": float(train_miou[best_train]),
                 "best_validation_index": best_validation,
                 "best_validation_agreement_64": float(
                     validation_agreement[best_validation]
+                ),
+                "best_validation_mean_iou_64": float(
+                    validation_miou[best_validation]
                 ),
             }
         )
@@ -513,8 +536,17 @@ def _distribution_metrics(
         "max_nearest_train_agreement_64": float(
             np.max([item["best_train_agreement_64"] for item in nearest])
         ),
+        "mean_nearest_train_mean_iou_64": float(
+            np.mean([item["best_train_mean_iou_64"] for item in nearest])
+        ),
+        "max_nearest_train_mean_iou_64": float(
+            np.max([item["best_train_mean_iou_64"] for item in nearest])
+        ),
         "mean_nearest_validation_agreement_64": float(
             np.mean([item["best_validation_agreement_64"] for item in nearest])
+        ),
+        "mean_nearest_validation_mean_iou_64": float(
+            np.mean([item["best_validation_mean_iou_64"] for item in nearest])
         ),
         "mean_pairwise_generated_agreement_64": (
             float(np.mean(pairwise)) if pairwise else 1.0
@@ -869,7 +901,7 @@ def train_distribution(
         nearest_labels.append(f"gen {index + 1}")
         nearest_maps.append(train_real[item["best_train_index"]])
         nearest_labels.append(
-            f"nearest train {item['best_train_agreement_64']:.3f}"
+            f"train mIoU {item['best_train_mean_iou_64']:.3f}"
         )
     _save_sheet(
         np.stack(nearest_maps),
@@ -893,6 +925,12 @@ def train_distribution(
         ],
         "max_nearest_train_agreement_64": distribution[
             "max_nearest_train_agreement_64"
+        ],
+        "mean_nearest_train_mean_iou_64": distribution[
+            "mean_nearest_train_mean_iou_64"
+        ],
+        "max_nearest_train_mean_iou_64": distribution[
+            "max_nearest_train_mean_iou_64"
         ],
         "mean_pairwise_generated_agreement_64": distribution[
             "mean_pairwise_generated_agreement_64"
