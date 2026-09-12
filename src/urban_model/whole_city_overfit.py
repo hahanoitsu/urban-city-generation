@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import csv
 import json
 import math
@@ -33,6 +32,8 @@ OVERVIEW_NAMES = (
     "water",
 )
 OVERVIEW_CHANNELS = len(OVERVIEW_NAMES)
+POSITION_CHANNELS = 2
+MODEL_INPUT_CHANNELS = OVERVIEW_CHANNELS + POSITION_CHANNELS
 PALETTE = np.asarray(
     [
         (226, 221, 209),
@@ -239,6 +240,49 @@ def _metrics(target: np.ndarray, sample: np.ndarray) -> dict[str, float]:
     return result
 
 
+def _coordinate_grid(resolution: int, device: torch.device) -> torch.Tensor:
+    axis = torch.linspace(-1.0, 1.0, resolution, dtype=torch.float32, device=device)
+    yy, xx = torch.meshgrid(axis, axis, indexing="ij")
+    return torch.stack([xx, yy], dim=0).unsqueeze(0)
+
+
+def _balanced_pixel_weights(
+    target_classes: np.ndarray,
+    device: torch.device,
+    *,
+    power: float = 0.35,
+    maximum: float = 3.0,
+) -> tuple[torch.Tensor, list[float]]:
+    counts = np.bincount(target_classes.reshape(-1), minlength=OVERVIEW_CHANNELS).astype(np.float64)
+    fractions = counts / max(float(counts.sum()), 1.0)
+    raw = np.power(np.maximum(fractions, 0.01), -float(power))
+    raw = np.minimum(raw, float(maximum))
+    raw /= np.sum(raw * fractions)
+    weights = raw[target_classes]
+    tensor = torch.from_numpy(weights.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
+    return tensor, [float(value) for value in raw]
+
+
+def _training_timestep(
+    step: int,
+    diffusion_steps: int,
+    generator: torch.Generator,
+) -> torch.Tensor:
+    # Over-represent high-noise states because those are exactly where pure-noise
+    # generation failed in v1. Keep enough low/mid-noise exposure for detail.
+    bucket = step % 10
+    if bucket < 5:
+        low = int(diffusion_steps * 0.75)
+        high = diffusion_steps
+    elif bucket < 8:
+        low = int(diffusion_steps * 0.35)
+        high = int(diffusion_steps * 0.75)
+    else:
+        low = 0
+        high = int(diffusion_steps * 0.35)
+    return torch.randint(low, max(low + 1, high), (1,), generator=generator, dtype=torch.long)
+
+
 def _require_diffusers():
     try:
         from diffusers import DDIMScheduler, DDPMScheduler, UNet2DModel
@@ -251,7 +295,7 @@ def _build_model(resolution: int):
     UNet2DModel, _DDPM, _DDIM = _require_diffusers()
     return UNet2DModel(
         sample_size=(resolution, resolution),
-        in_channels=OVERVIEW_CHANNELS,
+        in_channels=MODEL_INPUT_CHANNELS,
         out_channels=OVERVIEW_CHANNELS,
         layers_per_block=2,
         block_out_channels=(64, 96, 128, 192, 256),
@@ -279,7 +323,7 @@ def _schedulers(train_steps: int):
     noise = DDPMScheduler(
         num_train_timesteps=int(train_steps),
         beta_schedule="squaredcos_cap_v2",
-        prediction_type="epsilon",
+        prediction_type="sample",
         clip_sample=True,
     )
     inference = DDIMScheduler.from_config(noise.config)
@@ -304,10 +348,12 @@ def _sample(
         generator=generator,
         dtype=torch.float32,
     ).to(device)
+    coordinates = _coordinate_grid(resolution, device)
     model.eval()
     for timestep in scheduler.timesteps:
+        model_input = torch.cat([values, coordinates], dim=1)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
-            prediction = model(values, timestep).sample
+            prediction = model(model_input, timestep).sample
         values = scheduler.step(
             prediction.float(),
             timestep,
@@ -360,7 +406,8 @@ def train_overfit(
     resolution: int = 512,
     steps: int = 20_000,
     diffusion_steps: int = 1000,
-    inference_steps: int = 250,
+    inference_steps: int = 100,
+    final_inference_steps: int = 1000,
     learning_rate: float = 2e-4,
     weight_decay: float = 1e-4,
     sample_every: int = 1000,
@@ -400,6 +447,11 @@ def train_overfit(
     one_hot = np.eye(OVERVIEW_CHANNELS, dtype=np.float32)[target_classes]
     target = torch.from_numpy(one_hot).permute(2, 0, 1).mul(2.0).sub(1.0)
     target = target.unsqueeze(0).to(device)
+    coordinates = _coordinate_grid(resolution, device)
+    pixel_weights, class_weights = _balanced_pixel_weights(target_classes, device)
+    print("class loss weights:", flush=True)
+    for name, weight in zip(OVERVIEW_NAMES, class_weights, strict=True):
+        print(f"  {name:14s} {weight:.3f}", flush=True)
 
     model = _build_model(resolution).to(device)
     if hasattr(model, "enable_gradient_checkpointing"):
@@ -420,6 +472,11 @@ def train_overfit(
         "steps": steps,
         "diffusion_steps": diffusion_steps,
         "inference_steps": inference_steps,
+        "final_inference_steps": final_inference_steps,
+        "prediction_type": "sample_x0",
+        "position_channels": POSITION_CHANNELS,
+        "high_noise_oversampling": True,
+        "class_loss_weights": dict(zip(OVERVIEW_NAMES, class_weights, strict=True)),
         "learning_rate": learning_rate,
         "weight_decay": weight_decay,
         "sample_every": sample_every,
@@ -458,18 +515,14 @@ def train_overfit(
         optimizer.zero_grad(set_to_none=True)
         generator = torch.Generator(device="cpu").manual_seed(seed * 1_000_003 + step)
         noise = torch.randn(target.shape, generator=generator, dtype=torch.float32).to(device)
-        timestep = torch.randint(
-            0,
-            diffusion_steps,
-            (1,),
-            generator=generator,
-            dtype=torch.long,
-        ).to(device)
+        timestep = _training_timestep(step, diffusion_steps, generator).to(device)
         noised = noise_scheduler.add_noise(target, noise, timestep)
+        model_input = torch.cat([noised, coordinates], dim=1)
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
-            prediction = model(noised, timestep).sample
-            loss = torch.nn.functional.mse_loss(prediction.float(), noise)
+            prediction = model(model_input, timestep).sample
+            squared = (prediction.float() - target).square()
+            loss = (squared * pixel_weights).mean()
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -477,7 +530,10 @@ def train_overfit(
         _ema_update(ema, model, 0.9995, step)
 
         if step == 1 or step % 100 == 0:
-            print(f"step={step}/{steps} loss={float(loss):.6f}", flush=True)
+            print(
+                f"step={step}/{steps} t={int(timestep.item())} loss={float(loss):.6f}",
+                flush=True,
+            )
 
         should_sample = step == 1 or step % sample_every == 0 or step == steps
         if should_sample:
@@ -557,6 +613,42 @@ def train_overfit(
                 config=config,
             )
 
+    print("final full-chain sample:", flush=True)
+    current_state = {
+        name: value.detach().cpu().clone()
+        for name, value in model.state_dict().items()
+    }
+    model.load_state_dict(ema)
+    model.eval()
+    final_generated = _sample(
+        model,
+        resolution=resolution,
+        train_steps=diffusion_steps,
+        inference_steps=final_inference_steps,
+        seed=sample_seed,
+        device=device,
+    )
+    final_classes = final_generated[0].argmax(dim=0).detach().cpu().numpy().astype(np.int64)
+    final_metrics = _metrics(target_classes, final_classes)
+    save_class_image(final_classes, output / "final-full-chain.png")
+    _comparison(
+        target_classes,
+        final_classes,
+        output / "final-full-chain-comparison.png",
+        f"PURE NOISE → {final_inference_steps}-step DDIM sample",
+    )
+    _write_json(output / "final-full-chain-metrics.json", final_metrics)
+    print(
+        "final "
+        f"accuracy={final_metrics['accuracy']:.4f} "
+        f"urban_iou={final_metrics['urban_iou']:.4f} "
+        f"road_iou={final_metrics['road_iou']:.4f} "
+        f"mean_iou={final_metrics['mean_iou']:.4f}",
+        flush=True,
+    )
+    model.load_state_dict(current_state)
+    del final_generated, current_state
+
     summary = {
         "output": str(output),
         "steps_completed": steps,
@@ -564,6 +656,8 @@ def train_overfit(
         "target": str(output / "target.png"),
         "best": str(output / "best.png"),
         "best_comparison": str(output / "best-comparison.png"),
+        "final_full_chain": str(output / "final-full-chain.png"),
+        "final_full_chain_comparison": str(output / "final-full-chain-comparison.png"),
         "latest_checkpoint": str(output / "latest.pt"),
         "best_checkpoint": str(output / "best.pt"),
     }
@@ -581,7 +675,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--resolution", type=int, default=512)
     parser.add_argument("--steps", type=int, default=20_000)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
-    parser.add_argument("--inference-steps", type=int, default=250)
+    parser.add_argument("--inference-steps", type=int, default=100)
+    parser.add_argument("--final-inference-steps", type=int, default=1000)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--sample-every", type=int, default=1000)
     parser.add_argument("--checkpoint-every", type=int, default=1000)
@@ -604,6 +699,7 @@ def main(argv: list[str] | None = None) -> int:
             steps=args.steps,
             diffusion_steps=args.diffusion_steps,
             inference_steps=args.inference_steps,
+            final_inference_steps=args.final_inference_steps,
             learning_rate=args.learning_rate,
             sample_every=args.sample_every,
             checkpoint_every=args.checkpoint_every,
