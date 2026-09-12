@@ -144,12 +144,13 @@ def build_overview_target(
 
     major = _burn(major_frame.geometry, transform=transform, resolution=resolution)
     minor = _burn(minor_frame.geometry, transform=transform, resolution=resolution)
-    major = binary_dilation(major, iterations=2)
-    minor = binary_dilation(minor, iterations=1)
+    # At Singapore scale one pixel is already tens of metres. Keep minor
+    # streets one pixel wide and only thicken major corridors slightly so the
+    # proof image stays readable without turning into a road heatmap.
+    major = binary_dilation(major, iterations=1)
 
     rail = _surface(city.rail)
     rail_mask = _burn(rail.geometry, transform=transform, resolution=resolution)
-    rail_mask = binary_dilation(rail_mask, iterations=1)
 
     classes = np.full((resolution, resolution), 6, dtype=np.int64)
     classes[inside] = 0
