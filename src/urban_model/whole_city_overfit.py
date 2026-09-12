@@ -144,12 +144,10 @@ def build_overview_target(
 
     major = _burn(major_frame.geometry, transform=transform, resolution=resolution)
     minor = _burn(minor_frame.geometry, transform=transform, resolution=resolution)
-    major = binary_dilation(major, iterations=2)
-    minor = binary_dilation(minor, iterations=1)
+    major = binary_dilation(major, iterations=1)
 
     rail = _surface(city.rail)
     rail_mask = _burn(rail.geometry, transform=transform, resolution=resolution)
-    rail_mask = binary_dilation(rail_mask, iterations=1)
 
     classes = np.full((resolution, resolution), 6, dtype=np.int64)
     classes[inside] = 0
