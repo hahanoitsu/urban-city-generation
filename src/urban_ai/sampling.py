@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +122,12 @@ def sample_from_config(
         sample_seed = seed + index
         sample_dir = output_root / f"sample-{index + 1:03d}"
         sample_dir.mkdir(parents=True, exist_ok=True)
+        started = time.time()
+        print(
+            f"sample {index + 1}/{count} seed={sample_seed} "
+            f"temperature={temperature:.2f}: generating graph",
+            flush=True,
+        )
         program = generate_program(
             model,
             style_tensor,
@@ -148,6 +155,13 @@ def sample_from_config(
         preview = render_generated_city(city, sample_dir / "preview.png")
         obj = export_generated_city_obj(city, sample_dir / "city.obj")
         novelty = nearest_training_overlap(program, program_root)
+        print(
+            f"sample {index + 1}/{count}: complete "
+            f"nodes={city.get('statistics', {}).get('nodes', 0)} "
+            f"edges={city.get('statistics', {}).get('edges', 0)} "
+            f"elapsed={time.time() - started:.1f}s",
+            flush=True,
+        )
         result = {
             "index": index,
             "seed": sample_seed,
