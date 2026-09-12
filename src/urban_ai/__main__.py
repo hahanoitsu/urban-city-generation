@@ -42,6 +42,15 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--resume", type=Path)
     train.add_argument("--overwrite", action="store_true")
 
+    plan = commands.add_parser(
+        "plan", help="Generate fictional road networks with the hierarchical stochastic planner"
+    )
+    plan.add_argument("--config", required=True, type=Path)
+    plan.add_argument("--output", required=True, type=Path)
+    plan.add_argument("--count", type=int)
+    plan.add_argument("--seed", type=int)
+    plan.add_argument("--overwrite", action="store_true")
+
     sample = commands.add_parser(
         "sample", help="Generate complete fictional city graphs from style controls"
     )
@@ -95,6 +104,16 @@ def main(argv: list[str] | None = None) -> int:
                 batch_size=args.batch_size,
                 device_name=args.device,
                 resume=args.resume,
+                overwrite=args.overwrite,
+            )
+        elif args.command == "plan":
+            from .planner import plan_from_config
+
+            result = plan_from_config(
+                args.config,
+                args.output,
+                count=args.count,
+                seed=args.seed,
                 overwrite=args.overwrite,
             )
         elif args.command == "sample":
