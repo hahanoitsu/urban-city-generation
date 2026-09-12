@@ -59,7 +59,7 @@ python scripts/eval_whole_singapore_multiseed.py \
 
 echo
 echo "=== PACKAGE ==="
-cd "$ROOT"
+cd "$(dirname "$OUT")"
 zip -qr "$ZIP" "$(basename "$OUT")"
 
 echo
