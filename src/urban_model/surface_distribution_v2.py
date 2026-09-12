@@ -545,6 +545,7 @@ def train_distribution(
         output_dir=output,
         epochs=int(max_epochs),
         device=device_name,
+        vertical_crop_repeat=1,
     )
 
     _seed_everything(config.seed)
@@ -803,9 +804,7 @@ def train_distribution(
         class_weights=class_weight_values,
     )
 
-    checkpoint_path = output / "best.pt"
-    if not checkpoint_path.exists():
-        checkpoint_path = output / "latest.pt"
+    checkpoint_path = output / "latest.pt"
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     final_model = _build_model(config).to(device)
     ema_state = checkpoint["ema"]
