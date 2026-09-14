@@ -61,7 +61,7 @@ def seed_everything(seed: int) -> None:
 
 def read_controls(path: Path) -> pd.DataFrame:
     frame = pd.read_csv(path)
-    missing = ["tile_id", *[name for name in CONTROLS if name not in frame.columns]]
+    missing = [name for name in ("tile_id", *CONTROLS) if name not in frame.columns]
     if missing:
         raise ValueError(f"Missing descriptor columns: {missing}")
     frame = frame[["tile_id", *CONTROLS]].copy()
