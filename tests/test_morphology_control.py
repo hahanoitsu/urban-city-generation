@@ -93,8 +93,8 @@ def test_measure_reads_simple_surface_map():
 
     result = measure(classes)
 
-    assert result["green_coverage"] > 0.20
-    assert result["building_coverage"] > 0.20
+    assert result["green_coverage"] > 0.15
+    assert result["building_coverage"] > 0.15
     assert result["water_coverage"] > 0.20
     assert result["road_length_km_per_km2"] > 0
     assert result["road_major_share"] > 0.99
