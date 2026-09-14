@@ -40,11 +40,12 @@ done
 
 echo
 echo "=== QUICK COMPARISON ==="
-python - <<'PY'
+AUDIT_OUTROOT="$OUTROOT" python - <<'PY'
 import json
+import os
 from pathlib import Path
 
-root = Path(r"$OUTROOT")
+root = Path(os.environ["AUDIT_OUTROOT"])
 for folder in sorted(p for p in root.iterdir() if p.is_dir()):
     summary = json.loads((folder / "summary.json").read_text())
     print(f"\n{folder.name}")
