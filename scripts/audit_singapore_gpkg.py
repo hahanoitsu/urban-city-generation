@@ -227,6 +227,7 @@ def audit_transport(frame: gpd.GeoDataFrame, name: str, out: Path, suspicious_gp
             layer=f"{name}_suspicious",
             driver="GPKG",
             engine="pyogrio",
+            mode="a" if suspicious_gpkg.exists() else "w",
         )
         suspicious.drop(columns=[frame.geometry.name]).to_csv(
             out / f"{name}-suspicious-features.csv", index=False
