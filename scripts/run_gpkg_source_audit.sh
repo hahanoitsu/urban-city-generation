@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${URBAN_ROOT:-$(git rev-parse --show-toplevel)}"
-OUTROOT="$ROOT/runs/gpkg-source-audit"
-ZIP="$ROOT/gpkg-source-audit-results.zip"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA_ROOT="${URBAN_ROOT:-$SCRIPT_ROOT}"
+OUTROOT="$DATA_ROOT/runs/gpkg-source-audit"
+ZIP="$DATA_ROOT/gpkg-source-audit-results.zip"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate urban-city
-export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$SCRIPT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
-cd "$ROOT"
+cd "$DATA_ROOT"
 
 rm -rf "$OUTROOT"
 rm -f "$ZIP"
 mkdir -p "$OUTROOT"
 
 FILES=()
-for candidate in     "$ROOT/data/cities/singapore-v2.gpkg"     "$ROOT/data/cities/singapore.gpkg"; do
+for candidate in     "$DATA_ROOT/data/cities/singapore-v2.gpkg"     "$DATA_ROOT/data/cities/singapore.gpkg"; do
     if [[ -f "$candidate" ]]; then
         FILES+=("$candidate")
     fi
@@ -43,7 +44,7 @@ python - <<'PY'
 import json
 from pathlib import Path
 
-root = Path("runs/gpkg-source-audit")
+root = Path(r"$OUTROOT")
 for folder in sorted(p for p in root.iterdir() if p.is_dir()):
     summary = json.loads((folder / "summary.json").read_text())
     print(f"\n{folder.name}")
@@ -69,7 +70,7 @@ PY
 
 echo
 echo "=== PACKAGE ==="
-cd "$ROOT/runs"
+cd "$DATA_ROOT/runs"
 zip -qr "$ZIP" gpkg-source-audit
 
 echo
