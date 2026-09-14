@@ -35,7 +35,9 @@ for gpkg in "${FILES[@]}"; do
     name="$(basename "$gpkg" .gpkg)"
     echo
     echo "=== AUDIT: $name ==="
-    python scripts/audit_singapore_gpkg.py         --gpkg "$gpkg"         --output "$OUTROOT/$name"
+    python "$SCRIPT_ROOT/scripts/audit_singapore_gpkg.py" \
+        --gpkg "$gpkg" \
+        --output "$OUTROOT/$name"
 done
 
 echo
