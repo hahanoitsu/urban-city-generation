@@ -113,7 +113,7 @@ def _skeleton_paths(mask: np.ndarray, minimum_pixels: int) -> tuple[list[list[tu
                     next_pixel = candidates[0]
                     visited.add(tuple(sorted((current, next_pixel))))
                     previous, current = current, next_pixel
-                if len(path) >= minimum_pixels:
+                if len(path) >= 2:
                     paths.append(path)
     return paths, cleaned.astype(bool)
 
