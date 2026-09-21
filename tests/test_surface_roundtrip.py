@@ -20,7 +20,8 @@ def test_surface_roundtrip_keeps_main_structure():
     assert metrics["vegetation_iou"] > 0.95
     assert metrics["building_iou"] > 0.95
     assert metrics["water_iou"] > 0.95
-    assert metrics["raster_road_components"] == 1
+    assert metrics["raw_road_components"] == 1
+    assert metrics["cleaned_road_components"] == 1
     assert metrics["vector_road_components"] == 1
 
 
