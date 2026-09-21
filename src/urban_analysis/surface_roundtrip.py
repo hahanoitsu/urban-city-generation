@@ -89,15 +89,30 @@ def _vector_masks(
 
 
 def _road_raster_stats(classes: np.ndarray) -> dict[str, float | int]:
-    _closing, _distance, _label, _disk, skeletonize = _require_image_tools()
-    skeleton = skeletonize((classes >= 3) & (classes <= 5))
-    active = {tuple(value) for value in np.argwhere(skeleton)}
-    components = _connected_components(active)
-    sizes = [len(component) for component in components]
-    total = sum(sizes)
+    closing, _distance, _label, disk, skeletonize = _require_image_tools()
+    raw = (classes >= 3) & (classes <= 5)
+    cleaned = closing(raw, structure=disk(1))
+
+    def stats(mask: np.ndarray) -> tuple[int, float]:
+        skeleton = skeletonize(mask)
+        active = {tuple(value) for value in np.argwhere(skeleton)}
+        components = _connected_components(active)
+        sizes = [len(component) for component in components]
+        total = sum(sizes)
+        largest = max(sizes, default=0) / total if total else 0.0
+        return len(components), largest
+
+    raw_components, raw_largest = stats(raw)
+    cleaned_components, cleaned_largest = stats(cleaned)
+    changed = int(np.logical_xor(raw, cleaned).sum())
+
     return {
-        "raster_road_components": len(components),
-        "raster_road_largest_fraction": max(sizes, default=0) / total if total else 0.0,
+        "raw_road_components": raw_components,
+        "raw_road_largest_fraction": raw_largest,
+        "cleaned_road_components": cleaned_components,
+        "cleaned_road_largest_fraction": cleaned_largest,
+        "road_cleanup_changed_pixels": changed,
+        "road_cleanup_changed_fraction": changed / max(int(raw.sum()), 1),
     }
 
 
@@ -194,11 +209,11 @@ def audit_classes(
     metrics.update(_building_access(state))
     metrics["road_component_inflation"] = (
         metrics["vector_road_components"]
-        / max(metrics["raster_road_components"], 1)
+        / max(metrics["cleaned_road_components"], 1)
     )
     metrics["road_largest_fraction_retention"] = (
         metrics["vector_road_largest_fraction"]
-        / max(metrics["raster_road_largest_fraction"], 1e-9)
+        / max(metrics["cleaned_road_largest_fraction"], 1e-9)
     )
 
     return state, metrics, vector
