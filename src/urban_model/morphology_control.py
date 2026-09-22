@@ -59,6 +59,27 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def cuda_setup(device: torch.device) -> None:
+    if device.type != "cuda":
+        return
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+
+def make_optimizer(model: nn.Module, config: LayeredDiffusionConfig, device: torch.device):
+    args = {
+        "lr": config.learning_rate,
+        "weight_decay": config.weight_decay,
+    }
+    if device.type == "cuda":
+        try:
+            return AdamW(model.parameters(), fused=True, **args)
+        except (TypeError, RuntimeError):
+            pass
+    return AdamW(model.parameters(), **args)
+
+
 def read_controls(path: Path) -> pd.DataFrame:
     frame = pd.read_csv(path)
     missing = [name for name in ("tile_id", *CONTROLS) if name not in frame.columns]
@@ -215,7 +236,10 @@ def validate(
         for timesteps, bucket in ((normal_t, "normal"), (high_t, "high")):
             noisy = scheduler.add_noise(x0, noise, timesteps)
             with autocast_context(config, device):
-                prediction = model(torch.cat([noisy, extra], dim=1), timesteps).sample
+                model_input = torch.cat([noisy, extra], dim=1)
+                if device.type == "cuda":
+                    model_input = model_input.contiguous(memory_format=torch.channels_last)
+                prediction = model(model_input, timesteps).sample
                 loss = _direct_x0_loss(
                     prediction,
                     x0,
@@ -481,6 +505,7 @@ def train(
     )
     seed_everything(config.seed)
     device = torch.device(device_name)
+    cuda_setup(device)
 
     train_frame = read_controls(train_descriptors)
     validation_frame = read_controls(validation_descriptors)
@@ -502,13 +527,11 @@ def train(
     class_weights = torch.tensor(weight_values, dtype=torch.float32, device=device)
 
     model = build_model(config).to(device)
+    if device.type == "cuda":
+        model = model.to(memory_format=torch.channels_last)
     if hasattr(model, "enable_gradient_checkpointing"):
         model.enable_gradient_checkpointing()
-    optimizer = AdamW(
-        model.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-    )
+    optimizer = make_optimizer(model, config, device)
     ema = _EMA(model, config.ema_decay)
     noise_scheduler, _ = _schedulers(config)
     xy = _coordinate_grid(config.resolution[0], device)
@@ -545,6 +568,9 @@ def train(
 
         for batch in train_loader:
             x0, mask = _surface(batch, device)
+            if device.type == "cuda":
+                x0 = x0.contiguous(memory_format=torch.channels_last)
+                mask = mask.contiguous(memory_format=torch.channels_last)
             controls = batch["controls"].to(device)
             count = x0.shape[0]
             timesteps = _sample_timesteps(count, config.diffusion_steps, device)
@@ -560,7 +586,10 @@ def train(
 
             optimizer.zero_grad(set_to_none=True)
             with autocast_context(config, device):
-                prediction = model(torch.cat([noisy, extra], dim=1), timesteps).sample
+                model_input = torch.cat([noisy, extra], dim=1)
+                if device.type == "cuda":
+                    model_input = model_input.contiguous(memory_format=torch.channels_last)
+                prediction = model(model_input, timesteps).sample
                 loss = _direct_x0_loss(
                     prediction,
                     x0,
