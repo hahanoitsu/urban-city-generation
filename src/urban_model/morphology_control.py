@@ -203,6 +203,9 @@ def validate(
 
     for batch in data:
         x0, mask = _surface(batch, device)
+        if device.type == "cuda":
+            x0 = x0.contiguous(memory_format=torch.channels_last)
+            mask = mask.contiguous(memory_format=torch.channels_last)
         controls = batch["controls"].to(device)
         count = x0.shape[0]
         noise = torch.randn(
@@ -285,6 +288,8 @@ def sample(
             (count, SURFACE_CLASS_COUNT, *config.resolution),
             generator=generator,
         ).to(device)
+    if device.type == "cuda":
+        values = values.contiguous(memory_format=torch.channels_last)
 
     xy = _coordinate_grid(config.resolution[0], device).expand(count, -1, -1, -1)
     cond = condition_planes(control_tensor, *config.resolution)
@@ -293,7 +298,10 @@ def sample(
     model.eval()
     for timestep in scheduler.timesteps:
         with autocast_context(config, device):
-            prediction = model(torch.cat([values, extra], dim=1), timestep).sample
+            model_input = torch.cat([values, extra], dim=1)
+            if device.type == "cuda":
+                model_input = model_input.contiguous(memory_format=torch.channels_last)
+            prediction = model(model_input, timestep).sample
         values = scheduler.step(
             prediction.float(),
             timestep,
@@ -362,22 +370,22 @@ def save_sweep(
         conditions = normalise(raw_conditions, stats)
 
         for seed in seeds:
-            generated = sample(
-                model,
-                config,
-                conditions,
-                seed=seed,
-                steps=steps,
-                device=device,
-                same_noise=True,
-            )
-            classes = _classes(generated)
-            for level, raw, class_map in zip(
+            for level, raw, condition in zip(
                 level_names,
                 raw_conditions,
-                classes,
+                conditions,
                 strict=True,
             ):
+                generated = sample(
+                    model,
+                    config,
+                    condition[None],
+                    seed=seed,
+                    steps=steps,
+                    device=device,
+                    same_noise=True,
+                )
+                class_map = _classes(generated)[0]
                 measured = measure(class_map)
                 rows.append(
                     {
@@ -393,6 +401,7 @@ def save_sweep(
                 labels.append(
                     f"{seed} {level}: {measured[control_name]:.3f}"
                 )
+                del generated
 
         save_grid(
             np.stack(images),
@@ -607,6 +616,8 @@ def train(
             updates += 1
 
         eval_model = build_model(config).to(device)
+        if device.type == "cuda":
+            eval_model = eval_model.to(memory_format=torch.channels_last)
         ema.load_into(eval_model)
         val_loss, high_loss = validate(
             eval_model,
@@ -640,9 +651,11 @@ def train(
 
         if epoch == 1 or epoch % preview_every == 0:
             preview_model = build_model(config).to(device)
+            if device.type == "cuda":
+                preview_model = preview_model.to(memory_format=torch.channels_last)
             ema.load_into(preview_model)
             raw = train_frame[list(CONTROLS)].median().to_numpy(dtype=np.float32)
-            controls = normalise(np.repeat(raw[None], 4, axis=0), stats)
+            controls = normalise(raw[None], stats)
             preview = sample(
                 preview_model,
                 config,
@@ -685,6 +698,8 @@ def train(
     )
 
     final_model = build_model(config).to(device)
+    if device.type == "cuda":
+        final_model = final_model.to(memory_format=torch.channels_last)
     ema.load_into(final_model)
     sweep_rows = save_sweep(
         final_model,
