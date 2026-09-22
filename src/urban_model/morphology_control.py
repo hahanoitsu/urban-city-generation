@@ -548,7 +548,11 @@ def train(
     write_json(
         output / "experiment.json",
         {
-            "name": "morphology-control-v1",
+            "name": (
+                "morphology-control-1024-v1"
+                if config.resolution == (1024, 1024)
+                else "morphology-control-v1"
+            ),
             "controls": list(CONTROLS),
             "question": "Does the city generator respond to requested urban morphology?",
             "prediction_type": "sample_x0",
