@@ -45,7 +45,7 @@ def endpoint_mask(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def component_stats(mask: np.ndarray) -> tuple[int, float]:
-    labels, count = label(mask)
+    labels, count = label(mask, structure=np.ones((3, 3), dtype=np.uint8))
     if count == 0:
         return 0, 0.0
     sizes = np.bincount(labels.ravel())[1:]
@@ -68,6 +68,14 @@ def transport_metrics(classes: np.ndarray) -> dict[str, float | int]:
     rail_endpoint_count = int(rail_endpoints.sum())
     road_endpoint_count = int(road_endpoints.sum())
 
+    interior = np.ones(classes.shape, dtype=bool)
+    interior[:4] = False
+    interior[-4:] = False
+    interior[:, :4] = False
+    interior[:, -4:] = False
+    interior_road_endpoints = road_endpoints & interior
+    interior_rail_endpoints = rail_endpoints & interior
+
     return {
         "road_fraction": float(road.mean()),
         "rail_fraction": float(rail.mean()),
@@ -82,6 +90,16 @@ def transport_metrics(classes: np.ndarray) -> dict[str, float | int]:
         ),
         "rail_endpoint_near_road_fraction": float(
             (rail_endpoints & rail_near_road).sum() / max(rail_endpoint_count, 1)
+        ),
+        "road_interior_endpoints": int(interior_road_endpoints.sum()),
+        "rail_interior_endpoints": int(interior_rail_endpoints.sum()),
+        "road_interior_endpoint_near_rail_fraction": float(
+            (interior_road_endpoints & road_near_rail).sum()
+            / max(interior_road_endpoints.sum(), 1)
+        ),
+        "rail_interior_endpoint_near_road_fraction": float(
+            (interior_rail_endpoints & rail_near_road).sum()
+            / max(interior_rail_endpoints.sum(), 1)
         ),
     }
 
