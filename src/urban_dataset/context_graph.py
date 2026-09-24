@@ -514,6 +514,18 @@ def _target_samples(
                 center.y + config.region_size_m / 2.0,
             )
             target_id = f"{city_id}_t{row:+06d}_{column:+06d}"
+            context_min_col = math.floor(float(context.bounds[0]) / config.region_size_m)
+            context_min_row = math.floor(float(context.bounds[1]) / config.region_size_m)
+            context_max_col = math.floor((float(context.bounds[2]) - 1e-9) / config.region_size_m)
+            context_max_row = math.floor((float(context.bounds[3]) - 1e-9) / config.region_size_m)
+            context_region_ids = [
+                region_lookup[(region_y, region_x)]
+                for region_y in range(context_min_row, context_max_row + 1)
+                for region_x in range(context_min_col, context_max_col + 1)
+                if (region_y, region_x) in region_lookup
+            ]
+            visible_context = context.difference(target)
+
             payload = {
                 "format": "urban-context-target",
                 "version": "0.1.0",
@@ -523,12 +535,21 @@ def _target_samples(
                 "context_bounds_projected_m": list(map(float, context.bounds)),
                 "parent_region_id": parent_id,
                 "input": {
+                    "context_region_ids": context_region_ids,
+                    "masked_region_ids": [parent_id],
+                    "visible_region_ids": [
+                        region_id for region_id in context_region_ids if region_id != parent_id
+                    ],
                     "boundary_ports": _target_ports(layers, target, config.port_probe_m),
-                    "context_features": _region_stats(layers, context),
+                    "visible_context_features": _region_stats(layers, visible_context),
                     "terrain": {
                         "available": False,
                         "note": "No DEM supplied to context-graph-v1 yet.",
                     },
+                    "note": (
+                        "Target geometry is hidden from local context features. The parent region "
+                        "is marked as masked; boundary ports are the explicit continuation signal."
+                    ),
                 },
                 "target": {
                     "roads": _local_line_payload(layers.roads, target, mode="road"),
@@ -556,6 +577,7 @@ def _target_samples(
                     "parent_region_id": parent_id,
                     "target_bounds_projected_m": list(map(float, target.bounds)),
                     "context_bounds_projected_m": list(map(float, context.bounds)),
+                    "context_regions": len(context_region_ids),
                     "transport_length_m": transport_length,
                     "boundary_ports": len(payload["input"]["boundary_ports"]),
                     "roads": len(payload["target"]["roads"]),
