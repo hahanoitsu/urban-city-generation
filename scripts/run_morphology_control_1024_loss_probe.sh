@@ -42,6 +42,7 @@ nvidia-smi -i "$CUDA_VISIBLE_DEVICES"
 cd "$SCRIPT_ROOT"
 
 python -m py_compile scripts/run_1024_loss_probe.py
+pytest -q tests/test_1024_loss_probe.py
 
 rm -rf "$OUTPUT"
 rm -f "$ZIP"
