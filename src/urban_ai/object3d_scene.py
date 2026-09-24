@@ -15,6 +15,8 @@ from urban_dataset.obj_export import _ObjMesh, _write_materials
 
 from .object3d import (
     AREA,
+    BUILDING_LENGTH_SCALE_M,
+    BUILDING_WIDTH_SCALE_M,
     CLASS_OFFSET,
     CX,
     CY,
@@ -75,8 +77,12 @@ def decode_tokens(
             continue
         direction /= norm
 
-        length = max(0.0, float(token[LENGTH])) * LENGTH_SCALE_M
-        width = max(0.0, float(token[WIDTH])) * WIDTH_SCALE_M
+        if kind == "building":
+            length = max(0.0, float(token[LENGTH])) * BUILDING_LENGTH_SCALE_M
+            width = max(0.0, float(token[WIDTH])) * BUILDING_WIDTH_SCALE_M
+        else:
+            length = max(0.0, float(token[LENGTH])) * LENGTH_SCALE_M
+            width = max(0.0, float(token[WIDTH])) * WIDTH_SCALE_M
         height = max(0.0, float(token[HEIGHT])) * HEIGHT_SCALE_M
 
         if kind in {"road", "rail"}:
