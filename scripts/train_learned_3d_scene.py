@@ -206,6 +206,9 @@ def main() -> int:
     model = Object3DDenoiser(config).to(device)
     optimizer = AdamW(model.parameters(), lr=2e-4, weight_decay=0.01)
 
+    train_truncated = [max(0, state[2] - state[1]) for state in train_set.states]
+    validation_truncated = [max(0, state[2] - state[1]) for state in validation_set.states]
+
     metadata = {
         "experiment": "learned-3d-scene-v1",
         "representation": "unordered 3d object tokens",
@@ -216,6 +219,10 @@ def main() -> int:
         "style_std": train_set.style_std.tolist(),
         "train_samples": len(train_set),
         "validation_samples": len(validation_set),
+        "train_tiles_truncated": sum(value > 0 for value in train_truncated),
+        "validation_tiles_truncated": sum(value > 0 for value in validation_truncated),
+        "train_max_objects_dropped": max(train_truncated, default=0),
+        "validation_max_objects_dropped": max(validation_truncated, default=0),
         "parameters": sum(parameter.numel() for parameter in model.parameters()),
         "axis_convention": "x-east, y-north, z-up",
         "notes": [
