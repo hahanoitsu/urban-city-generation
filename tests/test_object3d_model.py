@@ -52,10 +52,11 @@ def sample_state():
 
 
 def test_state_tokens_keep_3d_objects():
-    values, count = state_tokens(sample_state(), 16)
+    values, count, total_count = state_tokens(sample_state(), 16)
 
     assert values.shape == (16, TOKEN_DIM)
     assert count == 3
+    assert total_count == 3
 
     decoded = decode_tokens(values)
     assert sum(item["type"] == "road" for item in decoded) == 1
