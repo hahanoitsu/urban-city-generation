@@ -41,6 +41,8 @@ Z_SCALE_M = 96.0
 LENGTH_SCALE_M = 1024.0
 WIDTH_SCALE_M = 32.0
 HEIGHT_SCALE_M = 192.0
+BUILDING_LENGTH_SCALE_M = 256.0
+BUILDING_WIDTH_SCALE_M = 128.0
 AREA_SCALE_M2 = 100_000.0
 
 
@@ -172,8 +174,8 @@ def _building_token(building: dict[str, Any], bounds: list[float]) -> np.ndarray
     token[DX] = math.cos(angle)
     token[DY] = math.sin(angle)
     token[DZ] = 0.0
-    token[LENGTH] = float(np.clip(length / LENGTH_SCALE_M, 0.0, 1.0))
-    token[WIDTH] = float(np.clip(width / WIDTH_SCALE_M, 0.0, 1.0))
+    token[LENGTH] = float(np.clip(length / BUILDING_LENGTH_SCALE_M, 0.0, 1.0))
+    token[WIDTH] = float(np.clip(width / BUILDING_WIDTH_SCALE_M, 0.0, 1.0))
     token[HEIGHT] = float(np.clip(height / HEIGHT_SCALE_M, 0.0, 1.0))
     token[AREA] = float(np.clip(float(geometry.area) / AREA_SCALE_M2, 0.0, 1.0))
     return token
