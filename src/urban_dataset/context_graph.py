@@ -66,7 +66,7 @@ def _iter_points(geometry: BaseGeometry) -> Iterable[Point]:
 
 def _frame_bounds(layers: CityLayers) -> tuple[float, float, float, float]:
     bounds = []
-    for frame in layers.values():
+    for _name, frame in layers.items():
         if frame.empty:
             continue
         values = frame.total_bounds
@@ -580,7 +580,7 @@ def build_context_graph(
     layers, metadata = load_city_gpkg(city_path)
     city_id = str(metadata.get("city_id") or city_path.stem)
     city_bounds = _frame_bounds(layers)
-    crs = str(next(frame.crs for frame in layers.values() if not frame.empty))
+    crs = str(next(frame.crs for _name, frame in layers.items() if not frame.empty))
 
     nodes, edges, region_lookup = _region_graph(
         layers,
