@@ -181,7 +181,10 @@ def _building_token(building: dict[str, Any], bounds: list[float]) -> np.ndarray
     return token
 
 
-def state_tokens(payload: dict[str, Any], maximum_tokens: int) -> tuple[np.ndarray, int]:
+def state_tokens(
+    payload: dict[str, Any],
+    maximum_tokens: int,
+) -> tuple[np.ndarray, int, int]:
     bounds = [
         float(value)
         for value in payload.get("coordinate_system", {}).get(
@@ -204,6 +207,7 @@ def state_tokens(payload: dict[str, Any], maximum_tokens: int) -> tuple[np.ndarr
         buildings.append((float(token[AREA]), token))
     buildings.sort(key=lambda item: item[0], reverse=True)
     tokens.extend(token for _area, token in buildings)
+    total_count = len(tokens)
 
     if len(tokens) > maximum_tokens:
         tokens = tokens[:maximum_tokens]
@@ -212,7 +216,7 @@ def state_tokens(payload: dict[str, Any], maximum_tokens: int) -> tuple[np.ndarr
     output[:, TYPE_OFFSET] = 1.0
     if tokens:
         output[: len(tokens)] = np.stack(tokens)
-    return output, len(tokens)
+    return output, len(tokens), total_count
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -248,11 +252,18 @@ class CityObject3DDataset(Dataset):
             if not state_path.exists():
                 continue
             payload = json.loads(state_path.read_text(encoding="utf-8"))
-            tokens, count = state_tokens(payload, config.maximum_tokens)
+            tokens, count, total_count = state_tokens(payload, config.maximum_tokens)
             if count == 0:
                 continue
             style = np.asarray(style_vector(city_style(payload)), dtype=np.float32)
-            states.append((tokens, count, str(row.get("tile_id", state_path.parent.name))))
+            states.append(
+                (
+                    tokens,
+                    count,
+                    total_count,
+                    str(row.get("tile_id", state_path.parent.name)),
+                )
+            )
             styles.append(style)
             accepted.append(row)
 
@@ -276,7 +287,7 @@ class CityObject3DDataset(Dataset):
         return len(self.states)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        tokens, count, tile_id = self.states[index]
+        tokens, count, total_count, tile_id = self.states[index]
         values = tokens.copy()
         style = self.styles[index].copy()
         if self.augment:
@@ -289,6 +300,8 @@ class CityObject3DDataset(Dataset):
             "tokens": torch.from_numpy(values),
             "style": torch.from_numpy(style),
             "count": count,
+            "total_count": total_count,
+            "truncated": max(0, total_count - count),
             "tile_id": tile_id,
         }
 
