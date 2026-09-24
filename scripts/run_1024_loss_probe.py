@@ -113,7 +113,7 @@ def transport_margin_loss(
 def restore_ema(ema: _EMA, state: dict, device: torch.device) -> None:
     ema.updates = int(state.get("updates", 0))
     ema.shadow = {
-        name: value.to(device=device)
+        name: value.detach().clone().to(device=device)
         for name, value in state["shadow"].items()
     }
 
@@ -478,7 +478,7 @@ def main() -> int:
 
     checkpoint = torch.load(
         args.checkpoint.expanduser().resolve(),
-        map_location=device,
+        map_location="cpu",
         weights_only=False,
     )
 
