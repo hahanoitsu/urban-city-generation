@@ -13,7 +13,17 @@ export PYTHONPATH="$SCRIPT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
 cd "$SCRIPT_ROOT"
 
-python -m py_compile src/urban_model/structured_city.py src/urban_model/structured_city_data.py scripts/audit_structured_city.py
+python -m py_compile     src/urban_model/structured_city.py     src/urban_model/structured_city_data.py     scripts/audit_structured_city.py
+
 pytest -q tests/test_structured_city.py
 
-python scripts/audit_structured_city.py     --data "$DATA"     --output "$OUTPUT"     ${LIMIT:+--limit "$LIMIT"}
+ARGS=(
+    --data "$DATA"
+    --output "$OUTPUT"
+)
+
+if [[ -n "${LIMIT:-}" ]]; then
+    ARGS+=(--limit "$LIMIT")
+fi
+
+python scripts/audit_structured_city.py "${ARGS[@]}"
