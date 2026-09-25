@@ -6,6 +6,7 @@ MAIN_ROOT="$(cd "$SCRIPT_ROOT/.." && pwd)/urban-city-generation"
 DATA="${CONTEXT_DATA:-$MAIN_ROOT/data/context-graph-v1/singapore}"
 CHECKPOINT="${CONTEXT_CHECKPOINT:-$MAIN_ROOT/runs/context-graph-model-v1/best.pt}"
 OUTPUT="${CONTEXT_ROLLOUT:-$MAIN_ROOT/runs/context-graph-model-v1/rollout}"
+ZIP="${CONTEXT_ROLLOUT_ZIP:-$MAIN_ROOT/context-graph-model-v1-rollout.zip}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate urban-city
