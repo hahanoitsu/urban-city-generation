@@ -121,6 +121,11 @@ class ContextGraphProgramDataset(torch.utils.data.Dataset):
         graph = json.loads((self.root / "context-graph.json").read_text(encoding="utf-8"))
         self.feature_names = sorted(graph["nodes"][0]["features"])
         self.node_ids = [node["id"] for node in graph["nodes"]]
+        self.city_bounds = np.asarray(graph["city_bounds_projected_m"], dtype=np.float32)
+        self.node_centers = np.asarray(
+            [node["center_city_normalized"] for node in graph["nodes"]],
+            dtype=np.float32,
+        )
         self.node_index = {node_id: index for index, node_id in enumerate(self.node_ids)}
         values = []
         for node in graph["nodes"]:
@@ -208,7 +213,7 @@ class ContextGraphProgramDataset(torch.utils.data.Dataset):
             raise RuntimeError("No context graph samples fit the overfit model limits")
         self.samples = candidates
         self.port_dimensions = len(_port_vector(self.samples[0][1]["input"]["boundary_ports"][0]))
-        self.context_dimensions = self.base_context.shape[1] + 1
+        self.context_dimensions = self.base_context.shape[1] + 5
         self.relation_names = RELATIONS
 
     def __len__(self) -> int:
@@ -216,16 +221,28 @@ class ContextGraphProgramDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         row, payload, encoded = self.samples[index]
+        bounds = np.asarray(payload["target_bounds_projected_m"], dtype=np.float32)
+        center = np.asarray(
+            [(bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0],
+            dtype=np.float32,
+        )
+        city_min = self.city_bounds[:2]
+        city_size = np.maximum(self.city_bounds[2:] - city_min, 1.0)
+        target_center = (center - city_min) / city_size * 2.0 - 1.0
+        target_values = np.repeat(target_center.reshape(1, 2), len(self.node_ids), axis=0)
+        relative = target_values - self.node_centers
         context = np.concatenate(
             [
                 self.base_context.copy(),
                 np.zeros((self.base_context.shape[0], 1), dtype=np.float32),
+                target_values,
+                relative,
             ],
             axis=1,
         )
         parent = self.node_index[payload["parent_region_id"]]
         context[parent, : len(self.feature_names)] = 0.0
-        context[parent, -1] = 1.0
+        context[parent, self.base_context.shape[1]] = 1.0
         ports = np.zeros((self.maximum_ports, self.port_dimensions), dtype=np.float32)
         port_padding = np.ones(self.maximum_ports, dtype=bool)
         values = [_port_vector(port) for port in payload["input"]["boundary_ports"][: self.maximum_ports]]
