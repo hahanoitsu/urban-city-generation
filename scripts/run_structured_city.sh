@@ -18,4 +18,20 @@ python -m py_compile     src/urban_model/structured_city.py     src/urban_model/
 
 pytest -q tests/test_structured_city.py
 
-python scripts/train_structured_city.py     --data "$DATA"     --output "$OUTPUT"     --epochs "${EPOCHS:-30}"     --batch-size "${BATCH_SIZE:-1}"     --nodes "${NODE_SLOTS:-384}"     --edges "${EDGE_SLOTS:-640}"     --buildings "${BUILDING_SLOTS:-384}"     --areas "${AREA_SLOTS:-96}"     --ports "${PORT_SLOTS:-96}"     ${MAXIMUM_SAMPLES:+--maximum-samples "$MAXIMUM_SAMPLES"}
+ARGS=(
+    --data "$DATA"
+    --output "$OUTPUT"
+    --epochs "${EPOCHS:-30}"
+    --batch-size "${BATCH_SIZE:-1}"
+    --nodes "${NODE_SLOTS:-384}"
+    --edges "${EDGE_SLOTS:-640}"
+    --buildings "${BUILDING_SLOTS:-384}"
+    --areas "${AREA_SLOTS:-96}"
+    --ports "${PORT_SLOTS:-96}"
+)
+
+if [[ -n "${MAXIMUM_SAMPLES:-}" ]]; then
+    ARGS+=(--maximum-samples "$MAXIMUM_SAMPLES")
+fi
+
+python scripts/train_structured_city.py "${ARGS[@]}"
