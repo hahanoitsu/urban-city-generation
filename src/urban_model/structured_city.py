@@ -12,6 +12,7 @@ from torch import nn
 class StructuredCityConfig:
     context_dimensions: int
     relation_count: int
+    port_dimensions: int
     node_slots: int = 384
     edge_slots: int = 640
     building_slots: int = 384
@@ -140,6 +141,11 @@ class StructuredCityDenoiser(nn.Module):
         d = config.model_dimensions
         self.time = TimeEmbedding(d)
         self.context = RelationContextEncoder(config)
+        self.port = nn.Sequential(
+            nn.Linear(config.port_dimensions, d),
+            nn.GELU(),
+            nn.Linear(d, d),
+        )
 
         self.nodes = SlotDecoder(
             slots=config.node_slots,
@@ -196,15 +202,20 @@ class StructuredCityDenoiser(nn.Module):
         scene: dict[str, torch.Tensor],
         context_values: torch.Tensor,
         relations: torch.Tensor,
+        ports: torch.Tensor,
+        port_padding: torch.Tensor,
         diffusion_time: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         time = self.time(diffusion_time)
         context = self.context(context_values, relations)
+        port_memory = self.port(ports)
+        port_memory = port_memory.masked_fill(port_padding[:, :, None], 0.0)
+        context_memory = torch.cat([context, port_memory], dim=1)
 
         node_hidden = self.nodes(
             scene["node_position"],
             (scene["node_presence"],),
-            context,
+            context_memory,
             time,
         )
         node_position = self.node_position(node_hidden)
@@ -216,7 +227,7 @@ class StructuredCityDenoiser(nn.Module):
             ],
             dim=-1,
         )
-        edge_memory = torch.cat([context, node_hidden], dim=1)
+        edge_memory = torch.cat([context_memory, node_hidden], dim=1)
         edge_hidden = self.edges(
             edge_continuous,
             (
@@ -249,7 +260,7 @@ class StructuredCityDenoiser(nn.Module):
             ],
             dim=-1,
         )
-        building_memory = torch.cat([context, node_hidden, edge_hidden], dim=1)
+        building_memory = torch.cat([context_memory, node_hidden, edge_hidden], dim=1)
         building_hidden = self.buildings(
             building_continuous,
             (scene["building_presence"],),
@@ -257,7 +268,7 @@ class StructuredCityDenoiser(nn.Module):
             time,
         )
 
-        area_memory = torch.cat([context, node_hidden, edge_hidden], dim=1)
+        area_memory = torch.cat([context_memory, node_hidden, edge_hidden], dim=1)
         area_hidden = self.areas(
             scene["area_shape"].flatten(2),
             (scene["area_presence"], scene["area_kind"]),
