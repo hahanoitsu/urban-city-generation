@@ -24,7 +24,7 @@ CATEGORY_MASKS = {
     "edge_vertical": 4,
     "building_presence": 2,
     "area_presence": 2,
-    "area_kind": 3,
+    "area_kind": 6,
 }
 
 
