@@ -114,6 +114,14 @@ def _number(value: Any, fallback: float) -> float:
     return result if math.isfinite(result) else fallback
 
 
+def _optional_number(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
 def _feature_id(row: Any, fallback: str) -> str:
     for name in ("id", "osm_id", "osmid"):
         value = row.get(name)
@@ -409,7 +417,9 @@ def _local_line_payload(
                 "length_m": float(line.length),
             }
             if mode == "road":
-                record["width_m"] = _number(row.get("estimated_width_m"), 5.0)
+                width = _optional_number(row.get("estimated_width_m"))
+                record["width_m"] = width
+                record["width_valid"] = width is not None and width > 0
             records.append(record)
     return records
 
@@ -425,15 +435,47 @@ def _local_buildings(frame: gpd.GeoDataFrame, target: Polygon) -> list[dict[str,
         from shapely import affinity
 
         local = affinity.translate(geometry, xoff=-minx, yoff=-miny)
+        height = _optional_number(row.get("estimated_height_m"))
+        height_valid = height is not None and height > 0
         records.append(
             {
                 "id": _feature_id(row, f"building:{index}"),
                 "footprint_local_m": mapping(local),
-                "height_m": _number(row.get("estimated_height_m"), 0.0),
+                "height_m": height if height_valid else None,
+                "height_valid": height_valid,
                 "height_confidence": int(_number(row.get("height_confidence"), 0.0)),
                 "height_source": _text(row.get("height_source"), "unknown"),
+                "building_type": _text(row.get("building"), "unknown"),
             }
         )
+    return records
+
+
+def _local_polygons(
+    frame: gpd.GeoDataFrame,
+    target: Polygon,
+    *,
+    kind: str,
+) -> list[dict[str, Any]]:
+    clipped = _clip_frame(frame, target)
+    minx, miny, _maxx, _maxy = target.bounds
+    records = []
+    from shapely import affinity
+
+    for index, row in clipped.iterrows():
+        geometry = row.geometry
+        if geometry is None or geometry.is_empty or geometry.area <= 1e-6:
+            continue
+        local = affinity.translate(geometry, xoff=-minx, yoff=-miny)
+        record = {
+            "id": _feature_id(row, f"{kind}:{index}"),
+            "kind": kind,
+            "geometry_local_m": mapping(local),
+        }
+        landuse_class = _text(row.get("landuse_class"), "")
+        if landuse_class:
+            record["class"] = landuse_class
+        records.append(record)
     return records
 
 
@@ -568,6 +610,9 @@ def _target_samples(
                     "roads": _local_line_payload(layers.roads, target, mode="road"),
                     "rail": _local_line_payload(layers.rail, target, mode="rail"),
                     "buildings": _local_buildings(layers.buildings, target),
+                    "green": _local_polygons(layers.green, target, kind="green"),
+                    "water": _local_polygons(layers.water, target, kind="water"),
+                    "landuse": _local_polygons(layers.landuse, target, kind="landuse"),
                     "z_supervision": {
                         "metric_transport_z": False,
                         "policy": (
@@ -596,6 +641,9 @@ def _target_samples(
                     "roads": len(payload["target"]["roads"]),
                     "rail": len(payload["target"]["rail"]),
                     "buildings": len(payload["target"]["buildings"]),
+                    "green": len(payload["target"]["green"]),
+                    "water": len(payload["target"]["water"]),
+                    "landuse": len(payload["target"]["landuse"]),
                 }
             )
     return rows
