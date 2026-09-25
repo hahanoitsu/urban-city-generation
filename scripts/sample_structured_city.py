@@ -155,7 +155,10 @@ def render(scene, config, size=768):
     area_colours = {
         0: (170, 205, 160),
         1: (150, 195, 220),
-        2: (225, 220, 190),
+        2: (238, 225, 197),
+        3: (225, 207, 190),
+        4: (211, 207, 197),
+        5: (219, 213, 190),
     }
     for index in range(config.area_slots):
         if int(scene["area_presence"][index]) != 1:
