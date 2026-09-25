@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 import torch
+from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
@@ -48,7 +49,19 @@ def accuracy(logits, targets):
     return result
 
 
-def run_epoch(model, loader, dataset, device, optimizer=None):
+def corrupt_commands(commands, probability):
+    if probability <= 0:
+        return commands
+    result = {name: value.clone() for name, value in commands.items()}
+    mask = torch.rand_like(result["op"], dtype=torch.float32).lt(probability)
+    mask &= result["op"].ne(0)
+    mask[:, 0] = False
+    for name in result:
+        result[name][mask] = 0
+    return result
+
+
+def run_epoch(model, loader, dataset, device, optimizer=None, command_dropout=0.0):
     training = optimizer is not None
     model.train(training)
     losses = []
@@ -57,6 +70,7 @@ def run_epoch(model, loader, dataset, device, optimizer=None):
     with context:
         for batch in loader:
             commands, targets = shift({field: batch[field].to(device) for field in FIELDS})
+            model_commands = corrupt_commands(commands, command_dropout if training else 0.0)
             values = batch["context"].to(device)
             ports = batch["ports"].to(device)
             padding = batch["port_padding"].to(device)
@@ -64,8 +78,11 @@ def run_epoch(model, loader, dataset, device, optimizer=None):
             if training:
                 optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits = model(commands, values, relations, ports, padding)
+                logits = model(model_commands, values, relations, ports, padding)
                 loss, _parts = graph_program_loss(logits, targets)
+                root_x = F.cross_entropy(logits["x"][:, 0], targets["x"][:, 0] - 1)
+                root_y = F.cross_entropy(logits["y"][:, 0], targets["y"][:, 0] - 1)
+                loss = loss + 0.5 * (root_x + root_y)
             if training:
                 loss.backward()
                 clip_grad_norm_(model.parameters(), 1.0)
@@ -87,6 +104,7 @@ def main():
     parser.add_argument("--samples", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--command-dropout", type=float, default=0.35)
     args = parser.parse_args()
 
     torch.manual_seed(5132)
@@ -124,6 +142,7 @@ def main():
         "context_mean": dataset.context_mean.tolist(),
         "context_std": dataset.context_std.tolist(),
         "parameters": sum(parameter.numel() for parameter in model.parameters()),
+        "command_dropout": args.command_dropout,
         "config": config.to_dict(),
     }
     (args.output / "experiment.json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -132,7 +151,14 @@ def main():
     best = math.inf
     records = []
     for epoch in range(1, args.epochs + 1):
-        train = run_epoch(model, loader, dataset, device, optimizer)
+        train = run_epoch(
+            model,
+            loader,
+            dataset,
+            device,
+            optimizer,
+            command_dropout=args.command_dropout,
+        )
         evaluation = run_epoch(model, loader, dataset, device)
         record = {
             "epoch": epoch,
