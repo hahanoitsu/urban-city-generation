@@ -41,6 +41,8 @@ def main():
         rows = rows[: args.limit]
 
     values = {name: [] for name in ("nodes", "edges", "buildings", "areas", "ports")}
+    overflow = {name: 0 for name in ("nodes", "edges", "buildings", "areas", "ports")}
+    fit_all = 0
     height_valid = 0
     height_total = 0
     width_valid = 0
@@ -50,8 +52,21 @@ def main():
         with gzip.open(args.data / row["sample_path"], "rt", encoding="utf-8") as handle:
             payload = json.load(handle)
         counts = scene_counts(payload, config)
+        fits = True
+        limits = {
+            "nodes": config.node_slots,
+            "edges": config.edge_slots,
+            "buildings": config.building_slots,
+            "areas": config.area_slots,
+            "ports": config.maximum_ports,
+        }
         for name in values:
             values[name].append(counts[name])
+            if counts[name] > limits[name]:
+                overflow[name] += 1
+                fits = False
+        if fits:
+            fit_all += 1
         for building in payload["target"].get("buildings", []):
             height_total += 1
             if bool(building.get("height_valid", building.get("height_m") is not None)):
@@ -68,6 +83,9 @@ def main():
         "counts": {name: stats(items) for name, items in values.items()},
         "building_height_valid_fraction": height_valid / max(height_total, 1),
         "road_width_valid_fraction": width_valid / max(width_total, 1),
+        "samples_fitting_all_current_slots": fit_all,
+        "samples_rejected_by_current_slots": len(rows) - fit_all,
+        "overflow_samples": overflow,
         "current_slots": {
             "nodes": config.node_slots,
             "edges": config.edge_slots,
