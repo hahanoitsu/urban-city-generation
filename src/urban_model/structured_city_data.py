@@ -26,7 +26,14 @@ ROAD_CLASSES = ("major", "secondary", "local")
 RAIL_CLASSES = ("rail", "subway", "light_rail", "tram")
 CLASSES = (*ROAD_CLASSES, *RAIL_CLASSES)
 VERTICAL = ("surface", "underground", "elevated", "unknown")
-AREA_KINDS = ("green", "water", "landuse")
+AREA_KINDS = (
+    "green",
+    "water",
+    "residential",
+    "commercial_mixed",
+    "industrial",
+    "civic",
+)
 RELATIONS = (
     "spatial",
     "road_major",
@@ -46,9 +53,9 @@ class SceneTensorConfig:
     edge_slots: int = 640
     building_slots: int = 384
     area_slots: int = 96
-    edge_shape_points: int = 6
-    building_points: int = 12
-    area_points: int = 16
+    edge_shape_points: int = 8
+    building_points: int = 24
+    area_points: int = 32
     maximum_ports: int = 96
     width_scale_m: float = 32.0
     height_scale_m: float = 100.0
@@ -179,15 +186,26 @@ def _vertical_index(value: str) -> int:
 
 def _polygon_records(payload: dict[str, Any]) -> list[tuple[str, Polygon]]:
     result = []
-    for kind in AREA_KINDS:
-        for record in payload["target"].get(kind, []):
-            geometry_payload = record.get("geometry_local_m")
-            if not geometry_payload:
-                continue
-            geometry = shape(geometry_payload)
-            for polygon in _iter_polygons(geometry):
-                if polygon.area > 1e-6:
-                    result.append((kind, polygon))
+    for record in payload["target"].get("landuse", []):
+        kind = str(record.get("class") or "")
+        if kind not in AREA_KINDS or kind == "water":
+            continue
+        geometry_payload = record.get("geometry_local_m")
+        if not geometry_payload:
+            continue
+        geometry = shape(geometry_payload)
+        for polygon in _iter_polygons(geometry):
+            if polygon.area > 1e-6:
+                result.append((kind, polygon))
+
+    for record in payload["target"].get("water", []):
+        geometry_payload = record.get("geometry_local_m")
+        if not geometry_payload:
+            continue
+        geometry = shape(geometry_payload)
+        for polygon in _iter_polygons(geometry):
+            if polygon.area > 1e-6:
+                result.append(("water", polygon))
     return result
 
 
