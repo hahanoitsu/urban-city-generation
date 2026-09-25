@@ -7,6 +7,7 @@ def test_structured_city_forward():
     config = StructuredCityConfig(
         context_dimensions=18,
         relation_count=4,
+        port_dimensions=21,
         node_slots=16,
         edge_slots=24,
         building_slots=20,
@@ -43,8 +44,10 @@ def test_structured_city_forward():
     }
     context = torch.randn(batch, 12, 18)
     relations = torch.rand(batch, 4, 12, 12)
+    ports = torch.randn(batch, 10, 21)
+    port_padding = torch.zeros(batch, 10, dtype=torch.bool)
     time = torch.rand(batch)
-    output = model(scene, context, relations, time)
+    output = model(scene, context, relations, ports, port_padding, time)
     assert output["node_position"].shape == (batch, 16, 3)
     assert output["edge_from"].shape == (batch, 24, 16)
     assert output["edge_shape"].shape == (batch, 24, 4, 3)
