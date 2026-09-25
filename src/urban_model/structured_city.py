@@ -17,9 +17,10 @@ class StructuredCityConfig:
     edge_slots: int = 640
     building_slots: int = 384
     area_slots: int = 96
-    edge_shape_points: int = 6
-    building_points: int = 12
-    area_points: int = 16
+    edge_shape_points: int = 8
+    building_points: int = 24
+    area_points: int = 32
+    area_classes: int = 6
     model_dimensions: int = 256
     attention_heads: int = 8
     context_layers: int = 4
@@ -189,12 +190,12 @@ class StructuredCityDenoiser(nn.Module):
         self.areas = SlotDecoder(
             slots=config.area_slots,
             continuous_dimensions=config.area_points * 2,
-            category_sizes=(2, 3),
+            category_sizes=(2, config.area_classes),
             config=config,
             layers=config.area_layers,
         )
         self.area_presence = nn.Linear(d, 2)
-        self.area_kind = nn.Linear(d, 3)
+        self.area_kind = nn.Linear(d, config.area_classes)
         self.area_shape = nn.Linear(d, config.area_points * 2)
 
     def forward(
