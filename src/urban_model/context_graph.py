@@ -14,6 +14,7 @@ class ContextGraphModelConfig:
     codec: CommandCodecConfig
     context_dimensions: int
     port_dimensions: int
+    relation_count: int
     model_dimensions: int = 256
     attention_heads: int = 8
     context_layers: int = 4
@@ -36,7 +37,7 @@ class ContextGraphEncoder(nn.Module):
         self.layers = nn.ModuleList(
             [
                 nn.Sequential(
-                    nn.Linear(d * 2, config.feedforward_dimensions),
+                    nn.Linear(d * (config.relation_count + 1), config.feedforward_dimensions),
                     nn.GELU(),
                     nn.Dropout(config.dropout),
                     nn.Linear(config.feedforward_dimensions, d),
@@ -46,11 +47,14 @@ class ContextGraphEncoder(nn.Module):
         )
         self.norms = nn.ModuleList([nn.LayerNorm(d) for _ in range(config.context_layers)])
 
-    def forward(self, values: torch.Tensor, adjacency: torch.Tensor) -> torch.Tensor:
+    def forward(self, values: torch.Tensor, relations: torch.Tensor) -> torch.Tensor:
         hidden = self.input(values)
         for layer, norm in zip(self.layers, self.norms, strict=True):
-            neighbours = torch.matmul(adjacency, hidden)
-            update = layer(torch.cat([hidden, neighbours], dim=-1))
+            neighbours = [
+                torch.matmul(relations[:, index], hidden)
+                for index in range(relations.shape[1])
+            ]
+            update = layer(torch.cat([hidden, *neighbours], dim=-1))
             hidden = norm(hidden + update)
         return hidden
 
@@ -112,13 +116,13 @@ class ContextGraphProgramModel(nn.Module):
         self,
         commands: dict[str, torch.Tensor],
         context_values: torch.Tensor,
-        adjacency: torch.Tensor,
+        relations: torch.Tensor,
         ports: torch.Tensor,
         port_padding: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         op = commands["op"]
         batch, length = op.shape
-        context = self.context(context_values, adjacency)
+        context = self.context(context_values, relations)
         port_memory = self.port(ports)
         memory = torch.cat([context, port_memory], dim=1)
         context_padding = torch.zeros(
