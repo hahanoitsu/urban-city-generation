@@ -20,6 +20,16 @@ from urban_dataset.tile import TileSpec
 ROAD_CLASSES = ("major", "secondary", "local")
 RAIL_CLASSES = ("rail", "subway", "light_rail", "tram", "monorail")
 VERTICAL = ("surface", "underground", "elevated", "unknown")
+RELATIONS = (
+    "spatial",
+    "road_major",
+    "road_secondary",
+    "road_local",
+    "rail",
+    "surface",
+    "underground",
+    "elevated",
+)
 
 
 def _one_hot(value: str, values: tuple[str, ...]) -> list[float]:
@@ -120,15 +130,44 @@ class ContextGraphProgramDataset(torch.utils.data.Dataset):
                     *[float(value) for value in node["center_city_normalized"]],
                 ]
             )
-        self.base_context = np.asarray(values, dtype=np.float32)
-        adjacency = np.eye(len(self.node_ids), dtype=np.float32)
+        base_context = np.asarray(values, dtype=np.float32)
+        mean = base_context.mean(axis=0)
+        std = base_context.std(axis=0)
+        std[std < 1e-6] = 1.0
+        self.context_mean = mean
+        self.context_std = std
+        self.base_context = (base_context - mean) / std
+
+        relation_values = np.zeros(
+            (len(RELATIONS), len(self.node_ids), len(self.node_ids)),
+            dtype=np.float32,
+        )
+        spatial = RELATIONS.index("spatial")
+        np.fill_diagonal(relation_values[spatial], 1.0)
         for edge in graph["edges"]:
             left = self.node_index[edge["from"]]
             right = self.node_index[edge["to"]]
-            adjacency[left, right] = 1.0
-            adjacency[right, left] = 1.0
-        degree = adjacency.sum(axis=1, keepdims=True)
-        self.adjacency = torch.from_numpy(adjacency / np.maximum(degree, 1.0))
+            relation_values[spatial, left, right] = 1.0
+            relation_values[spatial, right, left] = 1.0
+            for port in edge["transport_ports"]:
+                mode = str(port["mode"])
+                edge_class = str(port["class"])
+                vertical = str(port["vertical_mode"])
+                names = []
+                if mode == "road" and edge_class in {"major", "secondary", "local"}:
+                    names.append(f"road_{edge_class}")
+                if mode == "rail":
+                    names.append("rail")
+                if vertical in {"surface", "underground", "elevated"}:
+                    names.append(vertical)
+                for name in names:
+                    relation = RELATIONS.index(name)
+                    relation_values[relation, left, right] += 1.0
+                    relation_values[relation, right, left] += 1.0
+        for index in range(len(RELATIONS)):
+            degree = relation_values[index].sum(axis=1, keepdims=True)
+            relation_values[index] /= np.maximum(degree, 1.0)
+        self.relations = torch.from_numpy(relation_values)
         self.program_config = ProgramConfig(
             coordinate_bins=256,
             simplify_tolerance_m=2.0,
@@ -170,6 +209,7 @@ class ContextGraphProgramDataset(torch.utils.data.Dataset):
         self.samples = candidates
         self.port_dimensions = len(_port_vector(self.samples[0][1]["input"]["boundary_ports"][0]))
         self.context_dimensions = self.base_context.shape[1] + 1
+        self.relation_names = RELATIONS
 
     def __len__(self) -> int:
         return len(self.samples)
