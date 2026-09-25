@@ -39,8 +39,16 @@ def render_raw(payload, size=640):
     image = Image.new("RGB", (size, size), (247, 245, 238))
     draw = ImageDraw.Draw(image)
 
+    landuse_colours = {
+        "green": (180, 213, 169),
+        "residential": (238, 225, 197),
+        "commercial_mixed": (225, 207, 190),
+        "industrial": (211, 207, 197),
+        "civic": (219, 213, 190),
+    }
     for record in payload["target"].get("landuse", []):
-        draw_polygon(draw, shape(record["geometry_local_m"]), size, (234, 227, 201))
+        colour = landuse_colours.get(str(record.get("class")), (234, 227, 201))
+        draw_polygon(draw, shape(record["geometry_local_m"]), size, colour)
     for record in payload["target"].get("green", []):
         draw_polygon(draw, shape(record["geometry_local_m"]), size, (180, 213, 169))
     for record in payload["target"].get("water", []):
@@ -91,7 +99,10 @@ def render_tensor(scene, config, size=640):
     colours = {
         0: (180, 213, 169),
         1: (159, 202, 226),
-        2: (234, 227, 201),
+        2: (238, 225, 197),
+        3: (225, 207, 190),
+        4: (211, 207, 197),
+        5: (219, 213, 190),
     }
     for index in range(config.area_slots):
         if int(scene["area_presence"][index]) != 1:
