@@ -28,6 +28,12 @@ class ContextGraphModelConfig:
         value["codec"] = self.codec.to_dict()
         return value
 
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "ContextGraphModelConfig":
+        copied = dict(value)
+        copied["codec"] = CommandCodecConfig.from_dict(copied["codec"])
+        return cls(**copied)
+
 
 class ContextGraphEncoder(nn.Module):
     def __init__(self, config: ContextGraphModelConfig) -> None:
