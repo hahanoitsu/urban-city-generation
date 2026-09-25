@@ -2,7 +2,16 @@
 set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DATA_ROOT="${URBAN_ROOT:-$SCRIPT_ROOT}"
+MAIN_ROOT="$(cd "$SCRIPT_ROOT/.." && pwd)/urban-city-generation"
+
+if [[ -n "${URBAN_ROOT:-}" ]]; then
+    DATA_ROOT="$URBAN_ROOT"
+elif [[ -f "$MAIN_ROOT/data/cities/singapore-v2.gpkg" ]]; then
+    DATA_ROOT="$MAIN_ROOT"
+else
+    DATA_ROOT="$SCRIPT_ROOT"
+fi
+
 CITY="${CITY_GPKG:-$DATA_ROOT/data/cities/singapore-v2.gpkg}"
 OUTPUT="$DATA_ROOT/data/context-graph-v1/singapore"
 AUDIT="$DATA_ROOT/context-graph-v1-audit.zip"
@@ -14,13 +23,9 @@ export PYTHONPATH="$SCRIPT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
 cd "$SCRIPT_ROOT"
 
-echo "=== context graph v1 ==="
-echo "city:         $CITY"
-echo "region size:  2048 m"
-echo "target size:  512 m"
-echo "target stride: 512 m"
-echo
-echo "This is a CPU dataset build. No GPU processes are touched."
+echo "context graph v1"
+echo "city: $CITY"
+echo "2048 m context / 512 m target"
 
 if [[ ! -f "$CITY" ]]; then
     echo "Missing prepared city: $CITY"
@@ -28,22 +33,22 @@ if [[ ! -f "$CITY" ]]; then
 fi
 
 echo
-echo "=== checks ==="
+echo "running checks"
 python -m py_compile     src/urban_dataset/context_graph.py     scripts/build_context_graph_v1.py
 pytest -q tests/test_context_graph.py
 
 echo
-echo "=== build ==="
+echo "building dataset"
 rm -rf "$OUTPUT"
 
 python scripts/build_context_graph_v1.py     --city "$CITY"     --output "$OUTPUT"     --region-size-m 2048     --target-size-m 512     --target-stride-m 512     --minimum-transport-length-m 40
 
 echo
-echo "=== summary ==="
+echo "summary"
 cat "$OUTPUT/summary.json"
 
 echo
-echo "=== audit package ==="
+echo "packing audit"
 PACKAGE="/tmp/context-graph-v1-audit"
 rm -rf "$PACKAGE"
 mkdir -p "$PACKAGE/samples"
@@ -94,7 +99,7 @@ cd /tmp
 zip -qr "$AUDIT" "$(basename "$PACKAGE")"
 
 echo
-echo "=== complete ==="
+echo "done"
 ls -lh "$AUDIT"
 echo "full dataset: $OUTPUT"
 echo "upload:       $AUDIT"
