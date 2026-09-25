@@ -206,6 +206,7 @@ def main() -> int:
         args.city,
         args.output,
         config=config,
+        show_progress=True,
     )
     graph_preview = render_context_graph(args.output)
     target_preview = render_targets(args.output)
