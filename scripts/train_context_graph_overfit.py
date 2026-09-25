@@ -60,11 +60,11 @@ def run_epoch(model, loader, dataset, device, optimizer=None):
             values = batch["context"].to(device)
             ports = batch["ports"].to(device)
             padding = batch["port_padding"].to(device)
-            adjacency = dataset.adjacency.to(device).unsqueeze(0).expand(values.shape[0], -1, -1)
+            relations = dataset.relations.to(device).unsqueeze(0).expand(values.shape[0], -1, -1, -1)
             if training:
                 optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits = model(commands, values, adjacency, ports, padding)
+                logits = model(commands, values, relations, ports, padding)
                 loss, _parts = graph_program_loss(logits, targets)
             if training:
                 loss.backward()
@@ -106,6 +106,7 @@ def main():
         codec=dataset.codec,
         context_dimensions=dataset.context_dimensions,
         port_dimensions=dataset.port_dimensions,
+        relation_count=len(dataset.relation_names),
         maximum_sequence_length=767,
     )
     model = ContextGraphProgramModel(config).to(device)
@@ -119,6 +120,9 @@ def main():
         "context_nodes": len(dataset.node_ids),
         "context_dimensions": dataset.context_dimensions,
         "port_dimensions": dataset.port_dimensions,
+        "relation_names": list(dataset.relation_names),
+        "context_mean": dataset.context_mean.tolist(),
+        "context_std": dataset.context_std.tolist(),
         "parameters": sum(parameter.numel() for parameter in model.parameters()),
         "config": config.to_dict(),
     }
