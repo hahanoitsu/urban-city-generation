@@ -15,4 +15,15 @@ export PYTHONPATH="$SCRIPT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
 cd "$SCRIPT_ROOT"
 
-python scripts/evaluate_context_graph_rollout.py     --data "$DATA"     --checkpoint "$CHECKPOINT"     --output "$OUTPUT"     --samples "${SAMPLES:-8}"
+rm -rf "$OUTPUT"
+rm -f "$ZIP"
+
+python scripts/evaluate_context_graph_rollout.py \
+    --data "$DATA" \
+    --checkpoint "$CHECKPOINT" \
+    --output "$OUTPUT" \
+    --samples "${SAMPLES:-8}"
+
+cd "$(dirname "$OUTPUT")"
+zip -qr "$ZIP" "$(basename "$OUTPUT")"
+ls -lh "$ZIP"
