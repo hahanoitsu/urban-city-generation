@@ -64,7 +64,12 @@ def initial_scene(config: SceneTensorConfig, device: torch.device):
             device=device,
         ),
         "area_presence": torch.full((1, config.area_slots), 2, dtype=torch.long, device=device),
-        "area_kind": torch.full((1, config.area_slots), 3, dtype=torch.long, device=device),
+        "area_kind": torch.full(
+            (1, config.area_slots),
+            len(AREA_KINDS),
+            dtype=torch.long,
+            device=device,
+        ),
     }
 
 
