@@ -470,6 +470,8 @@ def _target_samples(
     region_lookup: dict[tuple[int, int], str],
     config: ContextGraphConfig,
     output_dir: Path,
+    *,
+    show_progress: bool = False,
 ) -> list[dict[str, Any]]:
     minx, miny, maxx, maxy = city_bounds
     size = config.target_size_m
@@ -484,8 +486,19 @@ def _target_samples(
     samples_dir.mkdir(parents=True, exist_ok=True)
     rows = []
 
+    row_count = last_row - first_row + 1
+    column_count = last_col - first_col + 1
+    total_cells = row_count * column_count
+    scanned = 0
+
     for row in range(first_row, last_row + 1):
         for column in range(first_col, last_col + 1):
+            scanned += 1
+            if show_progress and (scanned == 1 or scanned % 250 == 0 or scanned == total_cells):
+                print(
+                    f"targets: {scanned}/{total_cells} scanned, {len(rows)} kept",
+                    flush=True,
+                )
             target_minx = column * stride
             target_miny = row * stride
             target = box(
@@ -593,6 +606,7 @@ def build_context_graph(
     output_dir: str | Path,
     *,
     config: ContextGraphConfig | None = None,
+    show_progress: bool = False,
 ) -> dict[str, Any]:
     city_path = Path(city_path).expanduser().resolve()
     output_dir = Path(output_dir).expanduser().resolve()
@@ -643,6 +657,7 @@ def build_context_graph(
         region_lookup,
         config,
         output_dir,
+        show_progress=show_progress,
     )
     with (output_dir / "targets.jsonl").open("w", encoding="utf-8") as handle:
         for row in samples:
