@@ -662,12 +662,20 @@ class StructuredCityDataset(torch.utils.data.Dataset):
         self.port_dimensions = 23
         self.context_dimensions = len(self.feature_names) + 3
         self.context_slots = (self.config.context_radius_regions * 2 + 1) ** 2 + 1
+        self.prepared = [
+            self._prepare_item(row, payload, scene)
+            for row, payload, scene in self.samples
+        ]
 
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        row, payload, scene = self.samples[index]
+    def _prepare_item(
+        self,
+        row: dict[str, Any],
+        payload: dict[str, Any],
+        scene: dict[str, torch.Tensor],
+    ) -> dict[str, Any]:
         target_bounds = np.asarray(payload["target_bounds_projected_m"], dtype=np.float32)
         target_center = np.asarray(
             [
@@ -755,3 +763,6 @@ class StructuredCityDataset(torch.utils.data.Dataset):
             "port_padding": torch.from_numpy(port_padding),
             "sample_id": row["id"],
         }
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        return self.prepared[index]
