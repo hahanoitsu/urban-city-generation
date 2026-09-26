@@ -163,24 +163,32 @@ class StructuredCityDenoiser(nn.Module):
             nn.Linear(d, d),
         )
 
+        self.count_summary = nn.Sequential(
+            nn.Linear(d, d),
+            nn.GELU(),
+            nn.Linear(d, d),
+        )
+        self.node_count = nn.Linear(d, 1)
+        self.edge_count = nn.Linear(d, 1)
+        self.building_count = nn.Linear(d, 1)
+        self.area_count = nn.Linear(d, 1)
+
         self.nodes = SlotDecoder(
             slots=config.node_slots,
             continuous_dimensions=3,
-            category_sizes=(2,),
+            category_sizes=(),
             config=config,
             layers=config.transport_layers,
         )
-        self.node_presence = nn.Linear(d, 2)
         self.node_position = nn.Linear(d, 3)
 
         self.edges = SlotDecoder(
             slots=config.edge_slots,
             continuous_dimensions=1 + config.edge_shape_points * 3,
-            category_sizes=(2, 2, 7, 4),
+            category_sizes=(2, 7, 4),
             config=config,
             layers=config.transport_layers,
         )
-        self.edge_presence = nn.Linear(d, 2)
         self.edge_mode = nn.Linear(d, 2)
         self.edge_class = nn.Linear(d, 7)
         self.edge_vertical = nn.Linear(d, 4)
@@ -193,11 +201,10 @@ class StructuredCityDenoiser(nn.Module):
         self.buildings = SlotDecoder(
             slots=config.building_slots,
             continuous_dimensions=config.building_points * 2 + 2,
-            category_sizes=(2, config.building_classes),
+            category_sizes=(config.building_classes,),
             config=config,
             layers=config.building_layers,
         )
-        self.building_presence = nn.Linear(d, 2)
         self.building_kind = nn.Linear(d, config.building_classes)
         self.building_shape = nn.Linear(d, config.building_points * 2)
         self.building_height = nn.Linear(d, 1)
@@ -207,11 +214,10 @@ class StructuredCityDenoiser(nn.Module):
         self.areas = SlotDecoder(
             slots=config.area_slots,
             continuous_dimensions=config.area_points * 2,
-            category_sizes=(2, config.area_classes),
+            category_sizes=(config.area_classes,),
             config=config,
             layers=config.area_layers,
         )
-        self.area_presence = nn.Linear(d, 2)
         self.area_kind = nn.Linear(d, config.area_classes)
         self.area_shape = nn.Linear(d, config.area_points * 2)
 
@@ -231,10 +237,15 @@ class StructuredCityDenoiser(nn.Module):
         port_memory = port_memory.masked_fill(port_padding[:, :, None], 0.0)
         context_memory = torch.cat([context, port_memory], dim=1)
         context_padding = torch.cat([context_padding, port_padding], dim=1)
+        valid_context = (~context_padding).to(context_memory.dtype)
+        pooled_context = (
+            context_memory * valid_context[:, :, None]
+        ).sum(dim=1) / valid_context.sum(dim=1, keepdim=True).clamp_min(1.0)
+        count_hidden = self.count_summary(pooled_context)
 
         node_hidden = self.nodes(
             scene["node_position"],
-            (scene["node_presence"],),
+            (),
             context_memory,
             context_padding,
             time,
@@ -263,7 +274,6 @@ class StructuredCityDenoiser(nn.Module):
         edge_hidden = self.edges(
             edge_continuous,
             (
-                scene["edge_presence"],
                 scene["edge_mode"],
                 scene["edge_class"],
                 scene["edge_vertical"],
@@ -307,7 +317,7 @@ class StructuredCityDenoiser(nn.Module):
         )
         building_hidden = self.buildings(
             building_continuous,
-            (scene["building_presence"], scene["building_kind"]),
+            (scene["building_kind"],),
             building_memory,
             object_padding,
             time,
@@ -316,16 +326,18 @@ class StructuredCityDenoiser(nn.Module):
         area_memory = torch.cat([context_memory, node_hidden, edge_hidden], dim=1)
         area_hidden = self.areas(
             scene["area_shape"].flatten(2),
-            (scene["area_presence"], scene["area_kind"]),
+            (scene["area_kind"],),
             area_memory,
             object_padding,
             time,
         )
 
         return {
-            "node_presence": self.node_presence(node_hidden),
+            "node_count": self.node_count(count_hidden),
+            "edge_count": self.edge_count(count_hidden),
+            "building_count": self.building_count(count_hidden),
+            "area_count": self.area_count(count_hidden),
             "node_position": node_position,
-            "edge_presence": self.edge_presence(edge_hidden),
             "edge_mode": self.edge_mode(edge_hidden),
             "edge_class": self.edge_class(edge_hidden),
             "edge_vertical": self.edge_vertical(edge_hidden),
@@ -338,7 +350,6 @@ class StructuredCityDenoiser(nn.Module):
             ),
             "edge_from": edge_from,
             "edge_to": edge_to,
-            "building_presence": self.building_presence(building_hidden),
             "building_kind": self.building_kind(building_hidden),
             "building_shape": self.building_shape(building_hidden).reshape(
                 building_hidden.shape[0],
@@ -348,7 +359,6 @@ class StructuredCityDenoiser(nn.Module):
             ),
             "building_height": self.building_height(building_hidden),
             "building_base_z": self.building_base_z(building_hidden),
-            "area_presence": self.area_presence(area_hidden),
             "area_kind": self.area_kind(area_hidden),
             "area_shape": self.area_shape(area_hidden).reshape(
                 area_hidden.shape[0],
