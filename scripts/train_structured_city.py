@@ -176,6 +176,7 @@ def main():
     parser.add_argument("--cache-dir", type=Path)
     parser.add_argument("--save-every", type=int, default=5)
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--learning-rate", type=float, default=2e-4)
     args = parser.parse_args()
 
     rank, local_rank, world_size = distributed_state()
@@ -239,7 +240,7 @@ def main():
     ]
     optimizer = AdamW(
         trainable_parameters,
-        lr=2e-4,
+        lr=args.learning_rate,
         weight_decay=0.01,
         fused=True,
     )
@@ -253,6 +254,8 @@ def main():
         best = float(checkpoint.get("best_validation_loss", math.inf))
         if "optimizer" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer"])
+            for group in optimizer.param_groups:
+                group["lr"] = args.learning_rate
         if rank == 0:
             print(
                 f"resume={args.resume} epoch={start_epoch} "
@@ -332,6 +335,7 @@ def main():
         "world_size": world_size,
         "batch_size_per_gpu": args.batch_size,
         "global_batch_size": args.batch_size * world_size,
+        "learning_rate": args.learning_rate,
     }
     if rank == 0:
         (args.output / "experiment.json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -375,7 +379,8 @@ def main():
                 checkpoint["best_validation_loss"] = best
                 torch.save(checkpoint, args.output / "best.pt")
             print(
-                f"epoch={epoch}/{args.epochs} train={train['loss']:.4f} "
+                f"epoch={epoch}/{args.epochs} lr={args.learning_rate:.2e} "
+            f"train={train['loss']:.4f} "
                 f"validation={validation['loss']:.4f} "
                 f"node_xy={values['node_xy']:.4f} edge_presence={values['edge_presence']:.4f} "
                 f"edge_xy={values['edge_xy']:.4f} building_presence={values['building_presence']:.4f} "
