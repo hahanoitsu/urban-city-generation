@@ -106,7 +106,15 @@ def reduce_epoch(loss_sum, examples, batches, parts, device):
     }
 
 
-def run_epoch(model, loader, dataset, device, optimizer=None):
+def run_epoch(
+    model,
+    loader,
+    dataset,
+    device,
+    optimizer=None,
+    fixed_time=None,
+    time_power=1.0,
+):
     training = optimizer is not None
     model.train(training)
     loss_sum = 0.0
@@ -114,16 +122,32 @@ def run_epoch(model, loader, dataset, device, optimizer=None):
     batches = 0
     parts = {}
     context = torch.enable_grad() if training else torch.inference_mode()
+    class_weights = {
+        name: value.to(device)
+        for name, value in dataset.class_weights.items()
+    }
 
     with context:
         for batch in loader:
             batch = move_batch(batch, device)
             target = {name: batch[name] for name in SCENE_FIELDS}
-            time_values = (
-                torch.rand(batch["context"].shape[0], device=device)
-                if training
-                else torch.full((batch["context"].shape[0],), 0.5, device=device)
-            )
+            if fixed_time is not None:
+                time_values = torch.full(
+                    (batch["context"].shape[0],),
+                    float(fixed_time),
+                    device=device,
+                )
+            elif training:
+                time_values = torch.rand(
+                    batch["context"].shape[0],
+                    device=device,
+                ).pow(time_power)
+            else:
+                time_values = torch.full(
+                    (batch["context"].shape[0],),
+                    0.5,
+                    device=device,
+                )
             noisy = corrupt_scene(target, time_values)
             relations = batch["relations"]
             if training:
@@ -138,7 +162,11 @@ def run_epoch(model, loader, dataset, device, optimizer=None):
                     batch["port_padding"],
                     time_values,
                 )
-                loss, current = structured_city_loss(output, target)
+                loss, current = structured_city_loss(
+                    output,
+                    target,
+                    class_weights=class_weights,
+                )
             if training:
                 loss.backward()
                 clip_grad_norm_(
@@ -177,6 +205,7 @@ def main():
     parser.add_argument("--save-every", type=int, default=5)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
+    parser.add_argument("--time-power", type=float, default=0.5)
     args = parser.parse_args()
 
     rank, local_rank, world_size = distributed_state()
@@ -336,6 +365,11 @@ def main():
         "batch_size_per_gpu": args.batch_size,
         "global_batch_size": args.batch_size * world_size,
         "learning_rate": args.learning_rate,
+        "time_power": args.time_power,
+        "class_weights": {
+            name: value.tolist()
+            for name, value in dataset.class_weights.items()
+        },
     }
     if rank == 0:
         (args.output / "experiment.json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -345,15 +379,37 @@ def main():
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
         epoch_started = time.time()
-        train = run_epoch(model, train_loader, dataset, device, optimizer)
-        validation = run_epoch(model, validation_loader, dataset, device)
+        train = run_epoch(
+            model,
+            train_loader,
+            dataset,
+            device,
+            optimizer,
+            time_power=args.time_power,
+        )
+        validation = run_epoch(
+            model,
+            validation_loader,
+            dataset,
+            device,
+            fixed_time=0.5,
+        )
+        validation_high = run_epoch(
+            model,
+            validation_loader,
+            dataset,
+            device,
+            fixed_time=0.95,
+        )
         record = {
             "epoch": epoch,
             "train": train,
             "validation": validation,
+            "validation_high": validation_high,
             "seconds": time.time() - started,
         }
         values = validation["parts"]
+        high_values = validation_high["parts"]
         epoch_seconds = time.time() - epoch_started
         elapsed_seconds = time.time() - started
         examples = len(train_loader.dataset) + len(validation_loader.dataset)
@@ -368,24 +424,28 @@ def main():
                 "optimizer": optimizer.state_dict(),
                 "model_config": model_config.to_dict(),
                 "scene_config": scene_config.__dict__,
-                "best_validation_loss": min(best, validation["loss"]),
+                "best_validation_loss": min(best, validation_high["loss"]),
                 "world_size": world_size,
             }
             torch.save(checkpoint, args.output / "latest.pt")
             if args.save_every > 0 and epoch % args.save_every == 0:
                 torch.save(checkpoint, args.output / f"epoch-{epoch:03d}.pt")
-            if validation["loss"] < best:
-                best = validation["loss"]
+            if validation_high["loss"] < best:
+                best = validation_high["loss"]
                 checkpoint["best_validation_loss"] = best
                 torch.save(checkpoint, args.output / "best.pt")
             print(
                 f"epoch={epoch}/{args.epochs} lr={args.learning_rate:.2e} "
             f"train={train['loss']:.4f} "
                 f"validation={validation['loss']:.4f} "
-                f"node_xy={values['node_xy']:.4f} edge_presence={values['edge_presence']:.4f} "
-                f"edge_xy={values['edge_xy']:.4f} building_presence={values['building_presence']:.4f} "
-                f"building_shape={values['building_shape']:.4f} "
-                f"area_presence={values['area_presence']:.4f} area_shape={values['area_shape']:.4f} "
+                f"high={validation_high['loss']:.4f} "
+                f"node_xy={values['node_xy']:.4f}/{high_values['node_xy']:.4f} "
+                f"edge_count={values['edge_count']:.4f}/{high_values['edge_count']:.4f} "
+                f"edge_xy={values['edge_xy']:.4f}/{high_values['edge_xy']:.4f} "
+                f"building_count={values['building_count']:.4f}/{high_values['building_count']:.4f} "
+                f"building_shape={values['building_shape']:.4f}/{high_values['building_shape']:.4f} "
+                f"area_count={values['area_count']:.4f}/{high_values['area_count']:.4f} "
+                f"area_shape={values['area_shape']:.4f}/{high_values['area_shape']:.4f} "
                 f"epoch_s={epoch_seconds:.1f} elapsed_min={elapsed_seconds / 60.0:.1f} "
                 f"examples_per_s={examples / max(epoch_seconds, 1e-6):.2f}",
                 flush=True,
