@@ -85,23 +85,24 @@ def distributed_state():
     return rank, local_rank, world_size
 
 
-def reduce_epoch(loss_sum, batches, parts, device):
+def reduce_epoch(loss_sum, examples, batches, parts, device):
     names = sorted(parts)
     values = torch.tensor(
-        [loss_sum, float(batches), *[parts[name] for name in names]],
+        [loss_sum, float(examples), float(batches), *[parts[name] for name in names]],
         dtype=torch.float64,
         device=device,
     )
     if dist.is_initialized():
         dist.all_reduce(values, op=dist.ReduceOp.SUM)
-    total_batches = max(float(values[1].item()), 1.0)
+    total_examples = max(float(values[1].item()), 1.0)
     return {
-        "loss": float(values[0].item() / total_batches),
+        "loss": float(values[0].item() / total_examples),
         "parts": {
-            name: float(values[index + 2].item() / total_batches)
+            name: float(values[index + 3].item() / total_examples)
             for index, name in enumerate(names)
         },
-        "batches": int(values[1].item()),
+        "examples": int(values[1].item()),
+        "batches": int(values[2].item()),
     }
 
 
@@ -109,6 +110,7 @@ def run_epoch(model, loader, dataset, device, optimizer=None):
     training = optimizer is not None
     model.train(training)
     loss_sum = 0.0
+    examples = 0
     batches = 0
     parts = {}
     context = torch.enable_grad() if training else torch.inference_mode()
@@ -149,12 +151,14 @@ def run_epoch(model, loader, dataset, device, optimizer=None):
                     foreach=True,
                 )
                 optimizer.step()
-            loss_sum += float(loss.detach())
+            batch_examples = int(batch["context"].shape[0])
+            loss_sum += float(loss.detach()) * batch_examples
+            examples += batch_examples
             batches += 1
             for name, value in current.items():
-                parts[name] = parts.get(name, 0.0) + value
+                parts[name] = parts.get(name, 0.0) + value * batch_examples
 
-    return reduce_epoch(loss_sum, batches, parts, device)
+    return reduce_epoch(loss_sum, examples, batches, parts, device)
 
 
 def main():
