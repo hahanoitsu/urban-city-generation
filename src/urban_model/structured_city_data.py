@@ -55,9 +55,9 @@ class SceneTensorConfig:
     edge_slots: int = 640
     building_slots: int = 384
     area_slots: int = 96
-    edge_shape_points: int = 8
+    edge_shape_points: int = 16
     building_points: int = 24
-    area_points: int = 32
+    area_points: int = 48
     maximum_ports: int = 96
     width_scale_m: float = 32.0
     height_scale_m: float = 100.0
