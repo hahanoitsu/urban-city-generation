@@ -17,6 +17,7 @@ from shapely.geometry import (
     Polygon,
     shape,
 )
+from shapely.geometry.polygon import orient
 
 from urban_dataset.city_state import build_transport_graph
 from urban_dataset.tile import TileSpec
@@ -128,7 +129,20 @@ def _resample_line(points: list[list[float]], count: int) -> np.ndarray:
 
 
 def _resample_ring(polygon: Polygon, count: int) -> np.ndarray:
-    ring = LineString(polygon.exterior.coords)
+    oriented = orient(polygon, sign=1.0)
+    coordinates = list(oriented.exterior.coords[:-1])
+    if not coordinates:
+        coordinates = list(oriented.exterior.coords)
+    start = min(
+        range(len(coordinates)),
+        key=lambda index: (
+            round(float(coordinates[index][0]), 6),
+            round(float(coordinates[index][1]), 6),
+        ),
+    )
+    coordinates = coordinates[start:] + coordinates[:start]
+    coordinates.append(coordinates[0])
+    ring = LineString(coordinates)
     if ring.length <= 1e-8:
         value = np.asarray(ring.coords[0], dtype=np.float32)
         return np.repeat(value[None], count, axis=0)
@@ -256,6 +270,10 @@ def encode_scene(payload: dict[str, Any], config: SceneTensorConfig) -> dict[str
         right = node_lookup.get(str(edge["to_node"]))
         if left is None or right is None or left == right:
             continue
+        if left > right:
+            left, right = right, left
+            edge = dict(edge)
+            edge["geometry_local_m"] = list(reversed(edge["geometry_local_m"]))
         edges.append((left, right, edge))
     edges.sort(
         key=lambda item: (
@@ -277,6 +295,7 @@ def encode_scene(payload: dict[str, Any], config: SceneTensorConfig) -> dict[str
     edge_to = np.zeros(config.edge_slots, dtype=np.int64)
     edge_width = np.zeros((config.edge_slots, 1), dtype=np.float32)
     edge_width_valid = np.zeros(config.edge_slots, dtype=bool)
+    edge_width_weight = np.zeros(config.edge_slots, dtype=np.float32)
     edge_shape = np.zeros((config.edge_slots, config.edge_shape_points, 3), dtype=np.float32)
     edge_z_valid = np.zeros((config.edge_slots, config.edge_shape_points), dtype=bool)
 
@@ -292,6 +311,14 @@ def encode_scene(payload: dict[str, Any], config: SceneTensorConfig) -> dict[str
         width_valid = mode == "road" and width_source == "estimated_width_m"
         edge_width[index, 0] = float(edge["width_m"]) / config.width_scale_m if width_valid else 0.0
         edge_width_valid[index] = width_valid
+        if width_valid:
+            source_id = str(edge.get("source_id"))
+            confidence = 0.25
+            for record in payload["target"].get("roads", []):
+                if str(record.get("id")) == source_id:
+                    confidence = float(record.get("width_confidence", 0.25))
+                    break
+            edge_width_weight[index] = confidence
         points = _resample_line(edge["geometry_local_m"], config.edge_shape_points)
         points = _normalise_xy(points, config.target_size_m)
         start = node_position[left, :2]
@@ -321,6 +348,7 @@ def encode_scene(payload: dict[str, Any], config: SceneTensorConfig) -> dict[str
     )
     building_height = np.zeros((config.building_slots, 1), dtype=np.float32)
     building_height_valid = np.zeros(config.building_slots, dtype=bool)
+    building_height_weight = np.zeros(config.building_slots, dtype=np.float32)
     building_base_z = np.zeros((config.building_slots, 1), dtype=np.float32)
     building_base_z_valid = np.zeros(config.building_slots, dtype=bool)
     for index, (_y, _x, _id, polygon, record) in enumerate(building_records):
@@ -334,6 +362,13 @@ def encode_scene(payload: dict[str, Any], config: SceneTensorConfig) -> dict[str
         if valid:
             building_height[index, 0] = float(height) / config.height_scale_m
             building_height_valid[index] = True
+            confidence = int(record.get("height_confidence", 0))
+            building_height_weight[index] = {
+                3: 1.0,
+                2: 0.8,
+                1: 0.35,
+                0: 0.1,
+            }.get(confidence, 0.1)
 
     areas = _polygon_records(payload)
     areas.sort(key=lambda item: (item[1].centroid.y, item[1].centroid.x, item[0]))
@@ -363,12 +398,14 @@ def encode_scene(payload: dict[str, Any], config: SceneTensorConfig) -> dict[str
         "edge_to": torch.from_numpy(edge_to),
         "edge_width": torch.from_numpy(edge_width),
         "edge_width_valid": torch.from_numpy(edge_width_valid),
+        "edge_width_weight": torch.from_numpy(edge_width_weight),
         "edge_shape": torch.from_numpy(edge_shape),
         "edge_z_valid": torch.from_numpy(edge_z_valid),
         "building_presence": torch.from_numpy(building_presence),
         "building_shape": torch.from_numpy(building_shape),
         "building_height": torch.from_numpy(building_height),
         "building_height_valid": torch.from_numpy(building_height_valid),
+        "building_height_weight": torch.from_numpy(building_height_weight),
         "building_base_z": torch.from_numpy(building_base_z),
         "building_base_z_valid": torch.from_numpy(building_base_z_valid),
         "area_presence": torch.from_numpy(area_presence),
