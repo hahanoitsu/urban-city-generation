@@ -49,6 +49,7 @@ ARGS=(
     --cache-dir "$CACHE"
     --save-every "${SAVE_EVERY:-5}"
     --learning-rate "${LEARNING_RATE:-2e-4}"
+    --time-power "${TIME_POWER:-0.5}"
 )
 
 if [[ -n "${MAXIMUM_SAMPLES:-}" ]]; then
