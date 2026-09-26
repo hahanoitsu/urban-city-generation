@@ -255,13 +255,18 @@ def main():
             best = validation["loss"]
             torch.save(checkpoint, args.output / "best.pt")
         values = validation["parts"]
+        epoch_seconds = time.time() - epoch_started
+        elapsed_seconds = time.time() - started
+        examples = len(train_loader.dataset) + len(validation_loader.dataset)
         print(
-            f"epoch={epoch} train={train['loss']:.4f} validation={validation['loss']:.4f} "
+            f"epoch={epoch}/{args.epochs} train={train['loss']:.4f} "
+            f"validation={validation['loss']:.4f} "
             f"node_xy={values['node_xy']:.4f} edge_presence={values['edge_presence']:.4f} "
             f"edge_xy={values['edge_xy']:.4f} building_presence={values['building_presence']:.4f} "
             f"building_shape={values['building_shape']:.4f} "
             f"area_presence={values['area_presence']:.4f} area_shape={values['area_shape']:.4f} "
-            f"seconds={time.time() - epoch_started:.1f}",
+            f"epoch_s={epoch_seconds:.1f} elapsed_min={elapsed_seconds / 60.0:.1f} "
+            f"examples_per_s={examples / max(epoch_seconds, 1e-6):.2f}",
             flush=True,
         )
 
