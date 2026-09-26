@@ -96,7 +96,11 @@ def run_epoch(
                 optimizer.zero_grad(set_to_none=True)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                output = model(batch, use_posterior=use_posterior)
+                output = model(
+                    batch,
+                    use_posterior=use_posterior,
+                    sample_latent=training,
+                )
                 loss, metrics = spatial_anchor_loss(
                     output,
                     batch,
