@@ -17,6 +17,7 @@ class SpatialAnchorModelConfig:
     grid_size: int = 32
     slots_per_cell: int = 12
     max_active_nodes: int = 384
+    context_line_points: int = 6
     edge_shape_points: int = 8
     model_dimensions: int = 256
     latent_dimensions: int = 32
