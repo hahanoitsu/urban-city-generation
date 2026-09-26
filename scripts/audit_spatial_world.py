@@ -42,11 +42,45 @@ def main():
         "water",
         "landuse",
     )
+    limits = {
+        "context_lines": 768,
+        "ports": 128,
+        "nodes": 384,
+        "edges": 512,
+    }
+    fitting = [
+        row
+        for row in rows
+        if row["ports"] <= limits["ports"]
+        and row["nodes"] <= limits["nodes"]
+        and row["edges"] <= limits["edges"]
+    ]
+    context_counts = [
+        int(row["visible_roads"]) + int(row["visible_rail"])
+        for row in rows
+    ]
+    retained = [
+        min(value, limits["context_lines"]) / max(value, 1)
+        for value in context_counts
+    ]
     summary = {
         "samples": len(rows),
         "counts": {
             name: stats([int(row[name]) for row in rows])
             for name in names
+        },
+        "limits": limits,
+        "samples_fitting_graph_limits": len(fitting),
+        "samples_rejected_by_graph_limits": len(rows) - len(fitting),
+        "overflow_samples": {
+            "ports": sum(row["ports"] > limits["ports"] for row in rows),
+            "nodes": sum(row["nodes"] > limits["nodes"] for row in rows),
+            "edges": sum(row["edges"] > limits["edges"] for row in rows),
+        },
+        "context_line_retained_fraction": {
+            "mean": float(np.mean(retained)),
+            "p10": float(np.percentile(retained, 10)),
+            "p50": float(np.percentile(retained, 50)),
         },
         "compression": {
             "node_ratio_mean": float(
