@@ -447,15 +447,24 @@ def main():
         panels.append(panel)
 
         payload = export_scene(generated, scene_config)
+        target_payload = export_scene(target, scene_config)
         json_path = args.output / f"{output_index:02d}-{sample['sample_id']}.json"
         json_path.write_text(json.dumps(payload, indent=2) + "\n")
         records.append(
             {
                 "sample_id": sample["sample_id"],
-                "nodes": len(payload["nodes"]),
-                "edges": len(payload["edges"]),
-                "buildings": len(payload["buildings"]),
-                "areas": len(payload["areas"]),
+                "target": {
+                    "nodes": len(target_payload["nodes"]),
+                    "edges": len(target_payload["edges"]),
+                    "buildings": len(target_payload["buildings"]),
+                    "areas": len(target_payload["areas"]),
+                },
+                "generated": {
+                    "nodes": len(payload["nodes"]),
+                    "edges": len(payload["edges"]),
+                    "buildings": len(payload["buildings"]),
+                    "areas": len(payload["areas"]),
+                },
             }
         )
 
