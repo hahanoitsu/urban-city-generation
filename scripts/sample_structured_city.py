@@ -100,7 +100,7 @@ def update_continuous(current, prediction, time, next_time):
 
 
 @torch.inference_mode()
-def generate(model, context, relations, ports, padding, scene_config, steps):
+def generate(model, context, relations, context_padding, ports, padding, scene_config, steps):
     device = context.device
     scene = initial_scene(scene_config, device)
     for index in range(steps, 0, -1):
@@ -108,7 +108,15 @@ def generate(model, context, relations, ports, padding, scene_config, steps):
         next_value = (index - 1) / steps
         time = torch.full((1,), value, device=device)
         next_time = torch.full((1,), next_value, device=device)
-        output = model(scene, context, relations, ports, padding, time)
+        output = model(
+            scene,
+            context,
+            relations,
+            context_padding,
+            ports,
+            padding,
+            time,
+        )
         for name in CONTINUOUS_FIELDS:
             scene[name] = update_continuous(scene[name], output[name], time, next_time)
         update_categories(scene, output, next_value)
@@ -116,6 +124,7 @@ def generate(model, context, relations, ports, padding, scene_config, steps):
         scene,
         context,
         relations,
+        context_padding,
         ports,
         padding,
         torch.zeros(1, device=device),
@@ -334,20 +343,21 @@ def main():
     model = StructuredCityDenoiser(model_config).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
-    relations = dataset.relations.to(device).unsqueeze(0)
-
     args.output.mkdir(parents=True, exist_ok=True)
     panels = []
     records = []
     for output_index, dataset_index in enumerate(indexes):
         sample = dataset[dataset_index]
         context = sample["context"].unsqueeze(0).to(device)
+        context_padding = sample["context_padding"].unsqueeze(0).to(device)
+        relations = sample["relations"].unsqueeze(0).to(device)
         ports = sample["ports"].unsqueeze(0).to(device)
         padding = sample["port_padding"].unsqueeze(0).to(device)
         generated = generate(
             model,
             context,
             relations,
+            context_padding,
             ports,
             padding,
             scene_config,
