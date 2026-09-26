@@ -23,6 +23,7 @@ from shapely.geometry import (
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
+from .classify import parse_lane_count, parse_width_metres
 from .extract import CityLayers
 from .prepared import load_city_gpkg
 
@@ -418,8 +419,21 @@ def _local_line_payload(
             }
             if mode == "road":
                 width = _optional_number(row.get("estimated_width_m"))
+                explicit = parse_width_metres(row.get("width"))
+                lanes = parse_lane_count(row.get("lanes"))
+                if explicit is not None:
+                    width_source = "width"
+                    width_confidence = 1.0
+                elif lanes is not None:
+                    width_source = "lanes"
+                    width_confidence = 0.75
+                else:
+                    width_source = "class_default"
+                    width_confidence = 0.25
                 record["width_m"] = width
                 record["width_valid"] = width is not None and width > 0
+                record["width_source"] = width_source
+                record["width_confidence"] = width_confidence
             records.append(record)
     return records
 
