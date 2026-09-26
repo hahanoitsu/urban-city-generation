@@ -85,6 +85,12 @@ def test_spatial_anchor_architect_forward_and_loss():
     assert output["edge_relation"].shape == (batch_size, active, active, 9)
 
     loss, metrics = spatial_anchor_loss(output, batch, kl_weight=0.01)
+    model.eval()
+    generated = model.generate(batch, temperature=0.0)
+    assert generated["active_anchor_ids"].shape == (batch_size, 12)
+    assert generated["active_count"].shape == (batch_size,)
+    assert generated["edge_relation"].shape == (batch_size, 12, 12, 9)
+    model.train()
     loss.backward()
     assert torch.isfinite(loss)
     assert "edge_relation" in metrics
