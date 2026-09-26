@@ -23,10 +23,10 @@ ARGS=(
     --output "$OUTPUT"
     --epochs "${EPOCHS:-30}"
     --batch-size "${BATCH_SIZE:-1}"
-    --nodes "${NODE_SLOTS:-384}"
-    --edges "${EDGE_SLOTS:-640}"
-    --buildings "${BUILDING_SLOTS:-384}"
-    --areas "${AREA_SLOTS:-96}"
+    --nodes "${NODE_SLOTS:-448}"
+    --edges "${EDGE_SLOTS:-512}"
+    --buildings "${BUILDING_SLOTS:-512}"
+    --areas "${AREA_SLOTS:-160}"
     --ports "${PORT_SLOTS:-96}"
 )
 
