@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw
 from urban_model.structured_city import StructuredCityConfig, StructuredCityDenoiser
 from urban_model.structured_city_data import (
     AREA_KINDS,
+    BUILDING_KINDS,
     CLASSES,
     SceneTensorConfig,
     StructuredCityDataset,
@@ -53,6 +54,12 @@ def initial_scene(config: SceneTensorConfig, device: torch.device):
         "building_presence": torch.full(
             (1, config.building_slots),
             2,
+            dtype=torch.long,
+            device=device,
+        ),
+        "building_kind": torch.full(
+            (1, config.building_slots),
+            len(BUILDING_KINDS),
             dtype=torch.long,
             device=device,
         ),
@@ -154,6 +161,7 @@ def target_scene(sample):
         "building_height",
         "building_base_z",
         "building_presence",
+        "building_kind",
         "area_shape",
         "area_presence",
         "area_kind",
@@ -293,11 +301,13 @@ def export_scene(scene, config):
         if int(scene["building_presence"][index]) != 1:
             continue
         footprint = denormalise(scene["building_shape"][index], config.target_size_m)
+        kind = int(scene["building_kind"][index])
         buildings.append(
             {
                 "footprint_xy_m": [[float(x), float(y)] for x, y in footprint],
                 "base_z_m": None,
                 "height_m": float(scene["building_height"][index, 0] * config.height_scale_m),
+                "type": BUILDING_KINDS[kind] if 0 <= kind < len(BUILDING_KINDS) else "generic",
             }
         )
 
