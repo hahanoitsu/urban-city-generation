@@ -56,6 +56,7 @@ RELATIONS = (
     "underground",
     "elevated",
 )
+CACHE_VERSION = "structured-city-v1-20260926"
 
 
 @dataclass(frozen=True)
@@ -465,6 +466,39 @@ def encode_scene(payload: dict[str, Any], config: SceneTensorConfig) -> dict[str
     }
 
 
+def _cache_key(config: SceneTensorConfig) -> str:
+    return (
+        f"{CACHE_VERSION}-"
+        f"n{config.node_slots}-e{config.edge_slots}-"
+        f"b{config.building_slots}-a{config.area_slots}-p{config.maximum_ports}-"
+        f"g{config.edge_shape_points}-{config.building_points}-{config.area_points}"
+    )
+
+
+def _cache_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "target_bounds_projected_m": payload["target_bounds_projected_m"],
+        "parent_region_id": payload["parent_region_id"],
+        "input": {
+            "boundary_ports": payload["input"].get("boundary_ports", []),
+            "visible_context_features": payload["input"].get("visible_context_features", {}),
+        },
+    }
+
+
+def _rejection_name(error: ValueError) -> str:
+    text = str(error)
+    if text.startswith("node slots exceeded"):
+        return "nodes"
+    if text.startswith("edge slots exceeded"):
+        return "edges"
+    if text.startswith("building slots exceeded"):
+        return "buildings"
+    if text.startswith("area slots exceeded"):
+        return "areas"
+    raise error
+
+
 class StructuredCityDataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -472,9 +506,14 @@ class StructuredCityDataset(torch.utils.data.Dataset):
         *,
         config: SceneTensorConfig | None = None,
         maximum_samples: int | None = None,
+        cache_dir: str | Path | None = None,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.config = config or SceneTensorConfig()
+        self.cache_dir = None
+        if cache_dir is not None:
+            self.cache_dir = Path(cache_dir).expanduser().resolve() / _cache_key(self.config)
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
         graph = json.loads((self.root / "context-graph.json").read_text(encoding="utf-8"))
         self.feature_names = sorted(graph["nodes"][0]["features"])
         self.node_ids = [node["id"] for node in graph["nodes"]]
@@ -542,28 +581,66 @@ class StructuredCityDataset(torch.utils.data.Dataset):
             "buildings": 0,
             "areas": 0,
         }
-        for row in rows:
-            if row["boundary_ports"] > self.config.maximum_ports:
-                rejected["ports"] += 1
-                continue
-            path = self.root / row["sample_path"]
-            with gzip.open(path, "rt", encoding="utf-8") as handle:
-                payload = json.load(handle)
-            counts = scene_counts(payload, self.config)
-            over = []
-            if counts["nodes"] > self.config.node_slots:
-                over.append("nodes")
-            if counts["edges"] > self.config.edge_slots:
-                over.append("edges")
-            if counts["buildings"] > self.config.building_slots:
-                over.append("buildings")
-            if counts["areas"] > self.config.area_slots:
-                over.append("areas")
-            if over:
-                for name in over:
-                    rejected[name] += 1
-                continue
-            accepted.append((row, payload))
+        cache_hits = 0
+        cache_built = 0
+        for index, row in enumerate(rows, start=1):
+            cache_path = (
+                self.cache_dir / f"{row['id']}.pt"
+                if self.cache_dir is not None
+                else None
+            )
+            cached = None
+            if cache_path is not None and cache_path.exists():
+                cached = torch.load(cache_path, map_location="cpu", weights_only=False)
+            if cached is not None:
+                cache_hits += 1
+                if not cached["accepted"]:
+                    rejected[str(cached["reason"])] += 1
+                else:
+                    accepted.append((row, cached["payload"], cached["scene"]))
+            else:
+                if row["boundary_ports"] > self.config.maximum_ports:
+                    rejected["ports"] += 1
+                    if cache_path is not None:
+                        torch.save(
+                            {"accepted": False, "reason": "ports"},
+                            cache_path,
+                        )
+                    continue
+                path = self.root / row["sample_path"]
+                with gzip.open(path, "rt", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                try:
+                    scene = encode_scene(payload, self.config)
+                except ValueError as error:
+                    reason = _rejection_name(error)
+                    rejected[reason] += 1
+                    if cache_path is not None:
+                        torch.save(
+                            {"accepted": False, "reason": reason},
+                            cache_path,
+                        )
+                    continue
+                compact = _cache_payload(payload)
+                accepted.append((row, compact, scene))
+                if cache_path is not None:
+                    torch.save(
+                        {
+                            "accepted": True,
+                            "payload": compact,
+                            "scene": scene,
+                        },
+                        cache_path,
+                    )
+                    cache_built += 1
+            if self.cache_dir is not None and (
+                index == 1 or index % 250 == 0 or index == len(rows)
+            ):
+                print(
+                    f"structured cache: {index}/{len(rows)} "
+                    f"hits={cache_hits} built={cache_built} accepted={len(accepted)}",
+                    flush=True,
+                )
         accepted_before_limit = len(accepted)
         if maximum_samples is not None and len(accepted) > maximum_samples:
             accepted.sort(
@@ -579,15 +656,17 @@ class StructuredCityDataset(torch.utils.data.Dataset):
         self.total_rows = len(rows)
         self.rejected = rejected
         self.accepted_before_limit = accepted_before_limit
+        self.cache_hits = cache_hits
+        self.cache_built = cache_built
         self.port_dimensions = 23
         self.context_dimensions = len(self.feature_names) + 3
-        self.context_slots = (self.config.context_radius_regions * 2 + 1) ** 2
+        self.context_slots = (self.config.context_radius_regions * 2 + 1) ** 2 + 1
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        row, payload = self.samples[index]
+        row, payload, scene = self.samples[index]
         target_bounds = np.asarray(payload["target_bounds_projected_m"], dtype=np.float32)
         target_center = np.asarray(
             [
@@ -620,7 +699,19 @@ class StructuredCityDataset(torch.utils.data.Dataset):
             dtype=np.float32,
         )
 
-        for local_index, global_index in enumerate(indexes):
+        visible = payload["input"].get("visible_context_features", {})
+        visible_values = np.asarray(
+            [float(visible.get(name, 0.0)) for name in self.feature_names],
+            dtype=np.float32,
+        )
+        context[0, : len(self.feature_names)] = (
+            visible_values - self.feature_mean
+        ) / self.feature_std
+        context_padding[0] = False
+        relations[RELATIONS.index("spatial"), 0, 0] = 1.0
+
+        parent_slot = None
+        for local_index, global_index in enumerate(indexes, start=1):
             context_padding[local_index] = False
             relative = (
                 self.centers[global_index] - target_center
@@ -630,14 +721,19 @@ class StructuredCityDataset(torch.utils.data.Dataset):
             if global_index == parent:
                 context[local_index, : len(self.feature_names)] = 0.0
                 context[local_index, -1] = 1.0
+                parent_slot = local_index
 
         if indexes:
             global_indexes = np.asarray(indexes, dtype=np.int64)
             local_relations = self.global_relations[:, global_indexes][:, :, global_indexes].copy()
-            local_degree = local_relations.sum(axis=2, keepdims=True)
-            local_relations /= np.maximum(local_degree, 1e-8)
             count = len(indexes)
-            relations[:, :count, :count] = local_relations
+            relations[:, 1 : count + 1, 1 : count + 1] = local_relations
+        if parent_slot is not None:
+            relation = RELATIONS.index("spatial")
+            relations[relation, 0, parent_slot] = 1.0
+            relations[relation, parent_slot, 0] = 1.0
+        local_degree = relations.sum(axis=2, keepdims=True)
+        relations /= np.maximum(local_degree, 1e-8)
 
         ports = np.zeros((self.config.maximum_ports, self.port_dimensions), dtype=np.float32)
         port_padding = np.ones(self.config.maximum_ports, dtype=bool)
@@ -649,7 +745,6 @@ class StructuredCityDataset(torch.utils.data.Dataset):
             ports[: len(vectors)] = np.asarray(vectors, dtype=np.float32)
             port_padding[: len(vectors)] = False
 
-        scene = encode_scene(payload, self.config)
         return {
             **scene,
             "context": torch.from_numpy(context),
