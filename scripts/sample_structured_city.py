@@ -73,6 +73,20 @@ def initial_scene(config: SceneTensorConfig, device: torch.device):
     }
 
 
+def update_categories(scene, output, next_fraction):
+    for name, mask_index in CATEGORY_MASKS.items():
+        logits = output[name]
+        probability = torch.softmax(logits, dim=-1)
+        confidence, prediction = probability.max(dim=-1)
+        values = prediction.clone()
+        count = values.shape[1]
+        masked = int(round(next_fraction * count))
+        if masked > 0:
+            indexes = torch.topk(confidence, k=masked, dim=1, largest=False).indices
+            values.scatter_(1, indexes, mask_index)
+        scene[name] = values
+
+
 def update_continuous(current, prediction, time, next_time):
     alpha, sigma = noise_coefficients(time)
     next_alpha, next_sigma = noise_coefficients(next_time)
@@ -97,8 +111,7 @@ def generate(model, context, relations, ports, padding, scene_config, steps):
         output = model(scene, context, relations, ports, padding, time)
         for name in CONTINUOUS_FIELDS:
             scene[name] = update_continuous(scene[name], output[name], time, next_time)
-        for name in CATEGORY_MASKS:
-            scene[name] = output[name].argmax(dim=-1)
+        update_categories(scene, output, next_value)
     output = model(
         scene,
         context,
