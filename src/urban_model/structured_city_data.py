@@ -60,6 +60,7 @@ class SceneTensorConfig:
     maximum_ports: int = 96
     width_scale_m: float = 32.0
     height_scale_m: float = 100.0
+    context_radius_regions: int = 1
 
 
 def _one_hot(value: str, values: tuple[str, ...]) -> list[float]:
@@ -428,6 +429,8 @@ class StructuredCityDataset(torch.utils.data.Dataset):
         self.feature_names = sorted(graph["nodes"][0]["features"])
         self.node_ids = [node["id"] for node in graph["nodes"]]
         self.node_index = {node_id: index for index, node_id in enumerate(self.node_ids)}
+        self.node_rows = np.asarray([int(node["row"]) for node in graph["nodes"]], dtype=np.int64)
+        self.node_columns = np.asarray([int(node["column"]) for node in graph["nodes"]], dtype=np.int64)
         features = np.asarray(
             [
                 [float(node["features"][name]) for name in self.feature_names]
@@ -474,7 +477,7 @@ class StructuredCityDataset(torch.utils.data.Dataset):
         for index in range(len(RELATIONS)):
             degree = relations[index].sum(axis=1, keepdims=True)
             relations[index] /= np.maximum(degree, 1.0)
-        self.relations = torch.from_numpy(relations)
+        self.global_relations = relations
 
         rows = [
             json.loads(line)
@@ -502,8 +505,9 @@ class StructuredCityDataset(torch.utils.data.Dataset):
         if not accepted:
             raise RuntimeError("No structured city samples fit the configured slots")
         self.samples = accepted
-        self.port_dimensions = len(_port_vector(self.samples[0][1]["input"]["boundary_ports"][0], self.config))
+        self.port_dimensions = 23
         self.context_dimensions = len(self.feature_names) + 3
+        self.context_slots = (self.config.context_radius_regions * 2 + 1) ** 2
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -518,12 +522,46 @@ class StructuredCityDataset(torch.utils.data.Dataset):
             ],
             dtype=np.float32,
         )
-        relative = (self.centers - target_center[None]) / max(self.config.target_size_m, 1.0)
-        masked = np.zeros((len(self.node_ids), 1), dtype=np.float32)
         parent = self.node_index[payload["parent_region_id"]]
-        masked[parent, 0] = 1.0
-        context = np.concatenate([self.features.copy(), relative, masked], axis=1)
-        context[parent, : len(self.feature_names)] = 0.0
+        parent_row = self.node_rows[parent]
+        parent_column = self.node_columns[parent]
+        radius = self.config.context_radius_regions
+        indexes = [
+            global_index
+            for global_index in range(len(self.node_ids))
+            if abs(int(self.node_rows[global_index] - parent_row)) <= radius
+            and abs(int(self.node_columns[global_index] - parent_column)) <= radius
+        ]
+        indexes.sort(
+            key=lambda global_index: (
+                int(self.node_rows[global_index] - parent_row),
+                int(self.node_columns[global_index] - parent_column),
+            )
+        )
+
+        context = np.zeros((self.context_slots, self.context_dimensions), dtype=np.float32)
+        context_padding = np.ones(self.context_slots, dtype=bool)
+        relations = np.zeros(
+            (len(RELATIONS), self.context_slots, self.context_slots),
+            dtype=np.float32,
+        )
+
+        for local_index, global_index in enumerate(indexes):
+            context_padding[local_index] = False
+            relative = (
+                self.centers[global_index] - target_center
+            ) / max(self.config.region_size_m if hasattr(self.config, "region_size_m") else 2048.0, 1.0)
+            context[local_index, : len(self.feature_names)] = self.features[global_index]
+            context[local_index, len(self.feature_names) : len(self.feature_names) + 2] = relative
+            if global_index == parent:
+                context[local_index, : len(self.feature_names)] = 0.0
+                context[local_index, -1] = 1.0
+
+        if indexes:
+            global_indexes = np.asarray(indexes, dtype=np.int64)
+            local_relations = self.global_relations[:, global_indexes][:, :, global_indexes]
+            count = len(indexes)
+            relations[:, :count, :count] = local_relations
 
         ports = np.zeros((self.config.maximum_ports, self.port_dimensions), dtype=np.float32)
         port_padding = np.ones(self.config.maximum_ports, dtype=bool)
@@ -539,6 +577,8 @@ class StructuredCityDataset(torch.utils.data.Dataset):
         return {
             **scene,
             "context": torch.from_numpy(context),
+            "context_padding": torch.from_numpy(context_padding),
+            "relations": torch.from_numpy(relations),
             "ports": torch.from_numpy(ports),
             "port_padding": torch.from_numpy(port_padding),
             "sample_id": row["id"],
