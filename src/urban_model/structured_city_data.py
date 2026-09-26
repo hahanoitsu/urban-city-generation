@@ -50,6 +50,7 @@ RELATIONS = (
 @dataclass(frozen=True)
 class SceneTensorConfig:
     target_size_m: float = 512.0
+    region_size_m: float = 2048.0
     node_slots: int = 384
     edge_slots: int = 640
     building_slots: int = 384
@@ -550,7 +551,7 @@ class StructuredCityDataset(torch.utils.data.Dataset):
             context_padding[local_index] = False
             relative = (
                 self.centers[global_index] - target_center
-            ) / max(self.config.region_size_m if hasattr(self.config, "region_size_m") else 2048.0, 1.0)
+            ) / max(self.config.region_size_m, 1.0)
             context[local_index, : len(self.feature_names)] = self.features[global_index]
             context[local_index, len(self.feature_names) : len(self.feature_names) + 2] = relative
             if global_index == parent:
