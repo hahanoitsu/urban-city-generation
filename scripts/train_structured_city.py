@@ -53,7 +53,7 @@ def region_bucket(value: str) -> int:
 
 def split_indices(dataset):
     groups = {"train": [], "validation": [], "test": []}
-    for index, (row, _payload) in enumerate(dataset.samples):
+    for index, (row, _payload, _scene) in enumerate(dataset.samples):
         bucket = region_bucket(str(row["parent_region_id"]))
         if bucket < 75:
             groups["train"].append(index)
@@ -134,6 +134,8 @@ def main():
     parser.add_argument("--areas", type=int, default=160)
     parser.add_argument("--ports", type=int, default=96)
     parser.add_argument("--maximum-samples", type=int)
+    parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument("--save-every", type=int, default=5)
     args = parser.parse_args()
 
     torch.manual_seed(5132)
@@ -152,10 +154,27 @@ def main():
         args.data,
         config=scene_config,
         maximum_samples=args.maximum_samples,
+        cache_dir=args.cache_dir,
     )
     splits = split_indices(dataset)
     if not splits["train"] or not splits["validation"]:
         raise RuntimeError("Structured split produced an empty train or validation set")
+
+    print(
+        json.dumps(
+            {
+                "samples": len(dataset),
+                "source_rows": dataset.total_rows,
+                "accepted_before_limit": dataset.accepted_before_limit,
+                "rejected": dataset.rejected,
+                "cache_hits": dataset.cache_hits,
+                "cache_built": dataset.cache_built,
+                "splits": {name: len(values) for name, values in splits.items()},
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
 
     device = torch.device("cuda")
     model_config = StructuredCityConfig(
@@ -197,6 +216,8 @@ def main():
         "source_rows": dataset.total_rows,
         "accepted_before_limit": dataset.accepted_before_limit,
         "rejected": dataset.rejected,
+        "cache_hits": dataset.cache_hits,
+        "cache_built": dataset.cache_built,
         "splits": {name: len(values) for name, values in splits.items()},
         "parameters": sum(parameter.numel() for parameter in model.parameters()),
         "feature_names": dataset.feature_names,
@@ -209,6 +230,7 @@ def main():
     best = math.inf
     started = time.time()
     for epoch in range(1, args.epochs + 1):
+        epoch_started = time.time()
         train = run_epoch(model, train_loader, dataset, device, optimizer)
         validation = run_epoch(model, validation_loader, dataset, device)
         record = {
@@ -227,11 +249,19 @@ def main():
             "best_validation_loss": min(best, validation["loss"]),
         }
         torch.save(checkpoint, args.output / "latest.pt")
+        if args.save_every > 0 and epoch % args.save_every == 0:
+            torch.save(checkpoint, args.output / f"epoch-{epoch:03d}.pt")
         if validation["loss"] < best:
             best = validation["loss"]
             torch.save(checkpoint, args.output / "best.pt")
+        values = validation["parts"]
         print(
-            f"epoch={epoch} train={train['loss']:.4f} validation={validation['loss']:.4f}",
+            f"epoch={epoch} train={train['loss']:.4f} validation={validation['loss']:.4f} "
+            f"node_xy={values['node_xy']:.4f} edge_presence={values['edge_presence']:.4f} "
+            f"edge_xy={values['edge_xy']:.4f} building_presence={values['building_presence']:.4f} "
+            f"building_shape={values['building_shape']:.4f} "
+            f"area_presence={values['area_presence']:.4f} area_shape={values['area_shape']:.4f} "
+            f"seconds={time.time() - epoch_started:.1f}",
             flush=True,
         )
 
