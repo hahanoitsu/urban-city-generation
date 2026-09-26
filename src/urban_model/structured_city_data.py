@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -549,8 +550,14 @@ class StructuredCityDataset(torch.utils.data.Dataset):
             ):
                 continue
             accepted.append((row, payload))
-            if maximum_samples is not None and len(accepted) >= maximum_samples:
-                break
+        if maximum_samples is not None and len(accepted) > maximum_samples:
+            accepted.sort(
+                key=lambda item: hashlib.sha1(
+                    str(item[0]["id"]).encode("utf-8"),
+                    usedforsecurity=False,
+                ).digest()
+            )
+            accepted = accepted[:maximum_samples]
         if not accepted:
             raise RuntimeError("No structured city samples fit the configured slots")
         self.samples = accepted
