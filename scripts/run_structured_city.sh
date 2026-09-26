@@ -48,6 +48,7 @@ ARGS=(
     --ports "${PORT_SLOTS:-96}"
     --cache-dir "$CACHE"
     --save-every "${SAVE_EVERY:-5}"
+    --learning-rate "${LEARNING_RATE:-2e-4}"
 )
 
 if [[ -n "${MAXIMUM_SAMPLES:-}" ]]; then
