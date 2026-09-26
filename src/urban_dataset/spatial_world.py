@@ -89,31 +89,75 @@ def _line_payload(
     return records
 
 
-def _context_cells(layers, context: Polygon, target: Polygon, cell_m: float):
+def _build_context_grid(
+    layers,
+    bounds: tuple[float, float, float, float],
+    cell_m: float,
+    margin_m: float,
+    *,
+    show_progress: bool,
+):
+    minx, miny, maxx, maxy = bounds
+    first_col = math.floor((minx - margin_m) / cell_m)
+    first_row = math.floor((miny - margin_m) / cell_m)
+    last_col = math.floor((maxx + margin_m - 1e-9) / cell_m)
+    last_row = math.floor((maxy + margin_m - 1e-9) / cell_m)
+    total = (last_col - first_col + 1) * (last_row - first_row + 1)
+    values = {}
+    scanned = 0
+    for row in range(first_row, last_row + 1):
+        for column in range(first_col, last_col + 1):
+            scanned += 1
+            cell = box(
+                column * cell_m,
+                row * cell_m,
+                (column + 1) * cell_m,
+                (row + 1) * cell_m,
+            )
+            values[(row, column)] = _region_stats(layers, cell)
+            if show_progress and (
+                scanned == 1 or scanned % 500 == 0 or scanned == total
+            ):
+                print(f"context grid: {scanned}/{total}", flush=True)
+    return values
+
+
+def _context_cells(
+    context: Polygon,
+    target: Polygon,
+    cell_m: float,
+    context_grid: dict[tuple[int, int], dict[str, float]],
+):
     minx, miny, maxx, maxy = context.bounds
+    first_col = math.floor(minx / cell_m)
+    first_row = math.floor(miny / cell_m)
     columns = int(round((maxx - minx) / cell_m))
     rows = int(round((maxy - miny) / cell_m))
     values = []
-    for row in range(rows):
-        for column in range(columns):
+    for local_row in range(rows):
+        for local_column in range(columns):
+            column = first_col + local_column
+            row = first_row + local_row
             cell = box(
-                minx + column * cell_m,
-                miny + row * cell_m,
-                minx + (column + 1) * cell_m,
-                miny + (row + 1) * cell_m,
+                column * cell_m,
+                row * cell_m,
+                (column + 1) * cell_m,
+                (row + 1) * cell_m,
             )
-            visible = cell.difference(target)
-            stats = _region_stats(layers, visible) if not visible.is_empty else {}
+            masked_fraction = float(
+                cell.intersection(target).area / max(cell.area, 1.0)
+            )
+            features = {} if masked_fraction >= 1.0 - 1e-8 else context_grid[(row, column)]
             values.append(
                 {
-                    "row": row,
-                    "column": column,
+                    "row": local_row,
+                    "column": local_column,
                     "center_local_m": [
                         float(cell.centroid.x - target.bounds[0]),
                         float(cell.centroid.y - target.bounds[1]),
                     ],
-                    "masked_fraction": float(cell.intersection(target).area / max(cell.area, 1.0)),
-                    "features": stats,
+                    "masked_fraction": masked_fraction,
+                    "features": features,
                 }
             )
     return values
@@ -306,6 +350,13 @@ def build_spatial_world(
     city_bounds = _frame_bounds(layers)
     whole_city = box(*city_bounds)
     city_style = _region_stats(layers, whole_city)
+    context_grid = _build_context_grid(
+        layers,
+        city_bounds,
+        config.context_cell_m,
+        config.context_size_m / 2.0,
+        show_progress=show_progress,
+    )
 
     minx, miny, maxx, maxy = city_bounds
     stride = config.target_stride_m
@@ -384,10 +435,10 @@ def build_spatial_world(
                 "controls": _region_stats(layers, target),
                 "input": {
                     "context_cells": _context_cells(
-                        layers,
                         context,
                         target,
                         config.context_cell_m,
+                        context_grid,
                     ),
                     "visible_transport": {
                         "roads": _line_payload(
