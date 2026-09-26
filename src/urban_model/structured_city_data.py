@@ -507,6 +507,7 @@ class StructuredCityDataset(torch.utils.data.Dataset):
         config: SceneTensorConfig | None = None,
         maximum_samples: int | None = None,
         cache_dir: str | Path | None = None,
+        show_cache_progress: bool = True,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.config = config or SceneTensorConfig()
@@ -633,7 +634,7 @@ class StructuredCityDataset(torch.utils.data.Dataset):
                         cache_path,
                     )
                     cache_built += 1
-            if self.cache_dir is not None and (
+            if show_cache_progress and self.cache_dir is not None and (
                 index == 1 or index % 250 == 0 or index == len(rows)
             ):
                 print(
