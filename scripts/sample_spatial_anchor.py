@@ -201,14 +201,61 @@ def graph_stats(graph):
     }
 
 
-def render(graph, size=720):
+def render(graph, sample, tensor_config, size=720):
     image = Image.new("RGB", (size, size), (247, 246, 242))
     draw = ImageDraw.Draw(image)
+    local_size = tensor_config.local_vector_size_m
+    target_size = tensor_config.target_size_m
+    margin = (local_size - target_size) / 2.0
 
     def point(value):
         return (
-            int(round(value[0] / 1024.0 * (size - 1))),
-            int(round((1.0 - value[1] / 1024.0) * (size - 1))),
+            int(round((value[0] + margin) / local_size * (size - 1))),
+            int(
+                round(
+                    (1.0 - (value[1] + margin) / local_size)
+                    * (size - 1)
+                )
+            ),
+        )
+
+    padding = sample["context_line_padding"]
+    points = sample["context_line_points"]
+    modes = sample["context_line_mode"]
+    for index in range(points.shape[0]):
+        if bool(padding[index]):
+            continue
+        values = (
+            points[index] * (local_size / 2.0)
+            + target_size / 2.0
+        )
+        projected = [point(value) for value in values]
+        colour = (
+            (194, 194, 194)
+            if int(modes[index]) == 0
+            else (170, 198, 218)
+        )
+        draw.line(projected, fill=colour, width=1)
+
+    target_left, target_bottom = point([0.0, 0.0])
+    target_right, target_top = point([target_size, target_size])
+    draw.rectangle(
+        [target_left, target_top, target_right, target_bottom],
+        outline=(80, 80, 80),
+        width=2,
+    )
+
+    port_padding = sample["port_padding"]
+    ports = sample["ports"]
+    for index in range(ports.shape[0]):
+        if bool(port_padding[index]):
+            continue
+        x = float((ports[index, 0] + 1.0) * 0.5 * target_size)
+        y = float((ports[index, 1] + 1.0) * 0.5 * target_size)
+        px, py = point([x, y])
+        draw.ellipse(
+            [px - 3, py - 3, px + 3, py + 3],
+            fill=(20, 20, 20),
         )
 
     for edge in graph["edges"]:
@@ -269,7 +316,7 @@ def main():
         sample = dataset[dataset_index]
         batch = move_sample(sample, device)
         target = target_graph(model, batch)
-        images = [render(target)]
+        images = [render(target, sample, tensor_config)]
         record = {
             "sample_id": sample["sample_id"],
             "target": graph_stats(target),
@@ -282,7 +329,7 @@ def main():
             torch.cuda.manual_seed_all(seed)
             output = model.generate(batch, temperature=args.temperature)
             generated = generated_graph(model, output)
-            images.append(render(generated))
+            images.append(render(generated, sample, tensor_config))
             stats = graph_stats(generated)
             stats["seed"] = seed_index
             record["generations"].append(stats)
