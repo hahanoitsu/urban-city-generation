@@ -17,9 +17,9 @@ class StructuredCityConfig:
     edge_slots: int = 640
     building_slots: int = 384
     area_slots: int = 96
-    edge_shape_points: int = 8
+    edge_shape_points: int = 16
     building_points: int = 24
-    area_points: int = 32
+    area_points: int = 48
     area_classes: int = 6
     model_dimensions: int = 256
     attention_heads: int = 8
