@@ -5,6 +5,7 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MAIN_ROOT="$(cd "$SCRIPT_ROOT/.." && pwd)/urban-city-generation"
 DATA="${CONTEXT_DATA:-$MAIN_ROOT/data/context-graph-v1/singapore}"
 OUTPUT="${STRUCTURED_RUN:-$MAIN_ROOT/runs/structured-city-v1}"
+CACHE="${STRUCTURED_CACHE:-$MAIN_ROOT/data/structured-city-cache-v1}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate urban-city
@@ -28,6 +29,8 @@ ARGS=(
     --buildings "${BUILDING_SLOTS:-512}"
     --areas "${AREA_SLOTS:-160}"
     --ports "${PORT_SLOTS:-96}"
+    --cache-dir "$CACHE"
+    --save-every "${SAVE_EVERY:-5}"
 )
 
 if [[ -n "${MAXIMUM_SAMPLES:-}" ]]; then
