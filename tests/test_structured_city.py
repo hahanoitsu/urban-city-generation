@@ -38,6 +38,7 @@ def test_structured_city_forward():
         "building_height": torch.randn(batch, 20, 1),
         "building_base_z": torch.randn(batch, 20, 1),
         "building_presence": torch.randint(0, 3, (batch, 20)),
+        "building_kind": torch.randint(0, 9, (batch, 20)),
         "area_shape": torch.randn(batch, 8, 8, 2),
         "area_presence": torch.randint(0, 3, (batch, 8)),
         "area_kind": torch.randint(0, 4, (batch, 8)),
