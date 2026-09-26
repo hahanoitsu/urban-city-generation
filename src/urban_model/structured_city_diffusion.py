@@ -58,8 +58,10 @@ def corrupt_scene(
         "edge_from",
         "edge_to",
         "edge_width_valid",
+        "edge_width_weight",
         "edge_z_valid",
         "building_height_valid",
+        "building_height_weight",
         "building_base_z_valid",
     ):
         result[name] = scene[name]
@@ -74,8 +76,20 @@ def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (values * mask).sum() / denominator
 
 
-def _mse(prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    return _masked_mean((prediction - target) ** 2, mask)
+def _mse(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    weight: torch.Tensor | None = None,
+) -> torch.Tensor:
+    values = (prediction - target) ** 2
+    if weight is None:
+        return _masked_mean(values, mask)
+    combined = mask.to(values.dtype) * weight.to(values.dtype)
+    while combined.ndim < values.ndim:
+        combined = combined.unsqueeze(-1)
+    denominator = combined.expand_as(values).sum().clamp_min(1.0)
+    return (values * combined).sum() / denominator
 
 
 def _ce(
@@ -147,6 +161,7 @@ def structured_city_loss(
             output["edge_width"],
             target["edge_width"],
             edge & target["edge_width_valid"],
+            target["edge_width_weight"],
         ),
         "edge_xy": edge_xy,
         "edge_z": edge_z,
@@ -164,6 +179,7 @@ def structured_city_loss(
             output["building_height"],
             target["building_height"],
             building & target["building_height_valid"],
+            target["building_height_weight"],
         ),
         "building_base_z": _mse(
             output["building_base_z"],
