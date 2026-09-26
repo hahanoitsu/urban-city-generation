@@ -76,6 +76,17 @@ def main():
             values = [point_local(x, y) for x, y in record["geometry_local_m"]]
             draw.line(values, fill=(120, 165, 195), width=1)
 
+        for key, fill in (
+            ("landuse", (235, 231, 214)),
+            ("green", (194, 220, 183)),
+            ("water", (177, 211, 230)),
+        ):
+            for record in payload["target"][key]:
+                geometry = shape(record["geometry_local_m"])
+                for polygon in polygons(geometry):
+                    values = [point_local(x, y) for x, y in polygon.exterior.coords]
+                    draw.polygon(values, fill=fill)
+
         for record in payload["target"]["buildings"]:
             geometry = shape(record["footprint_local_m"])
             for polygon in polygons(geometry):
@@ -101,7 +112,8 @@ def main():
 
         title = (
             f"{row['id']}  nodes={row['nodes']} edges={row['edges']} "
-            f"buildings={row['buildings']} visible={row['visible_roads'] + row['visible_rail']}"
+            f"buildings={row['buildings']} green={row['green']} water={row['water']} "
+            f"visible={row['visible_roads'] + row['visible_rail']}"
         )
         draw.rectangle([0, 0, size, 28], fill=(255, 255, 255))
         draw.text((8, 8), title, fill=(0, 0, 0))
