@@ -27,9 +27,9 @@ class SpatialTensorConfig:
     local_vector_size_m: float = 2560.0
     context_line_points: int = 6
     edge_shape_points: int = 8
-    max_context_lines: int = 512
+    max_context_lines: int = 768
     max_ports: int = 128
-    max_nodes: int = 256
+    max_nodes: int = 384
     max_edges: int = 512
     width_scale_m: float = 32.0
 
@@ -96,12 +96,17 @@ def _prepare_context_lines(
     payload: dict[str, Any],
     config: SpatialTensorConfig,
 ) -> dict[str, torch.Tensor]:
-    records = [
-        *payload["input"]["visible_transport"].get("roads", []),
-        *payload["input"]["visible_transport"].get("rail", []),
-    ]
-    records.sort(key=lambda value: _line_distance(value, config.target_size_m))
-    records = records[: config.max_context_lines]
+    roads = list(payload["input"]["visible_transport"].get("roads", []))
+    rail = list(payload["input"]["visible_transport"].get("rail", []))
+    priority = {"major": 0, "secondary": 1, "local": 2}
+    rail.sort(key=lambda value: _line_distance(value, config.target_size_m))
+    roads.sort(
+        key=lambda value: (
+            priority.get(str(value.get("class")), 3),
+            _line_distance(value, config.target_size_m),
+        )
+    )
+    records = [*rail, *roads][: config.max_context_lines]
 
     points = np.zeros(
         (config.max_context_lines, config.context_line_points, 2),
@@ -360,19 +365,23 @@ class SpatialWorldDataset(torch.utils.data.Dataset):
                 dtype=np.float32,
             )
             for index, cell in enumerate(cells):
-                raw = np.asarray(
-                    [float(cell["features"].get(name, 0.0)) for name in self.feature_names],
-                    dtype=np.float32,
-                )
+                if cell["features"]:
+                    raw = np.asarray(
+                        [
+                            float(cell["features"].get(name, 0.0))
+                            for name in self.feature_names
+                        ],
+                        dtype=np.float32,
+                    )
+                    context[index, : len(self.feature_names)] = (
+                        raw - self.feature_mean
+                    ) / self.feature_std
                 center = np.asarray(cell["center_local_m"], dtype=np.float32)
                 center = _normalise_context_xy(
                     center[None],
                     self.config.target_size_m,
                     self.config.context_size_m,
                 )[0]
-                context[index, : len(self.feature_names)] = (
-                    raw - self.feature_mean
-                ) / self.feature_std
                 context[index, -3:-1] = center
                 context[index, -1] = float(cell["masked_fraction"])
 
