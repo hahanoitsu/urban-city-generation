@@ -79,14 +79,21 @@ class RelationContextEncoder(nn.Module):
         )
         self.norms = nn.ModuleList([nn.LayerNorm(d) for _ in range(config.context_layers)])
 
-    def forward(self, values: torch.Tensor, relations: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        values: torch.Tensor,
+        relations: torch.Tensor,
+        padding: torch.Tensor,
+    ) -> torch.Tensor:
         hidden = self.input(values)
+        hidden = hidden.masked_fill(padding[:, :, None], 0.0)
         for layer, norm in zip(self.layers, self.norms, strict=True):
             neighbours = [
                 torch.matmul(relations[:, index], hidden)
                 for index in range(relations.shape[1])
             ]
             hidden = norm(hidden + layer(torch.cat([hidden, *neighbours], dim=-1)))
+            hidden = hidden.masked_fill(padding[:, :, None], 0.0)
         return hidden
 
 
@@ -210,26 +217,17 @@ class StructuredCityDenoiser(nn.Module):
         scene: dict[str, torch.Tensor],
         context_values: torch.Tensor,
         relations: torch.Tensor,
+        context_padding: torch.Tensor,
         ports: torch.Tensor,
         port_padding: torch.Tensor,
         diffusion_time: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         time = self.time(diffusion_time)
-        context = self.context(context_values, relations)
+        context = self.context(context_values, relations, context_padding)
         port_memory = self.port(ports)
         port_memory = port_memory.masked_fill(port_padding[:, :, None], 0.0)
         context_memory = torch.cat([context, port_memory], dim=1)
-        context_padding = torch.cat(
-            [
-                torch.zeros(
-                    context.shape[:2],
-                    dtype=torch.bool,
-                    device=context.device,
-                ),
-                port_padding,
-            ],
-            dim=1,
-        )
+        context_padding = torch.cat([context_padding, port_padding], dim=1)
 
         node_hidden = self.nodes(
             scene["node_position"],
