@@ -11,6 +11,7 @@ def test_spatial_anchor_architect_forward_and_loss():
         grid_size=4,
         slots_per_cell=3,
         max_active_nodes=12,
+        max_edges=16,
         context_line_points=4,
         edge_shape_points=3,
         model_dimensions=64,
@@ -81,21 +82,34 @@ def test_spatial_anchor_architect_forward_and_loss():
         deterministic_a["node_offset"],
         deterministic_b["node_offset"],
     )
-    assert output["cell_count"].shape == (batch_size, cells, slots + 1)
+    assert output["global_node_count"].shape == (batch_size,)
+    assert output["global_edge_count"].shape == (batch_size,)
+    assert output["cell_occupancy"].shape == (batch_size, cells)
+    assert output["cell_count"].shape == (batch_size, cells, slots)
     assert output["slot_score"].shape == (batch_size, cells, slots)
     assert output["node_offset"].shape == (batch_size, cells, slots, 2)
-    assert output["edge_relation"].shape == (batch_size, active, active, 9)
+    assert output["edge_exists"].shape == (batch_size, active, active)
+    assert output["edge_class"].shape == (batch_size, active, active, 8)
 
-    loss, metrics = spatial_anchor_loss(output, batch, kl_weight=0.01)
+    loss, metrics = spatial_anchor_loss(
+        output,
+        batch,
+        kl_weight=0.01,
+        max_active_nodes=12,
+        max_edges=16,
+    )
     model.eval()
     generated = model.generate(batch, temperature=0.0)
     assert generated["active_anchor_ids"].shape == (batch_size, 12)
     assert generated["active_count"].shape == (batch_size,)
-    assert generated["edge_relation"].shape == (batch_size, 12, 12, 9)
+    assert generated["edge_exists"].shape == (batch_size, 12, 12)
+    assert generated["edge_class"].shape == (batch_size, 12, 12, 8)
+    assert generated["predicted_edge_count"].shape == (batch_size,)
+    assert torch.all(model._decode_count(torch.zeros(2), 12) > 0)
     model.train()
     loss.backward()
     assert torch.isfinite(loss)
-    assert "edge_relation" in metrics
+    assert "edge_exists" in metrics
     unused = [
         name
         for name, parameter in model.named_parameters()
