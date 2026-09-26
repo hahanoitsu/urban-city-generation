@@ -124,6 +124,7 @@ class SlotDecoder(nn.Module):
         continuous: torch.Tensor,
         categories: tuple[torch.Tensor, ...],
         memory: torch.Tensor,
+        memory_padding: torch.Tensor,
         time: torch.Tensor,
     ) -> torch.Tensor:
         batch, slots, _dimensions = continuous.shape
@@ -132,7 +133,13 @@ class SlotDecoder(nn.Module):
             hidden = hidden + embedding(values)
         indexes = torch.arange(slots, device=continuous.device)
         hidden = hidden + self.slots(indexes)[None] + time[:, None]
-        return self.norm(self.decoder(hidden, memory))
+        return self.norm(
+            self.decoder(
+                hidden,
+                memory,
+                memory_key_padding_mask=memory_padding,
+            )
+        )
 
 
 class StructuredCityDenoiser(nn.Module):
@@ -212,11 +219,23 @@ class StructuredCityDenoiser(nn.Module):
         port_memory = self.port(ports)
         port_memory = port_memory.masked_fill(port_padding[:, :, None], 0.0)
         context_memory = torch.cat([context, port_memory], dim=1)
+        context_padding = torch.cat(
+            [
+                torch.zeros(
+                    context.shape[:2],
+                    dtype=torch.bool,
+                    device=context.device,
+                ),
+                port_padding,
+            ],
+            dim=1,
+        )
 
         node_hidden = self.nodes(
             scene["node_position"],
             (scene["node_presence"],),
             context_memory,
+            context_padding,
             time,
         )
         node_position = self.node_position(node_hidden)
@@ -229,6 +248,17 @@ class StructuredCityDenoiser(nn.Module):
             dim=-1,
         )
         edge_memory = torch.cat([context_memory, node_hidden], dim=1)
+        edge_padding = torch.cat(
+            [
+                context_padding,
+                torch.zeros(
+                    node_hidden.shape[:2],
+                    dtype=torch.bool,
+                    device=node_hidden.device,
+                ),
+            ],
+            dim=1,
+        )
         edge_hidden = self.edges(
             edge_continuous,
             (
@@ -238,6 +268,7 @@ class StructuredCityDenoiser(nn.Module):
                 scene["edge_vertical"],
             ),
             edge_memory,
+            edge_padding,
             time,
         )
 
@@ -262,10 +293,22 @@ class StructuredCityDenoiser(nn.Module):
             dim=-1,
         )
         building_memory = torch.cat([context_memory, node_hidden, edge_hidden], dim=1)
+        object_padding = torch.cat(
+            [
+                context_padding,
+                torch.zeros(
+                    (node_hidden.shape[0], node_hidden.shape[1] + edge_hidden.shape[1]),
+                    dtype=torch.bool,
+                    device=node_hidden.device,
+                ),
+            ],
+            dim=1,
+        )
         building_hidden = self.buildings(
             building_continuous,
             (scene["building_presence"],),
             building_memory,
+            object_padding,
             time,
         )
 
@@ -274,6 +317,7 @@ class StructuredCityDenoiser(nn.Module):
             scene["area_shape"].flatten(2),
             (scene["area_presence"], scene["area_kind"]),
             area_memory,
+            object_padding,
             time,
         )
 
