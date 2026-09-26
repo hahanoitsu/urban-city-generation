@@ -335,17 +335,29 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--samples", type=int, default=8)
     parser.add_argument("--steps", type=int, default=40)
+    parser.add_argument("--cache-dir", type=Path)
     args = parser.parse_args()
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     model_config = StructuredCityConfig.from_dict(checkpoint["model_config"])
     scene_config = SceneTensorConfig(**checkpoint["scene_config"])
-    dataset = StructuredCityDataset(args.data, config=scene_config)
-    indexes = [
+    dataset = StructuredCityDataset(
+        args.data,
+        config=scene_config,
+        cache_dir=args.cache_dir,
+    )
+    candidates = [
         index
-        for index, (row, _payload) in enumerate(dataset.samples)
+        for index, (row, _payload, _scene) in enumerate(dataset.samples)
         if region_bucket(str(row["parent_region_id"])) >= 88
-    ][: args.samples]
+    ]
+    candidates.sort(
+        key=lambda index: hashlib.sha1(
+            str(dataset.samples[index][0]["id"]).encode("utf-8"),
+            usedforsecurity=False,
+        ).digest()
+    )
+    indexes = candidates[: args.samples]
     if not indexes:
         raise RuntimeError("No held-out test samples available")
 
