@@ -23,6 +23,7 @@ CATEGORY_MASKS = {
     "edge_class": 7,
     "edge_vertical": 4,
     "building_presence": 2,
+    "building_kind": 8,
     "area_presence": 2,
     "area_kind": 6,
 }
@@ -169,6 +170,11 @@ def structured_city_loss(
             output["building_presence"],
             target["building_presence"],
             balance_presence=True,
+        ),
+        "building_kind": _ce(
+            output["building_kind"],
+            target["building_kind"],
+            building,
         ),
         "building_shape": _mse(
             output["building_shape"],
