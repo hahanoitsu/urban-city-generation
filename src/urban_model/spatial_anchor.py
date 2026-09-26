@@ -339,6 +339,73 @@ class SpatialAnchorArchitect(nn.Module):
         )
         return output
 
+
+    def _predicted_active_ids(
+        self,
+        cell_count: torch.Tensor,
+        slot_score: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch = cell_count.shape[0]
+        slots = self.config.slots_per_cell
+        maximum = self.config.max_active_nodes
+        counts = cell_count.argmax(dim=-1)
+        active_ids = torch.zeros(
+            (batch, maximum),
+            dtype=torch.long,
+            device=cell_count.device,
+        )
+        active_count = torch.zeros(
+            batch,
+            dtype=torch.long,
+            device=cell_count.device,
+        )
+        for batch_index in range(batch):
+            values = []
+            for cell in range(counts.shape[1]):
+                count = min(int(counts[batch_index, cell]), slots)
+                if count <= 0:
+                    continue
+                chosen = torch.topk(
+                    slot_score[batch_index, cell],
+                    k=count,
+                ).indices
+                values.extend(
+                    cell * slots + int(slot)
+                    for slot in chosen
+                )
+            values = values[:maximum]
+            active_count[batch_index] = len(values)
+            if values:
+                active_ids[batch_index, : len(values)] = torch.tensor(
+                    values,
+                    dtype=torch.long,
+                    device=cell_count.device,
+                )
+        return active_ids, active_count
+
+    @torch.inference_mode()
+    def generate(
+        self,
+        batch: dict[str, torch.Tensor],
+        *,
+        temperature: float = 1.0,
+    ) -> dict[str, torch.Tensor]:
+        output = self.generate_nodes(batch, temperature=temperature)
+        active_ids, active_count = self._predicted_active_ids(
+            output["cell_count"],
+            output["slot_score"],
+        )
+        active_hidden, active_positions = self._active_nodes(
+            output["node_hidden"],
+            output["node_positions"],
+            active_ids,
+        )
+        output.update(self.edge_predictions(active_hidden, active_positions))
+        output["active_anchor_ids"] = active_ids
+        output["active_count"] = active_count
+        output["active_positions"] = active_positions
+        return output
+
     @torch.inference_mode()
     def generate_nodes(
         self,
