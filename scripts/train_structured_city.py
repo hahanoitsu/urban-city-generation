@@ -139,7 +139,15 @@ def run_epoch(model, loader, dataset, device, optimizer=None):
                 loss, current = structured_city_loss(output, target)
             if training:
                 loss.backward()
-                clip_grad_norm_(model.parameters(), 1.0)
+                clip_grad_norm_(
+                    (
+                        parameter
+                        for parameter in model.parameters()
+                        if parameter.requires_grad
+                    ),
+                    1.0,
+                    foreach=True,
+                )
                 optimizer.step()
             loss_sum += float(loss.detach())
             batches += 1
@@ -222,7 +230,15 @@ def main():
         area_points=scene_config.area_points,
     )
     model = StructuredCityDenoiser(model_config).to(device)
-    optimizer = AdamW(model.parameters(), lr=2e-4, weight_decay=0.01)
+    trainable_parameters = [
+        parameter for parameter in model.parameters() if parameter.requires_grad
+    ]
+    optimizer = AdamW(
+        trainable_parameters,
+        lr=2e-4,
+        weight_decay=0.01,
+        fused=True,
+    )
 
     start_epoch = 0
     best = math.inf
@@ -246,6 +262,8 @@ def main():
             device_ids=[local_rank],
             output_device=local_rank,
             broadcast_buffers=False,
+            gradient_as_bucket_view=True,
+            static_graph=True,
         )
 
     train_subset = Subset(dataset, splits["train"])
