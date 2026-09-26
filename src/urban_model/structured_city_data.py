@@ -62,10 +62,10 @@ RELATIONS = (
 class SceneTensorConfig:
     target_size_m: float = 512.0
     region_size_m: float = 2048.0
-    node_slots: int = 384
-    edge_slots: int = 640
-    building_slots: int = 384
-    area_slots: int = 96
+    node_slots: int = 448
+    edge_slots: int = 512
+    building_slots: int = 512
+    area_slots: int = 160
     edge_shape_points: int = 16
     building_points: int = 24
     area_points: int = 48
@@ -535,19 +535,33 @@ class StructuredCityDataset(torch.utils.data.Dataset):
             if line.strip()
         ]
         accepted = []
+        rejected = {
+            "ports": 0,
+            "nodes": 0,
+            "edges": 0,
+            "buildings": 0,
+            "areas": 0,
+        }
         for row in rows:
             if row["boundary_ports"] > self.config.maximum_ports:
+                rejected["ports"] += 1
                 continue
             path = self.root / row["sample_path"]
             with gzip.open(path, "rt", encoding="utf-8") as handle:
                 payload = json.load(handle)
             counts = scene_counts(payload, self.config)
-            if (
-                counts["nodes"] > self.config.node_slots
-                or counts["edges"] > self.config.edge_slots
-                or counts["buildings"] > self.config.building_slots
-                or counts["areas"] > self.config.area_slots
-            ):
+            over = []
+            if counts["nodes"] > self.config.node_slots:
+                over.append("nodes")
+            if counts["edges"] > self.config.edge_slots:
+                over.append("edges")
+            if counts["buildings"] > self.config.building_slots:
+                over.append("buildings")
+            if counts["areas"] > self.config.area_slots:
+                over.append("areas")
+            if over:
+                for name in over:
+                    rejected[name] += 1
                 continue
             accepted.append((row, payload))
         if maximum_samples is not None and len(accepted) > maximum_samples:
@@ -561,6 +575,9 @@ class StructuredCityDataset(torch.utils.data.Dataset):
         if not accepted:
             raise RuntimeError("No structured city samples fit the configured slots")
         self.samples = accepted
+        self.total_rows = len(rows)
+        self.rejected = rejected
+        self.accepted_before_limit = len(accepted)
         self.port_dimensions = 23
         self.context_dimensions = len(self.feature_names) + 3
         self.context_slots = (self.config.context_radius_regions * 2 + 1) ** 2
