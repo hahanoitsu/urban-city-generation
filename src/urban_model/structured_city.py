@@ -202,6 +202,7 @@ class StructuredCityDenoiser(nn.Module):
         self.building_shape = nn.Linear(d, config.building_points * 2)
         self.building_height = nn.Linear(d, 1)
         self.building_base_z = nn.Linear(d, 1)
+        self.building_base_z.requires_grad_(False)
 
         self.areas = SlotDecoder(
             slots=config.area_slots,
