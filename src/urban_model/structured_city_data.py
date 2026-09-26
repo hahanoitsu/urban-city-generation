@@ -27,6 +27,16 @@ ROAD_CLASSES = ("major", "secondary", "local")
 RAIL_CLASSES = ("rail", "subway", "light_rail", "tram")
 CLASSES = (*ROAD_CLASSES, *RAIL_CLASSES)
 VERTICAL = ("surface", "underground", "elevated", "unknown")
+BUILDING_KINDS = (
+    "generic",
+    "lowrise_residential",
+    "multi_residential",
+    "commercial",
+    "industrial",
+    "civic",
+    "transport",
+    "ancillary",
+)
 AREA_KINDS = (
     "green",
     "water",
@@ -200,6 +210,41 @@ def _vertical_index(value: str) -> int:
     return VERTICAL.index(value) if value in VERTICAL else VERTICAL.index("unknown")
 
 
+def _building_kind(value: str) -> int:
+    value = value.strip().lower()
+    lowrise = {"residential", "house", "terrace", "semidetached_house", "detached"}
+    multi = {"apartments", "dormitory"}
+    commercial = {"commercial", "retail", "office", "hotel"}
+    industrial = {"industrial", "warehouse", "construction", "storage_tank"}
+    civic = {
+        "school",
+        "public",
+        "hospital",
+        "university",
+        "college",
+        "kindergarten",
+        "church",
+        "temple",
+    }
+    transport = {"train_station", "transportation", "parking"}
+    ancillary = {"roof", "garage", "service"}
+    if value in lowrise:
+        return BUILDING_KINDS.index("lowrise_residential")
+    if value in multi:
+        return BUILDING_KINDS.index("multi_residential")
+    if value in commercial:
+        return BUILDING_KINDS.index("commercial")
+    if value in industrial:
+        return BUILDING_KINDS.index("industrial")
+    if value in civic:
+        return BUILDING_KINDS.index("civic")
+    if value in transport:
+        return BUILDING_KINDS.index("transport")
+    if value in ancillary:
+        return BUILDING_KINDS.index("ancillary")
+    return BUILDING_KINDS.index("generic")
+
+
 def _polygon_records(payload: dict[str, Any]) -> list[tuple[str, Polygon]]:
     result = []
     for record in payload["target"].get("landuse", []):
@@ -348,6 +393,7 @@ def encode_scene(payload: dict[str, Any], config: SceneTensorConfig) -> dict[str
         (config.building_slots, config.building_points, 2),
         dtype=np.float32,
     )
+    building_kind = np.zeros(config.building_slots, dtype=np.int64)
     building_height = np.zeros((config.building_slots, 1), dtype=np.float32)
     building_height_valid = np.zeros(config.building_slots, dtype=bool)
     building_height_weight = np.zeros(config.building_slots, dtype=np.float32)
@@ -355,6 +401,7 @@ def encode_scene(payload: dict[str, Any], config: SceneTensorConfig) -> dict[str
     building_base_z_valid = np.zeros(config.building_slots, dtype=bool)
     for index, (_y, _x, _id, polygon, record) in enumerate(building_records):
         building_presence[index] = 1
+        building_kind[index] = _building_kind(str(record.get("building_type", "unknown")))
         building_shape[index] = _normalise_xy(
             _resample_ring(polygon, config.building_points),
             config.target_size_m,
@@ -404,6 +451,7 @@ def encode_scene(payload: dict[str, Any], config: SceneTensorConfig) -> dict[str
         "edge_shape": torch.from_numpy(edge_shape),
         "edge_z_valid": torch.from_numpy(edge_z_valid),
         "building_presence": torch.from_numpy(building_presence),
+        "building_kind": torch.from_numpy(building_kind),
         "building_shape": torch.from_numpy(building_shape),
         "building_height": torch.from_numpy(building_height),
         "building_height_valid": torch.from_numpy(building_height_valid),
