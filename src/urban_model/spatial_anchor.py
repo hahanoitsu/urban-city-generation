@@ -307,6 +307,7 @@ class SpatialAnchorArchitect(nn.Module):
         batch: dict[str, torch.Tensor],
         *,
         use_posterior: bool = True,
+        sample_latent: bool = True,
     ) -> dict[str, torch.Tensor]:
         memory, padding, _pool = self.context(batch)
         cells = self._cell_field(memory, padding)
@@ -314,7 +315,11 @@ class SpatialAnchorArchitect(nn.Module):
         prior_mu, prior_logvar, posterior_mu, posterior_logvar = (
             self._latent_parameters(cells, target)
         )
-        latent = self._sample(posterior_mu, posterior_logvar)
+        latent = (
+            self._sample(posterior_mu, posterior_logvar)
+            if sample_latent
+            else posterior_mu
+        )
         output = self._node_predictions(cells, latent)
         positions = self.node_positions(output["node_offset"])
         active_hidden, active_positions = self._active_nodes(
