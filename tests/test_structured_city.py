@@ -58,6 +58,10 @@ def test_structured_city_forward():
         port_padding,
         time,
     )
+    assert output["node_count"].shape == (batch, 1)
+    assert output["edge_count"].shape == (batch, 1)
+    assert output["building_count"].shape == (batch, 1)
+    assert output["area_count"].shape == (batch, 1)
     assert output["node_position"].shape == (batch, 16, 3)
     assert output["edge_from"].shape == (batch, 24, 16)
     assert output["edge_shape"].shape == (batch, 24, 4, 3)
