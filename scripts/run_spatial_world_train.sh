@@ -42,9 +42,9 @@ ARGS=(
     --kl-weight "${KL_WEIGHT:-0.02}"
     --kl-warmup "${KL_WARMUP:-10}"
     --control-dropout "${CONTROL_DROPOUT:-0.5}"
-    --max-nodes "${MAX_NODES:-256}"
+    --max-nodes "${MAX_NODES:-384}"
     --max-edges "${MAX_EDGES:-512}"
-    --max-context-lines "${MAX_CONTEXT_LINES:-512}"
+    --max-context-lines "${MAX_CONTEXT_LINES:-768}"
     --max-ports "${MAX_PORTS:-128}"
     --save-every "${SAVE_EVERY:-5}"
 )
