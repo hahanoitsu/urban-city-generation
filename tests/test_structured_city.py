@@ -63,3 +63,17 @@ def test_structured_city_forward():
     assert output["edge_shape"].shape == (batch, 24, 4, 3)
     assert output["building_shape"].shape == (batch, 20, 6, 2)
     assert output["area_shape"].shape == (batch, 8, 8, 2)
+
+    assert not any(parameter.requires_grad for parameter in model.building_base_z.parameters())
+    loss = sum(
+        value.float().sum()
+        for name, value in output.items()
+        if name != "building_base_z"
+    )
+    loss.backward()
+    unused = [
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and parameter.grad is None
+    ]
+    assert unused == []
