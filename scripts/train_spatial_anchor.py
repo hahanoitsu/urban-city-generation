@@ -70,10 +70,13 @@ def run_epoch(
     loader,
     device,
     *,
+    max_active_nodes,
+    max_edges,
     optimizer=None,
     kl_weight=0.0,
     use_posterior=True,
     control_dropout=0.0,
+    drop_controls=False,
 ):
     training = optimizer is not None
     model.train(training)
@@ -86,7 +89,9 @@ def run_epoch(
         for batch in loader:
             batch = move_batch(batch, device)
             batch_size = int(batch["context_cells"].shape[0])
-            if training and control_dropout > 0:
+            if drop_controls:
+                batch["controls"] = torch.zeros_like(batch["controls"])
+            elif training and control_dropout > 0:
                 keep = (
                     torch.rand(batch_size, 1, device=device) >= control_dropout
                 ).to(batch["controls"].dtype)
@@ -105,6 +110,8 @@ def run_epoch(
                     output,
                     batch,
                     kl_weight=kl_weight,
+                    max_active_nodes=max_active_nodes,
+                    max_edges=max_edges,
                 )
 
             if training:
@@ -194,6 +201,7 @@ def main():
         grid_size=anchor_config.grid_size,
         slots_per_cell=anchor_config.slots_per_cell,
         max_active_nodes=anchor_config.max_active_nodes,
+        max_edges=anchor_config.max_edges,
         context_line_points=tensor_config.context_line_points,
         edge_shape_points=tensor_config.edge_shape_points,
     )
@@ -300,6 +308,8 @@ def main():
             model,
             train_loader,
             device,
+            max_active_nodes=anchor_config.max_active_nodes,
+            max_edges=anchor_config.max_edges,
             optimizer=optimizer,
             kl_weight=kl_weight,
             use_posterior=True,
@@ -309,6 +319,8 @@ def main():
             model,
             validation_loader,
             device,
+            max_active_nodes=anchor_config.max_active_nodes,
+            max_edges=anchor_config.max_edges,
             kl_weight=kl_weight,
             use_posterior=True,
         )
@@ -316,8 +328,20 @@ def main():
             model,
             validation_loader,
             device,
+            max_active_nodes=anchor_config.max_active_nodes,
+            max_edges=anchor_config.max_edges,
             kl_weight=0.0,
             use_posterior=False,
+        )
+        context_prior = run_epoch(
+            model,
+            validation_loader,
+            device,
+            max_active_nodes=anchor_config.max_active_nodes,
+            max_edges=anchor_config.max_edges,
+            kl_weight=0.0,
+            use_posterior=False,
+            drop_controls=True,
         )
 
         epoch_seconds = time.time() - epoch_started
@@ -329,6 +353,7 @@ def main():
                 "train": train,
                 "validation": validation,
                 "prior": prior,
+                "context_prior": context_prior,
                 "seconds": elapsed,
             }
             with (args.output / "metrics.jsonl").open("a", encoding="utf-8") as handle:
@@ -356,10 +381,13 @@ def main():
             print(
                 f"epoch={epoch}/{args.epochs} "
                 f"train={train['loss']:.4f} val={validation['loss']:.4f} "
-                f"prior={prior['loss']:.4f} kl={validation['parts']['kl']:.4f} "
-                f"cell_count={parts['cell_count']:.4f} "
+                f"prior={prior['loss']:.4f} context={context_prior['loss']:.4f} "
+                f"kl={validation['parts']['kl']:.4f} "
+                f"node_count={parts['node_count']:.4f} edge_count={parts['edge_count']:.4f} "
+                f"cell={parts['cell_occupancy']:.4f}/{parts['cell_count']:.4f} "
                 f"slot={parts['slot_score']:.4f} offset={parts['node_offset']:.4f} "
-                f"edge={parts['edge_relation']:.4f} shape={parts['edge_shape']:.4f} "
+                f"edge={parts['edge_exists']:.4f}/{parts['edge_class']:.4f} "
+                f"shape={parts['edge_shape']:.4f} "
                 f"epoch_s={epoch_seconds:.1f} elapsed_min={elapsed / 60.0:.1f}",
                 flush=True,
             )
