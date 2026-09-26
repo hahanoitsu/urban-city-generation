@@ -282,7 +282,7 @@ def _prepare_target_graph(
 def geographic_split(row: dict[str, Any], group_size: int = 5) -> str:
     sample_id = str(row["id"])
     parts = sample_id.rsplit("_", 2)
-    grid_row = int(parts[-2])
+    grid_row = int(parts[-2].removeprefix("w"))
     grid_column = int(parts[-1])
     parent = f"{grid_row // group_size}:{grid_column // group_size}"
     value = int.from_bytes(
