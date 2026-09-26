@@ -564,6 +564,7 @@ class StructuredCityDataset(torch.utils.data.Dataset):
                     rejected[name] += 1
                 continue
             accepted.append((row, payload))
+        accepted_before_limit = len(accepted)
         if maximum_samples is not None and len(accepted) > maximum_samples:
             accepted.sort(
                 key=lambda item: hashlib.sha1(
@@ -577,7 +578,7 @@ class StructuredCityDataset(torch.utils.data.Dataset):
         self.samples = accepted
         self.total_rows = len(rows)
         self.rejected = rejected
-        self.accepted_before_limit = len(accepted)
+        self.accepted_before_limit = accepted_before_limit
         self.port_dimensions = 23
         self.context_dimensions = len(self.feature_names) + 3
         self.context_slots = (self.config.context_radius_regions * 2 + 1) ** 2
@@ -632,7 +633,9 @@ class StructuredCityDataset(torch.utils.data.Dataset):
 
         if indexes:
             global_indexes = np.asarray(indexes, dtype=np.int64)
-            local_relations = self.global_relations[:, global_indexes][:, :, global_indexes]
+            local_relations = self.global_relations[:, global_indexes][:, :, global_indexes].copy()
+            local_degree = local_relations.sum(axis=2, keepdims=True)
+            local_relations /= np.maximum(local_degree, 1e-8)
             count = len(indexes)
             relations[:, :count, :count] = local_relations
 
