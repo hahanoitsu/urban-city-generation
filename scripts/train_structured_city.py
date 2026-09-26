@@ -33,6 +33,7 @@ SCENE_FIELDS = (
     "edge_shape",
     "edge_z_valid",
     "building_presence",
+    "building_kind",
     "building_shape",
     "building_height",
     "building_height_valid",
