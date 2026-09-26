@@ -14,7 +14,10 @@ export EDGE_SLOTS="${EDGE_SLOTS:-512}"
 export BUILDING_SLOTS="${BUILDING_SLOTS:-512}"
 export AREA_SLOTS="${AREA_SLOTS:-160}"
 export PORT_SLOTS="${PORT_SLOTS:-96}"
+export NUM_GPUS="${NUM_GPUS:-1}"
 
-rm -rf "$STRUCTURED_RUN"
+if [[ -z "${RESUME_CHECKPOINT:-}" ]]; then
+    rm -rf "$STRUCTURED_RUN"
+fi
 
 bash "$SCRIPT_ROOT/scripts/run_structured_city.sh"
