@@ -88,12 +88,7 @@ def run_epoch(model, loader, dataset, device, optimizer=None):
                 else torch.full((batch["context"].shape[0],), 0.5, device=device)
             )
             noisy = corrupt_scene(target, time_values)
-            relations = dataset.relations.to(device).unsqueeze(0).expand(
-                batch["context"].shape[0],
-                -1,
-                -1,
-                -1,
-            )
+            relations = batch["relations"]
             if training:
                 optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -101,6 +96,7 @@ def run_epoch(model, loader, dataset, device, optimizer=None):
                     noisy,
                     batch["context"],
                     relations,
+                    batch["context_padding"],
                     batch["ports"],
                     batch["port_padding"],
                     time_values,
