@@ -116,3 +116,87 @@ def test_spatial_anchor_architect_forward_and_loss():
         if parameter.requires_grad and parameter.grad is None
     ]
     assert unused == []
+
+
+
+def test_spatial_anchor_prior_overfits_nonempty_graph():
+    torch.manual_seed(7)
+    config = SpatialAnchorModelConfig(
+        context_dimensions=4,
+        style_dimensions=2,
+        grid_size=2,
+        slots_per_cell=2,
+        max_active_nodes=8,
+        max_edges=8,
+        context_line_points=2,
+        edge_shape_points=2,
+        model_dimensions=32,
+        latent_dimensions=8,
+        heads=4,
+        context_layers=1,
+        cell_layers=1,
+        feedforward_dimensions=64,
+        edge_dimensions=16,
+        dropout=0.0,
+    )
+    model = SpatialAnchorArchitect(config)
+    batch = {
+        "context_cells": torch.randn(1, 4, 4),
+        "style": torch.randn(1, 2),
+        "controls": torch.randn(1, 2),
+        "context_line_points": torch.randn(1, 2, 2, 2),
+        "context_line_mode": torch.zeros(1, 2, dtype=torch.long),
+        "context_line_class": torch.zeros(1, 2, dtype=torch.long),
+        "context_line_vertical": torch.zeros(1, 2, dtype=torch.long),
+        "context_line_width": torch.ones(1, 2, 1),
+        "context_line_length": torch.ones(1, 2, 1),
+        "context_line_padding": torch.zeros(1, 2, dtype=torch.bool),
+        "ports": torch.zeros(1, 2, 5),
+        "port_mode": torch.zeros(1, 2, dtype=torch.long),
+        "port_class": torch.zeros(1, 2, dtype=torch.long),
+        "port_vertical": torch.zeros(1, 2, dtype=torch.long),
+        "port_padding": torch.zeros(1, 2, dtype=torch.bool),
+        "cell_count": torch.tensor([[2, 2, 2, 0]]),
+        "slot_presence": torch.tensor(
+            [[[1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [0.0, 0.0]]]
+        ),
+        "node_offset": torch.zeros(1, 4, 2, 2),
+        "node_mode": torch.zeros(1, 4, 2, dtype=torch.long),
+        "node_vertical": torch.zeros(1, 4, 2, dtype=torch.long),
+        "node_boundary": torch.zeros(1, 4, 2),
+        "active_count": torch.tensor([6]),
+        "active_anchor_ids": torch.tensor([[0, 1, 2, 3, 4, 5, 0, 0]]),
+        "edge_count": torch.tensor([5]),
+        "edge_pairs": torch.tensor(
+            [[[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 0], [0, 0], [0, 0]]]
+        ),
+        "edge_class": torch.zeros(1, 8, dtype=torch.long),
+        "edge_vertical": torch.zeros(1, 8, dtype=torch.long),
+        "edge_width": torch.ones(1, 8, 1) * 0.2,
+        "edge_shape": torch.zeros(1, 8, 2, 2),
+    }
+    optimizer = torch.optim.Adam(model.parameters(), lr=3e-3)
+    model.train()
+    for _ in range(80):
+        optimizer.zero_grad(set_to_none=True)
+        output = model(
+            batch,
+            use_posterior=False,
+            sample_latent=False,
+        )
+        loss, _metrics = spatial_anchor_loss(
+            output,
+            batch,
+            kl_weight=0.0,
+            max_active_nodes=8,
+            max_edges=8,
+        )
+        loss.backward()
+        optimizer.step()
+
+    model.eval()
+    generated = model.generate(batch, temperature=0.0)
+    assert abs(int(generated["active_count"][0]) - 6) <= 1
+    assert abs(int(generated["predicted_edge_count"][0]) - 5) <= 1
+    selected = generated["active_anchor_ids"][0, : int(generated["active_count"][0])]
+    assert len(torch.unique(selected)) == len(selected)
