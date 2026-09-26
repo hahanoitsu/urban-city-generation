@@ -94,6 +94,19 @@ def update_categories(scene, output, next_fraction):
         scene[name] = values
 
 
+def decode_count(value, slots):
+    fraction = torch.sigmoid(value).item()
+    count = round(np.expm1(fraction * np.log1p(slots)))
+    return max(0, min(int(count), slots))
+
+
+def prefix_presence(count, slots, device):
+    values = torch.zeros((1, slots), dtype=torch.long, device=device)
+    if count > 0:
+        values[:, :count] = 1
+    return values
+
+
 def update_continuous(current, prediction, time, next_time):
     alpha, sigma = noise_coefficients(time)
     next_alpha, next_sigma = noise_coefficients(next_time)
@@ -140,8 +153,43 @@ def generate(model, context, relations, context_padding, ports, padding, scene_c
         scene[name] = output[name]
     for name in CATEGORY_MASKS:
         scene[name] = output[name].argmax(dim=-1)
-    scene["edge_from"] = output["edge_from"].argmax(dim=-1)
-    scene["edge_to"] = output["edge_to"].argmax(dim=-1)
+
+    node_count = decode_count(output["node_count"], scene_config.node_slots)
+    edge_count = decode_count(output["edge_count"], scene_config.edge_slots)
+    building_count = decode_count(output["building_count"], scene_config.building_slots)
+    area_count = decode_count(output["area_count"], scene_config.area_slots)
+    if edge_count > 0:
+        node_count = max(node_count, 2)
+
+    scene["node_presence"] = prefix_presence(
+        node_count,
+        scene_config.node_slots,
+        device,
+    )
+    scene["edge_presence"] = prefix_presence(
+        edge_count,
+        scene_config.edge_slots,
+        device,
+    )
+    scene["building_presence"] = prefix_presence(
+        building_count,
+        scene_config.building_slots,
+        device,
+    )
+    scene["area_presence"] = prefix_presence(
+        area_count,
+        scene_config.area_slots,
+        device,
+    )
+
+    node_mask = torch.arange(
+        scene_config.node_slots,
+        device=device,
+    )[None, None, :] >= node_count
+    edge_from = output["edge_from"].masked_fill(node_mask, float("-inf"))
+    edge_to = output["edge_to"].masked_fill(node_mask, float("-inf"))
+    scene["edge_from"] = edge_from.argmax(dim=-1)
+    scene["edge_to"] = edge_to.argmax(dim=-1)
     return {name: value[0].detach().cpu() for name, value in scene.items()}
 
 
