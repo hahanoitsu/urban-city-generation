@@ -20,6 +20,7 @@ class StructuredCityConfig:
     edge_shape_points: int = 16
     building_points: int = 24
     area_points: int = 48
+    building_classes: int = 8
     area_classes: int = 6
     model_dimensions: int = 256
     attention_heads: int = 8
@@ -192,11 +193,12 @@ class StructuredCityDenoiser(nn.Module):
         self.buildings = SlotDecoder(
             slots=config.building_slots,
             continuous_dimensions=config.building_points * 2 + 2,
-            category_sizes=(2,),
+            category_sizes=(2, config.building_classes),
             config=config,
             layers=config.building_layers,
         )
         self.building_presence = nn.Linear(d, 2)
+        self.building_kind = nn.Linear(d, config.building_classes)
         self.building_shape = nn.Linear(d, config.building_points * 2)
         self.building_height = nn.Linear(d, 1)
         self.building_base_z = nn.Linear(d, 1)
@@ -304,7 +306,7 @@ class StructuredCityDenoiser(nn.Module):
         )
         building_hidden = self.buildings(
             building_continuous,
-            (scene["building_presence"],),
+            (scene["building_presence"], scene["building_kind"]),
             building_memory,
             object_padding,
             time,
@@ -336,6 +338,7 @@ class StructuredCityDenoiser(nn.Module):
             "edge_from": edge_from,
             "edge_to": edge_to,
             "building_presence": self.building_presence(building_hidden),
+            "building_kind": self.building_kind(building_hidden),
             "building_shape": self.building_shape(building_hidden).reshape(
                 building_hidden.shape[0],
                 building_hidden.shape[1],
