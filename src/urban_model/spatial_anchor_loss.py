@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 from torch.nn import functional as F
 
@@ -24,6 +26,34 @@ def _masked_ce(
         reduction="none",
     ).reshape(target.shape)
     return _masked_mean(values, mask)
+
+
+def _balanced_bce(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    *,
+    maximum_positive_weight: float = 40.0,
+) -> torch.Tensor:
+    if mask is None:
+        mask = torch.ones_like(target, dtype=torch.bool)
+    valid_target = target[mask]
+    positives = valid_target.sum()
+    negatives = valid_target.numel() - positives
+    positive_weight = (
+        negatives / positives.clamp_min(1.0)
+    ).clamp(1.0, maximum_positive_weight)
+    values = F.binary_cross_entropy_with_logits(
+        logits,
+        target,
+        reduction="none",
+        pos_weight=positive_weight,
+    )
+    return _masked_mean(values, mask)
+
+
+def _count_fraction(count: torch.Tensor, maximum: int) -> torch.Tensor:
+    return torch.log1p(count.to(torch.float32)) / math.log1p(maximum)
 
 
 def _kl(
@@ -55,7 +85,7 @@ def _edge_targets(
         active_slots,
         active_slots,
     )
-    relation = torch.zeros(size, dtype=torch.long, device=device)
+    edge_class = torch.zeros(size, dtype=torch.long, device=device)
     vertical = torch.zeros(size, dtype=torch.long, device=device)
     width = torch.zeros((*size, 1), dtype=torch.float32, device=device)
     shape = torch.zeros(
@@ -72,9 +102,9 @@ def _edge_targets(
         pairs = batch["edge_pairs"][batch_index, :count]
         left = pairs[:, 0]
         right = pairs[:, 1]
-        relation[batch_index, left, right] = (
-            batch["edge_class"][batch_index, :count] + 1
-        )
+        edge_class[batch_index, left, right] = batch["edge_class"][
+            batch_index, :count
+        ]
         vertical[batch_index, left, right] = batch["edge_vertical"][
             batch_index, :count
         ]
@@ -86,7 +116,7 @@ def _edge_targets(
         ]
         positive[batch_index, left, right] = True
 
-    return relation, vertical, width, shape, positive
+    return edge_class, vertical, width, shape, positive
 
 
 def spatial_anchor_loss(
@@ -94,35 +124,37 @@ def spatial_anchor_loss(
     batch: dict[str, torch.Tensor],
     *,
     kl_weight: float,
+    max_active_nodes: int,
+    max_edges: int,
 ):
-    cells = batch["cell_count"].shape[1]
     slots = batch["slot_presence"].shape[2]
-    active_slots = output["edge_relation"].shape[1]
-
-    count_weights = torch.ones(
-        slots + 1,
-        dtype=output["cell_count"].dtype,
-        device=output["cell_count"].device,
-    )
-    count_weights[0] = 0.1
-    cell_count = F.cross_entropy(
-        output["cell_count"].reshape(-1, slots + 1),
-        batch["cell_count"].reshape(-1),
-        weight=count_weights,
-    )
-
     occupied_cells = batch["cell_count"].gt(0)
-    slot_loss = F.binary_cross_entropy_with_logits(
+    present = batch["slot_presence"].bool()
+
+    node_count = F.smooth_l1_loss(
+        torch.sigmoid(output["global_node_count"]),
+        _count_fraction(batch["active_count"], max_active_nodes),
+    )
+    edge_count = F.smooth_l1_loss(
+        torch.sigmoid(output["global_edge_count"]),
+        _count_fraction(batch["edge_count"], max_edges),
+    )
+    cell_occupancy = _balanced_bce(
+        output["cell_occupancy"],
+        occupied_cells.to(output["cell_occupancy"].dtype),
+    )
+    cell_count = _masked_ce(
+        output["cell_count"],
+        (batch["cell_count"] - 1).clamp_min(0),
+        occupied_cells,
+    )
+    slot_score = _balanced_bce(
         output["slot_score"],
         batch["slot_presence"],
-        reduction="none",
-    )
-    slot_score = _masked_mean(
-        slot_loss,
         occupied_cells[:, :, None].expand(-1, -1, slots),
+        maximum_positive_weight=12.0,
     )
 
-    present = batch["slot_presence"].bool()
     node_offset = _masked_mean(
         F.smooth_l1_loss(
             output["node_offset"],
@@ -141,21 +173,22 @@ def spatial_anchor_loss(
         batch["node_vertical"],
         present,
     )
-    node_boundary = _masked_mean(
-        F.binary_cross_entropy_with_logits(
-            output["node_boundary"],
-            batch["node_boundary"],
-            reduction="none",
-        ),
+    node_boundary = _balanced_bce(
+        output["node_boundary"],
+        batch["node_boundary"],
         present,
+        maximum_positive_weight=20.0,
     )
 
-    relation, vertical, width, shape, positive = _edge_targets(
+    edge_class_target, vertical, width, shape, positive = _edge_targets(
         batch,
-        active_slots,
+        output["edge_exists"].shape[1],
         output["edge_shape"].shape[-2],
     )
-    indexes = torch.arange(active_slots, device=relation.device)
+    indexes = torch.arange(
+        output["edge_exists"].shape[1],
+        device=output["edge_exists"].device,
+    )
     active = indexes[None] < batch["active_count"][:, None]
     pair_mask = (
         active[:, :, None]
@@ -163,19 +196,17 @@ def spatial_anchor_loss(
         & (indexes[None, :, None] < indexes[None, None, :])
     )
 
-    relation_weights = torch.ones(
-        9,
-        dtype=output["edge_relation"].dtype,
-        device=output["edge_relation"].device,
+    edge_exists = _balanced_bce(
+        output["edge_exists"],
+        positive.to(output["edge_exists"].dtype),
+        pair_mask,
+        maximum_positive_weight=60.0,
     )
-    relation_weights[0] = 0.01
-    relation_values = F.cross_entropy(
-        output["edge_relation"].reshape(-1, 9),
-        relation.reshape(-1),
-        reduction="none",
-        weight=relation_weights,
-    ).reshape(relation.shape)
-    edge_relation = _masked_mean(relation_values, pair_mask)
+    edge_class = _masked_ce(
+        output["edge_class"],
+        edge_class_target,
+        positive,
+    )
     edge_vertical = _masked_ce(
         output["edge_vertical"],
         vertical,
@@ -206,13 +237,17 @@ def spatial_anchor_loss(
     )
 
     losses = {
+        "node_count": node_count,
+        "edge_count": edge_count,
+        "cell_occupancy": cell_occupancy,
         "cell_count": cell_count,
         "slot_score": slot_score,
         "node_offset": node_offset,
         "node_mode": node_mode,
         "node_vertical": node_vertical,
         "node_boundary": node_boundary,
-        "edge_relation": edge_relation,
+        "edge_exists": edge_exists,
+        "edge_class": edge_class,
         "edge_vertical": edge_vertical,
         "edge_width": edge_width,
         "edge_shape": edge_shape,
