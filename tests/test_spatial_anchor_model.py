@@ -73,6 +73,12 @@ def test_spatial_anchor_architect_forward_and_loss():
             )
 
     output = model(batch)
+    deterministic_a = model(batch, sample_latent=False)
+    deterministic_b = model(batch, sample_latent=False)
+    assert torch.equal(
+        deterministic_a["node_offset"],
+        deterministic_b["node_offset"],
+    )
     assert output["cell_count"].shape == (batch_size, cells, slots + 1)
     assert output["slot_score"].shape == (batch_size, cells, slots)
     assert output["node_offset"].shape == (batch_size, cells, slots, 2)
