@@ -1,0 +1,303 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
+import torch
+from PIL import Image, ImageDraw
+
+from urban_model.spatial_anchor import SpatialAnchorArchitect, SpatialAnchorModelConfig
+from urban_model.spatial_anchor_data import AnchoredSpatialWorldDataset, SpatialAnchorConfig
+from urban_model.spatial_world_data import (
+    ROAD_CLASSES,
+    TRANSPORT_CLASSES,
+    VERTICAL_MODES,
+    SpatialTensorConfig,
+)
+
+
+def move_sample(sample, device):
+    return {
+        key: value.unsqueeze(0).to(device) if torch.is_tensor(value) else value
+        for key, value in sample.items()
+    }
+
+
+def to_metres(value):
+    return [
+        float((value[0] + 1.0) * 512.0),
+        float((value[1] + 1.0) * 512.0),
+    ]
+
+
+def target_graph(model, batch):
+    positions = model.node_positions(batch["node_offset"])[0]
+    flat_positions = positions.reshape(-1, 2)
+    flat_mode = batch["node_mode"][0].reshape(-1)
+    flat_vertical = batch["node_vertical"][0].reshape(-1)
+    count = int(batch["active_count"][0])
+    ids = batch["active_anchor_ids"][0, :count]
+    nodes = []
+    for index, anchor_id in enumerate(ids):
+        anchor = int(anchor_id)
+        nodes.append(
+            {
+                "id": index,
+                "anchor_id": anchor,
+                "position_local_m": to_metres(flat_positions[anchor]),
+                "mode": "road" if int(flat_mode[anchor]) == 0 else "rail",
+                "vertical_mode": VERTICAL_MODES[int(flat_vertical[anchor])],
+            }
+        )
+
+    edge_count = int(batch["edge_count"][0])
+    edges = []
+    for index in range(edge_count):
+        left = int(batch["edge_pairs"][0, index, 0])
+        right = int(batch["edge_pairs"][0, index, 1])
+        start = flat_positions[int(ids[left])]
+        end = flat_positions[int(ids[right])]
+        internal = []
+        for point_index in range(batch["edge_shape"].shape[-2]):
+            fraction = (point_index + 1) / (batch["edge_shape"].shape[-2] + 1)
+            base = start + (end - start) * fraction
+            internal.append(base + batch["edge_shape"][0, index, point_index])
+        values = [start, *internal, end]
+        class_index = int(batch["edge_class"][0, index])
+        transport_class = TRANSPORT_CLASSES[class_index]
+        edges.append(
+            {
+                "id": index,
+                "from_node": left,
+                "to_node": right,
+                "class": transport_class,
+                "mode": "road" if transport_class in ROAD_CLASSES else "rail",
+                "vertical_mode": VERTICAL_MODES[
+                    int(batch["edge_vertical"][0, index])
+                ],
+                "width_m": float(batch["edge_width"][0, index, 0] * 32.0),
+                "geometry_local_m": [to_metres(value) for value in values],
+            }
+        )
+    return {"nodes": nodes, "edges": edges}
+
+
+def generated_graph(model, output):
+    count = int(output["active_count"][0])
+    ids = output["active_anchor_ids"][0, :count]
+    positions = output["active_positions"][0, :count]
+    flat_mode = output["node_mode"][0].reshape(-1, 2)
+    flat_vertical = output["node_vertical"][0].reshape(-1, 4)
+
+    nodes = []
+    for index, anchor_id in enumerate(ids):
+        anchor = int(anchor_id)
+        nodes.append(
+            {
+                "id": index,
+                "anchor_id": anchor,
+                "position_local_m": to_metres(positions[index]),
+                "mode": "road" if int(flat_mode[anchor].argmax()) == 0 else "rail",
+                "vertical_mode": VERTICAL_MODES[
+                    int(flat_vertical[anchor].argmax())
+                ],
+            }
+        )
+
+    edges = []
+    for left in range(count):
+        for right in range(left + 1, count):
+            relation = int(output["edge_relation"][0, left, right].argmax())
+            if relation == 0:
+                continue
+            class_index = relation - 1
+            transport_class = TRANSPORT_CLASSES[class_index]
+            start = positions[left]
+            end = positions[right]
+            internal = []
+            shape = output["edge_shape"][0, left, right]
+            for point_index in range(shape.shape[0]):
+                fraction = (point_index + 1) / (shape.shape[0] + 1)
+                base = start + (end - start) * fraction
+                internal.append(base + shape[point_index])
+            values = [start, *internal, end]
+            edges.append(
+                {
+                    "id": len(edges),
+                    "from_node": left,
+                    "to_node": right,
+                    "class": transport_class,
+                    "mode": "road" if transport_class in ROAD_CLASSES else "rail",
+                    "vertical_mode": VERTICAL_MODES[
+                        int(output["edge_vertical"][0, left, right].argmax())
+                    ],
+                    "width_m": max(
+                        0.0,
+                        float(output["edge_width"][0, left, right, 0] * 32.0),
+                    ),
+                    "geometry_local_m": [to_metres(value) for value in values],
+                }
+            )
+    return {"nodes": nodes, "edges": edges}
+
+
+def graph_stats(graph):
+    nodes = len(graph["nodes"])
+    adjacency = [set() for _ in range(nodes)]
+    for edge in graph["edges"]:
+        left = int(edge["from_node"])
+        right = int(edge["to_node"])
+        if 0 <= left < nodes and 0 <= right < nodes and left != right:
+            adjacency[left].add(right)
+            adjacency[right].add(left)
+
+    isolated = sum(not values for values in adjacency)
+    seen = set()
+    components = []
+    for start in range(nodes):
+        if start in seen:
+            continue
+        stack = [start]
+        seen.add(start)
+        size = 0
+        while stack:
+            node = stack.pop()
+            size += 1
+            for neighbour in adjacency[node]:
+                if neighbour not in seen:
+                    seen.add(neighbour)
+                    stack.append(neighbour)
+        components.append(size)
+
+    return {
+        "nodes": nodes,
+        "edges": len(graph["edges"]),
+        "isolated_nodes": isolated,
+        "isolated_fraction": isolated / max(nodes, 1),
+        "components": len(components),
+        "largest_component_fraction": max(components, default=0) / max(nodes, 1),
+        "road_edges": sum(edge["mode"] == "road" for edge in graph["edges"]),
+        "rail_edges": sum(edge["mode"] == "rail" for edge in graph["edges"]),
+    }
+
+
+def render(graph, size=720):
+    image = Image.new("RGB", (size, size), (247, 246, 242))
+    draw = ImageDraw.Draw(image)
+
+    def point(value):
+        return (
+            int(round(value[0] / 1024.0 * (size - 1))),
+            int(round((1.0 - value[1] / 1024.0) * (size - 1))),
+        )
+
+    for edge in graph["edges"]:
+        values = [point(value) for value in edge["geometry_local_m"]]
+        colour = (205, 75, 55) if edge["mode"] == "road" else (55, 125, 185)
+        draw.line(values, fill=colour, width=2, joint="curve")
+
+    for node in graph["nodes"]:
+        x, y = point(node["position_local_m"])
+        draw.ellipse([x - 2, y - 2, x + 2, y + 2], fill=(25, 25, 25))
+    return image
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", type=Path, required=True)
+    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--samples", type=int, default=6)
+    parser.add_argument("--seeds", type=int, default=3)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    args = parser.parse_args()
+
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    tensor_config = SpatialTensorConfig(**checkpoint["tensor_config"])
+    anchor_config = SpatialAnchorConfig(**checkpoint["anchor_config"])
+    model_config = SpatialAnchorModelConfig.from_dict(checkpoint["model_config"])
+    dataset = AnchoredSpatialWorldDataset(
+        args.data,
+        tensor_config=tensor_config,
+        anchor_config=anchor_config,
+    )
+
+    candidates = [
+        index
+        for index, sample in enumerate(dataset.samples)
+        if sample["split"] == "test"
+    ]
+    candidates.sort(
+        key=lambda index: hashlib.sha1(
+            str(dataset.samples[index]["sample_id"]).encode("utf-8"),
+            usedforsecurity=False,
+        ).digest()
+    )
+    indexes = candidates[: args.samples]
+    if not indexes:
+        raise RuntimeError("No held-out anchored samples found")
+
+    device = torch.device("cuda")
+    model = SpatialAnchorArchitect(model_config).to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+
+    args.output.mkdir(parents=True, exist_ok=True)
+    records = []
+    panels = []
+    for sample_index, dataset_index in enumerate(indexes):
+        sample = dataset[dataset_index]
+        batch = move_sample(sample, device)
+        target = target_graph(model, batch)
+        images = [render(target)]
+        record = {
+            "sample_id": sample["sample_id"],
+            "target": graph_stats(target),
+            "generations": [],
+        }
+
+        for seed_index in range(args.seeds):
+            seed = 1000 + sample_index * 100 + seed_index
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            output = model.generate(batch, temperature=args.temperature)
+            generated = generated_graph(model, output)
+            images.append(render(generated))
+            stats = graph_stats(generated)
+            stats["seed"] = seed_index
+            record["generations"].append(stats)
+            (args.output / f"{sample_index:02d}-{sample['sample_id']}-seed{seed_index}.json").write_text(
+                json.dumps(generated, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+        panel = Image.new("RGB", (720 * len(images), 750), "white")
+        draw = ImageDraw.Draw(panel)
+        for image_index, image in enumerate(images):
+            panel.paste(image, (image_index * 720, 30))
+            title = "target" if image_index == 0 else f"seed {image_index - 1}"
+            draw.text((image_index * 720 + 8, 8), title, fill=(0, 0, 0))
+        panel.save(args.output / f"{sample_index:02d}-{sample['sample_id']}.png")
+        panels.append(panel)
+        records.append(record)
+
+    sheet = Image.new(
+        "RGB",
+        (720 * (args.seeds + 1), 750 * len(panels)),
+        "white",
+    )
+    for index, panel in enumerate(panels):
+        sheet.paste(panel, (0, index * 750))
+    sheet.save(args.output / "generations.png")
+    summary = {"samples": records}
+    (args.output / "summary.json").write_text(
+        json.dumps(summary, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(summary, indent=2))
+
+
+if __name__ == "__main__":
+    main()
