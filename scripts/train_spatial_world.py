@@ -74,6 +74,7 @@ def run_epoch(
     kl_weight=0.0,
     use_posterior=True,
     control_dropout=0.0,
+    drop_controls=False,
 ):
     training = optimizer is not None
     model.train(training)
@@ -86,7 +87,9 @@ def run_epoch(
         for batch in loader:
             batch = move_batch(batch, device)
             batch_size = int(batch["context_cells"].shape[0])
-            if training and control_dropout > 0:
+            if drop_controls:
+                batch["controls"] = torch.zeros_like(batch["controls"])
+            elif training and control_dropout > 0:
                 keep = (
                     torch.rand(batch_size, 1, device=device) >= control_dropout
                 ).to(batch["controls"].dtype)
@@ -136,9 +139,9 @@ def main():
     parser.add_argument("--kl-weight", type=float, default=0.02)
     parser.add_argument("--kl-warmup", type=int, default=10)
     parser.add_argument("--control-dropout", type=float, default=0.5)
-    parser.add_argument("--max-nodes", type=int, default=256)
+    parser.add_argument("--max-nodes", type=int, default=384)
     parser.add_argument("--max-edges", type=int, default=512)
-    parser.add_argument("--max-context-lines", type=int, default=512)
+    parser.add_argument("--max-context-lines", type=int, default=768)
     parser.add_argument("--max-ports", type=int, default=128)
     parser.add_argument("--maximum-samples", type=int)
     parser.add_argument("--save-every", type=int, default=5)
@@ -200,11 +203,15 @@ def main():
 
     start_epoch = 0
     best_prior = math.inf
+    best_context_prior = math.inf
     if args.resume is not None:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
         model.load_state_dict(checkpoint["model"])
         start_epoch = int(checkpoint.get("epoch", 0))
         best_prior = float(checkpoint.get("best_prior_loss", math.inf))
+        best_context_prior = float(
+            checkpoint.get("best_context_prior_loss", math.inf)
+        )
         if "optimizer" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer"])
             for group in optimizer.param_groups:
@@ -320,6 +327,15 @@ def main():
             kl_weight=0.0,
             use_posterior=False,
         )
+        context_prior = run_epoch(
+            model,
+            validation_loader,
+            tensor_config,
+            device,
+            kl_weight=0.0,
+            use_posterior=False,
+            drop_controls=True,
+        )
 
         epoch_seconds = time.time() - epoch_started
         elapsed = time.time() - started
@@ -330,6 +346,7 @@ def main():
                 "train": train,
                 "validation": validation,
                 "prior": prior,
+                "context_prior": context_prior,
                 "seconds": elapsed,
             }
             with (args.output / "metrics.jsonl").open("a", encoding="utf-8") as handle:
@@ -343,6 +360,10 @@ def main():
                 "model_config": model_config.to_dict(),
                 "tensor_config": tensor_config.__dict__,
                 "best_prior_loss": min(best_prior, prior["loss"]),
+                "best_context_prior_loss": min(
+                    best_context_prior,
+                    context_prior["loss"],
+                ),
             }
             torch.save(checkpoint, args.output / "latest.pt")
             if args.save_every > 0 and epoch % args.save_every == 0:
@@ -350,13 +371,17 @@ def main():
             if prior["loss"] < best_prior:
                 best_prior = prior["loss"]
                 checkpoint["best_prior_loss"] = best_prior
+            if context_prior["loss"] < best_context_prior:
+                best_context_prior = context_prior["loss"]
+                checkpoint["best_context_prior_loss"] = best_context_prior
                 torch.save(checkpoint, args.output / "best.pt")
 
-            parts = prior["parts"]
+            parts = context_prior["parts"]
             print(
                 f"epoch={epoch}/{args.epochs} "
                 f"train={train['loss']:.4f} val={validation['loss']:.4f} "
-                f"prior={prior['loss']:.4f} kl={validation['parts']['kl']:.4f} "
+                f"prior={prior['loss']:.4f} context={context_prior['loss']:.4f} "
+                f"kl={validation['parts']['kl']:.4f} "
                 f"node_count={parts['node_count']:.4f} node_xy={parts['node_xy']:.4f} "
                 f"edge_count={parts['edge_count']:.4f} "
                 f"edge_ptr={(parts['edge_from'] + parts['edge_to']) / 2.0:.4f} "
@@ -369,6 +394,7 @@ def main():
         summary = {
             "epochs": args.epochs,
             "best_prior_loss": best_prior,
+            "best_context_prior_loss": best_context_prior,
             "seconds": time.time() - started,
             "samples": len(dataset),
             "splits": {name: len(values) for name, values in splits.items()},
