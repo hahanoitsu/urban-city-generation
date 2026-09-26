@@ -107,39 +107,57 @@ def generated_graph(model, output):
         )
 
     edges = []
-    for left in range(count):
-        for right in range(left + 1, count):
-            relation = int(output["edge_relation"][0, left, right].argmax())
-            if relation == 0:
-                continue
-            class_index = relation - 1
-            transport_class = TRANSPORT_CLASSES[class_index]
-            start = positions[left]
-            end = positions[right]
-            internal = []
-            shape = output["edge_shape"][0, left, right]
-            for point_index in range(shape.shape[0]):
-                fraction = (point_index + 1) / (shape.shape[0] + 1)
-                base = start + (end - start) * fraction
-                internal.append(base + shape[point_index])
-            values = [start, *internal, end]
-            edges.append(
-                {
-                    "id": len(edges),
-                    "from_node": left,
-                    "to_node": right,
-                    "class": transport_class,
-                    "mode": "road" if transport_class in ROAD_CLASSES else "rail",
-                    "vertical_mode": VERTICAL_MODES[
-                        int(output["edge_vertical"][0, left, right].argmax())
-                    ],
-                    "width_m": max(
-                        0.0,
-                        float(output["edge_width"][0, left, right, 0] * 32.0),
-                    ),
-                    "geometry_local_m": [to_metres(value) for value in values],
-                }
-            )
+    if count >= 2:
+        pairs = torch.triu_indices(
+            count,
+            count,
+            offset=1,
+            device=output["edge_exists"].device,
+        )
+        scores = output["edge_exists"][0, pairs[0], pairs[1]]
+        requested = int(output["predicted_edge_count"][0])
+        edge_count = min(requested, int(scores.numel()))
+        if edge_count > 0:
+            selected = torch.topk(scores, k=edge_count).indices
+            for pair_index in selected:
+                left = int(pairs[0, pair_index])
+                right = int(pairs[1, pair_index])
+                class_index = int(
+                    output["edge_class"][0, left, right].argmax()
+                )
+                transport_class = TRANSPORT_CLASSES[class_index]
+                start = positions[left]
+                end = positions[right]
+                internal = []
+                shape = output["edge_shape"][0, left, right]
+                for point_index in range(shape.shape[0]):
+                    fraction = (point_index + 1) / (shape.shape[0] + 1)
+                    base = start + (end - start) * fraction
+                    internal.append(base + shape[point_index])
+                values = [start, *internal, end]
+                edges.append(
+                    {
+                        "id": len(edges),
+                        "from_node": left,
+                        "to_node": right,
+                        "class": transport_class,
+                        "mode": "road" if transport_class in ROAD_CLASSES else "rail",
+                        "vertical_mode": VERTICAL_MODES[
+                            int(output["edge_vertical"][0, left, right].argmax())
+                        ],
+                        "width_m": max(
+                            0.0,
+                            float(
+                                output["edge_width"][0, left, right, 0]
+                                * 32.0
+                            ),
+                        ),
+                        "geometry_local_m": [
+                            to_metres(value)
+                            for value in values
+                        ],
+                    }
+                )
     return {"nodes": nodes, "edges": edges}
 
 
