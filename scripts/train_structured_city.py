@@ -128,10 +128,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--nodes", type=int, default=384)
-    parser.add_argument("--edges", type=int, default=640)
-    parser.add_argument("--buildings", type=int, default=384)
-    parser.add_argument("--areas", type=int, default=96)
+    parser.add_argument("--nodes", type=int, default=448)
+    parser.add_argument("--edges", type=int, default=512)
+    parser.add_argument("--buildings", type=int, default=512)
+    parser.add_argument("--areas", type=int, default=160)
     parser.add_argument("--ports", type=int, default=96)
     parser.add_argument("--maximum-samples", type=int)
     args = parser.parse_args()
@@ -194,6 +194,9 @@ def main():
         "scene_config": scene_config.__dict__,
         "model_config": model_config.to_dict(),
         "samples": len(dataset),
+        "source_rows": dataset.total_rows,
+        "accepted_before_limit": dataset.accepted_before_limit,
+        "rejected": dataset.rejected,
         "splits": {name: len(values) for name, values in splits.items()},
         "parameters": sum(parameter.numel() for parameter in model.parameters()),
         "feature_names": dataset.feature_names,
