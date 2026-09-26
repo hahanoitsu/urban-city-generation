@@ -666,6 +666,38 @@ class StructuredCityDataset(torch.utils.data.Dataset):
             self._prepare_item(row, payload, scene)
             for row, payload, scene in self.samples
         ]
+        self.class_weights = self._build_class_weights()
+
+    def _class_weight(
+        self,
+        field: str,
+        presence: str,
+        classes: int,
+    ) -> torch.Tensor:
+        counts = torch.zeros(classes, dtype=torch.float64)
+        for item in self.prepared:
+            mask = item[presence].eq(1)
+            values = item[field][mask]
+            if values.numel():
+                counts += torch.bincount(values, minlength=classes).to(torch.float64)
+        total = counts.sum().clamp_min(1.0)
+        weights = torch.sqrt(total / (classes * counts.clamp_min(1.0)))
+        weights = weights.clamp(0.5, 4.0)
+        weights[counts.eq(0)] = 0.0
+        return weights.to(torch.float32)
+
+    def _build_class_weights(self) -> dict[str, torch.Tensor]:
+        return {
+            "edge_mode": self._class_weight("edge_mode", "edge_presence", 2),
+            "edge_class": self._class_weight("edge_class", "edge_presence", len(CLASSES)),
+            "edge_vertical": self._class_weight("edge_vertical", "edge_presence", len(VERTICAL)),
+            "building_kind": self._class_weight(
+                "building_kind",
+                "building_presence",
+                len(BUILDING_KINDS),
+            ),
+            "area_kind": self._class_weight("area_kind", "area_presence", len(AREA_KINDS)),
+        }
 
     def __len__(self) -> int:
         return len(self.samples)
