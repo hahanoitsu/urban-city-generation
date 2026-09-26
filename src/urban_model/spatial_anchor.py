@@ -17,6 +17,7 @@ class SpatialAnchorModelConfig:
     grid_size: int = 32
     slots_per_cell: int = 12
     max_active_nodes: int = 384
+    max_edges: int = 512
     context_line_points: int = 6
     edge_shape_points: int = 8
     model_dimensions: int = 256
@@ -135,7 +136,10 @@ class SpatialAnchorArchitect(nn.Module):
             nn.GELU(),
             nn.Linear(d, d),
         )
-        self.cell_count = nn.Linear(d, config.slots_per_cell + 1)
+        self.global_node_count = nn.Linear(d, 1)
+        self.global_edge_count = nn.Linear(d, 1)
+        self.cell_occupancy = nn.Linear(d, 1)
+        self.cell_count = nn.Linear(d, config.slots_per_cell)
         self.slot_score = nn.Linear(d, 1)
         self.node_offset = nn.Linear(d, 2)
         self.node_mode = nn.Linear(d, 2)
@@ -144,7 +148,7 @@ class SpatialAnchorArchitect(nn.Module):
 
         self.edge_node = nn.Linear(d, e)
         self.edge_space = nn.Sequential(
-            nn.Linear(3, e),
+            nn.Linear(7, e),
             nn.GELU(),
             nn.Linear(e, e),
         )
@@ -153,7 +157,8 @@ class SpatialAnchorArchitect(nn.Module):
             nn.GELU(),
             nn.Linear(e, e),
         )
-        self.edge_relation = nn.Linear(e, 9)
+        self.edge_exists = nn.Linear(e, 1)
+        self.edge_class = nn.Linear(e, 8)
         self.edge_vertical = nn.Linear(e, 4)
         self.edge_width = nn.Linear(e, 1)
         self.edge_shape = nn.Linear(e, config.edge_shape_points * 2)
@@ -229,9 +234,13 @@ class SpatialAnchorArchitect(nn.Module):
         hidden = self.node_hidden(
             cell_state[:, :, None, :] + sub[None, None, :, :]
         )
+        pooled = cell_state.mean(dim=1)
         return {
             "cell_state": cell_state,
             "node_hidden": hidden,
+            "global_node_count": self.global_node_count(pooled).squeeze(-1),
+            "global_edge_count": self.global_edge_count(pooled).squeeze(-1),
+            "cell_occupancy": self.cell_occupancy(cell_state).squeeze(-1),
             "cell_count": self.cell_count(cell_state),
             "slot_score": self.slot_score(hidden).squeeze(-1),
             "node_offset": 0.55 * torch.tanh(self.node_offset(hidden)),
@@ -278,18 +287,24 @@ class SpatialAnchorArchitect(nn.Module):
         node = self.edge_node(active_hidden)
         left = node[:, :, None, :]
         right = node[:, None, :, :]
-        delta = active_positions[:, :, None, :] - active_positions[:, None, :, :]
+        left_position = active_positions[:, :, None, :]
+        right_position = active_positions[:, None, :, :]
+        delta = right_position - left_position
+        midpoint = (left_position + right_position) * 0.5
         spatial = torch.cat(
             [
+                delta,
                 delta.abs(),
                 torch.linalg.vector_norm(delta, dim=-1, keepdim=True),
+                midpoint.expand(-1, delta.shape[1], -1, -1),
             ],
             dim=-1,
         )
         pair = self.edge_pair(left + right + self.edge_space(spatial))
         batch = pair.shape[0]
         return {
-            "edge_relation": self.edge_relation(pair),
+            "edge_exists": self.edge_exists(pair).squeeze(-1),
+            "edge_class": self.edge_class(pair),
             "edge_vertical": self.edge_vertical(pair),
             "edge_width": self.edge_width(pair),
             "edge_shape": 0.55
@@ -301,6 +316,40 @@ class SpatialAnchorArchitect(nn.Module):
                 2,
             ),
         }
+
+    def _decode_count(
+        self,
+        value: torch.Tensor,
+        maximum: int,
+    ) -> torch.Tensor:
+        fraction = torch.sigmoid(value)
+        count = torch.expm1(fraction * math.log1p(maximum)).round().long()
+        return count.clamp(0, maximum)
+
+    def _predicted_active_ids(
+        self,
+        output: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch = output["cell_occupancy"].shape[0]
+        maximum = self.config.max_active_nodes
+        scores = (
+            output["cell_occupancy"][:, :, None]
+            + output["slot_score"]
+        ).reshape(batch, -1)
+        counts = self._decode_count(output["global_node_count"], maximum)
+        active_ids = torch.zeros(
+            (batch, maximum),
+            dtype=torch.long,
+            device=scores.device,
+        )
+        for batch_index in range(batch):
+            count = int(counts[batch_index])
+            if count <= 0:
+                continue
+            selected = torch.topk(scores[batch_index], k=count).indices
+            selected = torch.sort(selected).values
+            active_ids[batch_index, :count] = selected
+        return active_ids, counts
 
     def forward(
         self,
@@ -339,75 +388,8 @@ class SpatialAnchorArchitect(nn.Module):
         )
         return output
 
-
-    def _predicted_active_ids(
-        self,
-        cell_count: torch.Tensor,
-        slot_score: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch = cell_count.shape[0]
-        slots = self.config.slots_per_cell
-        maximum = self.config.max_active_nodes
-        counts = cell_count.argmax(dim=-1)
-        active_ids = torch.zeros(
-            (batch, maximum),
-            dtype=torch.long,
-            device=cell_count.device,
-        )
-        active_count = torch.zeros(
-            batch,
-            dtype=torch.long,
-            device=cell_count.device,
-        )
-        for batch_index in range(batch):
-            values = []
-            for cell in range(counts.shape[1]):
-                count = min(int(counts[batch_index, cell]), slots)
-                if count <= 0:
-                    continue
-                chosen = torch.topk(
-                    slot_score[batch_index, cell],
-                    k=count,
-                ).indices
-                values.extend(
-                    cell * slots + int(slot)
-                    for slot in chosen
-                )
-            values = values[:maximum]
-            active_count[batch_index] = len(values)
-            if values:
-                active_ids[batch_index, : len(values)] = torch.tensor(
-                    values,
-                    dtype=torch.long,
-                    device=cell_count.device,
-                )
-        return active_ids, active_count
-
     @torch.inference_mode()
     def generate(
-        self,
-        batch: dict[str, torch.Tensor],
-        *,
-        temperature: float = 1.0,
-    ) -> dict[str, torch.Tensor]:
-        output = self.generate_nodes(batch, temperature=temperature)
-        active_ids, active_count = self._predicted_active_ids(
-            output["cell_count"],
-            output["slot_score"],
-        )
-        active_hidden, active_positions = self._active_nodes(
-            output["node_hidden"],
-            output["node_positions"],
-            active_ids,
-        )
-        output.update(self.edge_predictions(active_hidden, active_positions))
-        output["active_anchor_ids"] = active_ids
-        output["active_count"] = active_count
-        output["active_positions"] = active_positions
-        return output
-
-    @torch.inference_mode()
-    def generate_nodes(
         self,
         batch: dict[str, torch.Tensor],
         *,
@@ -419,5 +401,20 @@ class SpatialAnchorArchitect(nn.Module):
         mu, logvar = prior.chunk(2, dim=-1)
         latent = self._sample(mu, logvar, temperature=temperature)
         output = self._node_predictions(cells, latent)
-        output["node_positions"] = self.node_positions(output["node_offset"])
+        positions = self.node_positions(output["node_offset"])
+        active_ids, active_count = self._predicted_active_ids(output)
+        active_hidden, active_positions = self._active_nodes(
+            output["node_hidden"],
+            positions,
+            active_ids,
+        )
+        output.update(self.edge_predictions(active_hidden, active_positions))
+        output["node_positions"] = positions
+        output["active_anchor_ids"] = active_ids
+        output["active_count"] = active_count
+        output["active_positions"] = active_positions
+        output["predicted_edge_count"] = self._decode_count(
+            output["global_edge_count"],
+            self.config.max_edges,
+        )
         return output
