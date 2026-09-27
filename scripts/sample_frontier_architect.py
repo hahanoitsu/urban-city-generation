@@ -206,6 +206,7 @@ def legal_op_logits(logits, active, node_count, edge_count, max_nodes, max_edges
     return result
 
 
+@torch.inference_mode()
 def rollout(model, sample, tensor_config, program_config, device, temperature):
     batch = move_sample(sample, device)
     empty_program(batch)
@@ -223,13 +224,19 @@ def rollout(model, sample, tensor_config, program_config, device, temperature):
 
     while prefix < program_config.max_steps:
         batch["program_length"][0] = prefix + 1
-        output = model.decode_program(
-            batch,
-            memory,
-            memory_padding,
-            input_length=prefix,
-        )
-        last = prefix - 1
+        with torch.autocast(
+            device_type=device.type,
+            dtype=torch.bfloat16,
+            enabled=device.type == "cuda",
+        ):
+            output = model.decode_program(
+                batch,
+                memory,
+                memory_padding,
+                input_length=prefix,
+                last_only=True,
+            )
+        last = 0
         op_logits = legal_op_logits(
             output["op"][0, last],
             active,
