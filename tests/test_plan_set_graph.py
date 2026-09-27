@@ -5,6 +5,7 @@ from urban_model.plan_set_graph import (
     PlanSetGraphConfig,
 )
 from urban_model.plan_set_graph_loss import (
+    _cell_iou,
     plan_set_graph_loss,
 )
 
@@ -185,3 +186,52 @@ def test_plan_set_graph_forward_and_loss():
         and parameter.grad is None
     ]
     assert unused == []
+
+
+def test_plan_lookup_handles_exact_boundaries():
+    config = PlanSetGraphConfig(
+        plan_dimensions=8,
+        orientation_dimensions=4,
+        global_dimensions=8,
+        plan_grid_size=4,
+        max_nodes=8,
+        max_edges=8,
+        max_degree=4,
+        edge_shape_points=3,
+        model_dimensions=64,
+        edge_dimensions=24,
+        heads=4,
+        plan_layers=2,
+        query_layers=2,
+        feedforward_dimensions=128,
+        dropout=0.0,
+    )
+    model = PlanSetGraphArchitect(config)
+    plan_cells = torch.randn(
+        1,
+        16,
+        64,
+        dtype=torch.bfloat16,
+    )
+    midpoint = torch.tensor(
+        [[[[1.0, 1.0], [-1.0, -1.0]]]],
+        dtype=torch.bfloat16,
+    )
+    gathered = model._midpoint_plan(
+        plan_cells,
+        midpoint,
+    )
+    assert gathered.shape == (1, 1, 2, 64)
+
+    score = _cell_iou(
+        torch.tensor(
+            [[1.0, 1.0], [-1.0, -1.0]],
+            dtype=torch.bfloat16,
+        ),
+        torch.tensor(
+            [[1.0, 1.0], [-1.0, -1.0]],
+            dtype=torch.bfloat16,
+        ),
+        grid_size=4,
+    )
+    assert float(score) == 1.0
