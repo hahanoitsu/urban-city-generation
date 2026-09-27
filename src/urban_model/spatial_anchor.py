@@ -18,6 +18,7 @@ class SpatialAnchorModelConfig:
     slots_per_cell: int = 12
     max_active_nodes: int = 384
     max_edges: int = 512
+    max_degree: int = 8
     context_line_points: int = 6
     edge_shape_points: int = 8
     model_dimensions: int = 256
@@ -145,6 +146,7 @@ class SpatialAnchorArchitect(nn.Module):
         self.node_mode = nn.Linear(d, 2)
         self.node_vertical = nn.Linear(d, 4)
         self.node_boundary = nn.Linear(d, 1)
+        self.node_degree = nn.Linear(d, config.max_degree + 1)
 
         self.edge_node = nn.Linear(d, e)
         self.edge_space = nn.Sequential(
@@ -326,30 +328,117 @@ class SpatialAnchorArchitect(nn.Module):
         count = torch.expm1(fraction * math.log1p(maximum)).round().long()
         return count.clamp(0, maximum)
 
+    def _boundary_anchor_targets(
+        self,
+        batch: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch_size = batch["ports"].shape[0]
+        maximum = batch["ports"].shape[1]
+        ids = torch.zeros(
+            (batch_size, maximum),
+            dtype=torch.long,
+            device=batch["ports"].device,
+        )
+        positions = torch.zeros(
+            (batch_size, maximum, 2),
+            dtype=batch["ports"].dtype,
+            device=batch["ports"].device,
+        )
+        counts = torch.zeros(
+            batch_size,
+            dtype=torch.long,
+            device=batch["ports"].device,
+        )
+        grid = self.config.grid_size
+        slots = self.config.slots_per_cell
+        sub = self.subanchor_coordinates.to(batch["ports"].device)
+        for batch_index in range(batch_size):
+            used: dict[int, set[int]] = {}
+            write = 0
+            for port_index in range(maximum):
+                if bool(batch["port_padding"][batch_index, port_index]):
+                    continue
+                position = batch["ports"][batch_index, port_index, :2]
+                unit = ((position + 1.0) * 0.5).clamp(0.0, 1.0 - 1e-7)
+                column = min(grid - 1, max(0, int(unit[0] * grid)))
+                row = min(grid - 1, max(0, int(unit[1] * grid)))
+                cell = row * grid + column
+                local = unit * grid - torch.tensor(
+                    [column, row],
+                    dtype=unit.dtype,
+                    device=unit.device,
+                )
+                taken = used.setdefault(cell, set())
+                order = torch.argsort(
+                    torch.square(sub - local[None]).sum(dim=-1)
+                )
+                chosen = None
+                for candidate in order:
+                    slot = int(candidate)
+                    if slot not in taken:
+                        chosen = slot
+                        break
+                if chosen is None:
+                    continue
+                taken.add(chosen)
+                ids[batch_index, write] = cell * slots + chosen
+                positions[batch_index, write] = position
+                write += 1
+            counts[batch_index] = write
+        return ids, positions, counts
+
     def _predicted_active_ids(
         self,
         output: dict[str, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch = output["cell_occupancy"].shape[0]
+        batch: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch_size = output["cell_occupancy"].shape[0]
         maximum = self.config.max_active_nodes
         scores = (
             output["cell_occupancy"][:, :, None]
             + output["slot_score"]
-        ).reshape(batch, -1)
-        counts = self._decode_count(output["global_node_count"], maximum)
+        ).reshape(batch_size, -1)
+        predicted = self._decode_count(output["global_node_count"], maximum)
+        boundary_ids, boundary_positions, boundary_counts = (
+            self._boundary_anchor_targets(batch)
+        )
         active_ids = torch.zeros(
-            (batch, maximum),
+            (batch_size, maximum),
             dtype=torch.long,
             device=scores.device,
         )
-        for batch_index in range(batch):
-            count = int(counts[batch_index])
-            if count <= 0:
-                continue
-            selected = torch.topk(scores[batch_index], k=count).indices
-            selected = torch.sort(selected).values
-            active_ids[batch_index, :count] = selected
-        return active_ids, counts
+        counts = torch.zeros(
+            batch_size,
+            dtype=torch.long,
+            device=scores.device,
+        )
+        for batch_index in range(batch_size):
+            required = {
+                int(value)
+                for value in boundary_ids[
+                    batch_index, : int(boundary_counts[batch_index])
+                ]
+            }
+            count = max(int(predicted[batch_index]), len(required))
+            count = min(count, maximum)
+            ranked = torch.argsort(scores[batch_index], descending=True)
+            selected = list(required)
+            for candidate in ranked:
+                value = int(candidate)
+                if value in required:
+                    continue
+                selected.append(value)
+                if len(selected) >= count:
+                    break
+            selected = sorted(selected[:count])
+            if selected:
+                active_ids[batch_index, : len(selected)] = torch.tensor(
+                    selected,
+                    dtype=torch.long,
+                    device=scores.device,
+                )
+            counts[batch_index] = len(selected)
+        return active_ids, counts, boundary_ids, boundary_positions
 
     def forward(
         self,
@@ -376,6 +465,7 @@ class SpatialAnchorArchitect(nn.Module):
             positions,
             batch["active_anchor_ids"],
         )
+        output["node_degree"] = self.node_degree(active_hidden)
         output.update(self.edge_predictions(active_hidden, active_positions))
         output.update(
             {
@@ -402,12 +492,31 @@ class SpatialAnchorArchitect(nn.Module):
         latent = self._sample(mu, logvar, temperature=temperature)
         output = self._node_predictions(cells, latent)
         positions = self.node_positions(output["node_offset"])
-        active_ids, active_count = self._predicted_active_ids(output)
+        active_ids, active_count, boundary_ids, boundary_positions = (
+            self._predicted_active_ids(output, batch)
+        )
         active_hidden, active_positions = self._active_nodes(
             output["node_hidden"],
             positions,
             active_ids,
         )
+        for batch_index in range(active_ids.shape[0]):
+            boundary_lookup = {
+                int(boundary_ids[batch_index, index]): boundary_positions[
+                    batch_index, index
+                ]
+                for index in range(boundary_ids.shape[1])
+                if int(boundary_ids[batch_index, index]) != 0
+                or not bool(batch["port_padding"][batch_index, index])
+            }
+            count = int(active_count[batch_index])
+            for active_index in range(count):
+                anchor = int(active_ids[batch_index, active_index])
+                if anchor in boundary_lookup:
+                    active_positions[batch_index, active_index] = (
+                        boundary_lookup[anchor]
+                    )
+        output["node_degree"] = self.node_degree(active_hidden)
         output.update(self.edge_predictions(active_hidden, active_positions))
         output["node_positions"] = positions
         output["active_anchor_ids"] = active_ids
