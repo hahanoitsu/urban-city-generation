@@ -120,7 +120,7 @@ def build_frontier_program(
     node_boundary = [0.0]
     edge_class = [0]
     edge_vertical = [0]
-    edge_width = [0.0]
+    edge_width = [[0.0]]
     curve = [[0.0] * config.curve_points]
     pointer = [0]
     active_node = [-1]
@@ -149,7 +149,7 @@ def build_frontier_program(
         node_boundary.append(float(node_boundary_value))
         edge_class.append(int(edge_class_value))
         edge_vertical.append(int(edge_vertical_value))
-        edge_width.append(float(edge_width_value))
+        edge_width.append([float(edge_width_value)])
         if curve_value is None:
             curve.append([0.0] * config.curve_points)
         else:
