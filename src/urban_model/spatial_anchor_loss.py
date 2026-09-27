@@ -77,7 +77,7 @@ def _kl(
 def _edge_targets(
     batch: dict[str, torch.Tensor],
     active_slots: int,
-    shape_points: int,
+    curve_points: int,
 ):
     device = batch["edge_pairs"].device
     size = (
@@ -88,8 +88,8 @@ def _edge_targets(
     edge_class = torch.zeros(size, dtype=torch.long, device=device)
     vertical = torch.zeros(size, dtype=torch.long, device=device)
     width = torch.zeros((*size, 1), dtype=torch.float32, device=device)
-    shape = torch.zeros(
-        (*size, shape_points, 2),
+    curve = torch.zeros(
+        (*size, curve_points),
         dtype=torch.float32,
         device=device,
     )
@@ -111,12 +111,12 @@ def _edge_targets(
         width[batch_index, left, right] = batch["edge_width"][
             batch_index, :count
         ]
-        shape[batch_index, left, right] = batch["edge_shape"][
+        curve[batch_index, left, right] = batch["edge_curve"][
             batch_index, :count
         ]
         positive[batch_index, left, right] = True
 
-    return edge_class, vertical, width, shape, positive
+    return edge_class, vertical, width, curve, positive
 
 
 def spatial_anchor_loss(
@@ -191,10 +191,10 @@ def spatial_anchor_loss(
         active_node_mask,
     )
 
-    edge_class_target, vertical, width, shape, positive = _edge_targets(
+    edge_class_target, vertical, width, curve, positive = _edge_targets(
         batch,
         output["edge_exists"].shape[1],
-        output["edge_shape"].shape[-2],
+        output["edge_curve"].shape[-1],
     )
     indexes = torch.arange(
         output["edge_exists"].shape[1],
@@ -231,10 +231,10 @@ def spatial_anchor_loss(
         ),
         positive,
     )
-    edge_shape = _masked_mean(
+    edge_curve = _masked_mean(
         F.smooth_l1_loss(
-            output["edge_shape"],
-            shape,
+            output["edge_curve"],
+            curve,
             reduction="none",
         ),
         positive,
@@ -262,7 +262,7 @@ def spatial_anchor_loss(
         "edge_class": edge_class,
         "edge_vertical": edge_vertical,
         "edge_width": edge_width,
-        "edge_shape": edge_shape,
+        "edge_curve": edge_curve,
     }
     reconstruction = torch.stack(list(losses.values())).mean()
     total = reconstruction + kl * kl_weight
