@@ -16,7 +16,14 @@ from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 
 from urban_model.frontier_architect import FrontierArchitect, FrontierArchitectConfig
-from urban_model.frontier_data import FrontierProgramConfig, FrontierProgramDataset
+from urban_model.frontier_data import (
+    OP_CLOSE,
+    OP_GROW,
+    OP_LINK,
+    OP_ROOT,
+    FrontierProgramConfig,
+    FrontierProgramDataset,
+)
 from urban_model.frontier_loss import frontier_loss
 from urban_model.spatial_world_data import SpatialTensorConfig
 
@@ -155,6 +162,19 @@ def main():
             int(sample["program_length"])
             for sample in dataset.samples
         ]
+        op_counts = {
+            "root": 0,
+            "grow": 0,
+            "link": 0,
+            "close": 0,
+        }
+        for sample in dataset.samples:
+            length = int(sample["program_length"])
+            ops = sample["program_op"][:length]
+            op_counts["root"] += int((ops == OP_ROOT).sum())
+            op_counts["grow"] += int((ops == OP_GROW).sum())
+            op_counts["link"] += int((ops == OP_LINK).sum())
+            op_counts["close"] += int((ops == OP_CLOSE).sum())
         print(
             json.dumps(
                 {
@@ -170,6 +190,7 @@ def main():
                         "mean": sum(lengths) / len(lengths),
                         "max": max(lengths),
                     },
+                    "program_ops": op_counts,
                     "world_size": world_size,
                     "overfit": args.overfit,
                 },
