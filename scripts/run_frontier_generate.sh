@@ -27,6 +27,7 @@ source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate urban-city
 
 export PYTHONPATH="$SCRIPT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 cd "$SCRIPT_ROOT"
 rm -rf "$OUTPUT"
