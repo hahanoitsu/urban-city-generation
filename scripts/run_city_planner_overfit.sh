@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MAIN_ROOT="$(cd "$SCRIPT_ROOT/.." && pwd)/urban-city-generation"
 DATA="${CITY_PLAN_DATA:-$MAIN_ROOT/data/spatial-world-v1/singapore}"
-OUTPUT="${CITY_PLAN_RUN:-$MAIN_ROOT/runs/city-planner-overfit-v1}"
+OUTPUT="${CITY_PLAN_RUN:-$MAIN_ROOT/runs/city-planner-overfit-v2}"
 
 if command -v conda >/dev/null 2>&1; then
     CONDA_BASE="$(conda info --base)"
