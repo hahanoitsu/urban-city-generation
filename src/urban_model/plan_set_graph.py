@@ -208,14 +208,20 @@ class PlanSetGraphArchitect(nn.Module):
             (midpoint + 1.0) * 0.5
         ).clamp(
             0.0,
-            1.0 - 1e-7,
+            1.0,
         )
         column = torch.floor(
             unit[..., 0] * grid
-        ).long()
+        ).long().clamp(
+            0,
+            grid - 1,
+        )
         row = torch.floor(
             unit[..., 1] * grid
-        ).long()
+        ).long().clamp(
+            0,
+            grid - 1,
+        )
         index = row * grid + column
         batch_size = plan_cells.shape[0]
         dimensions = plan_cells.shape[-1]
