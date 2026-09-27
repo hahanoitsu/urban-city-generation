@@ -110,8 +110,7 @@ def run_epoch(
     metric_sums = {}
     context = torch.enable_grad() if training else torch.inference_mode()
 
-    plan_mean = dataset.plan_mean.to(device)
-    plan_std = dataset.plan_std.to(device)
+    presence_pos_weight = dataset.presence_pos_weight.to(device)
     global_mean = dataset.global_mean.to(device)
     global_std = dataset.global_std.to(device)
 
@@ -136,8 +135,7 @@ def run_epoch(
                 loss, metrics = city_plan_loss(
                     output,
                     batch,
-                    plan_mean=plan_mean,
-                    plan_std=plan_std,
+                    presence_pos_weight=presence_pos_weight,
                     global_mean=global_mean,
                     global_std=global_std,
                 )
@@ -223,6 +221,7 @@ def main():
                     },
                     "grid_size": plan_config.grid_size,
                     "plan_channels": dataset.plan_dimensions,
+                    "orientation_channels": dataset.orientation_dimensions,
                     "global_channels": dataset.global_dimensions,
                     "world_size": world_size,
                     "overfit": args.overfit,
@@ -242,6 +241,7 @@ def main():
         context_dimensions=dataset.context_dimensions,
         style_dimensions=dataset.style_dimensions,
         plan_dimensions=dataset.plan_dimensions,
+        orientation_dimensions=dataset.orientation_dimensions,
         global_dimensions=dataset.global_dimensions,
         grid_size=plan_config.grid_size,
         context_line_points=tensor_config.context_line_points,
@@ -344,8 +344,7 @@ def main():
                 name: len(values)
                 for name, values in splits.items()
             },
-            "plan_mean": dataset.plan_mean.tolist(),
-            "plan_std": dataset.plan_std.tolist(),
+            "presence_pos_weight": dataset.presence_pos_weight.tolist(),
             "global_mean": dataset.global_mean.tolist(),
             "global_std": dataset.global_std.tolist(),
             "world_size": world_size,
@@ -406,8 +405,7 @@ def main():
                 "model_config": model_config.to_dict(),
                 "tensor_config": tensor_config.__dict__,
                 "plan_config": plan_config.__dict__,
-                "plan_mean": dataset.plan_mean,
-                "plan_std": dataset.plan_std,
+                "presence_pos_weight": dataset.presence_pos_weight,
                 "global_mean": dataset.global_mean,
                 "global_std": dataset.global_std,
                 "best_validation_loss": min(
@@ -461,8 +459,10 @@ def main():
                 f"node_mae={parts['node_mae']:.2f} "
                 f"edge_mae={parts['edge_mae']:.2f} "
                 f"component_mae={parts['component_mae']:.2f} "
-                f"occupancy_iou={parts['occupancy_iou']:.3f} "
-                f"plan_mae={parts['raw_plan_mae']:.3f} "
+                f"junction_iou={parts['junction_iou']:.3f} "
+                f"corridor_iou={parts['corridor_iou']:.3f} "
+                f"rail_iou={parts['rail_iou']:.3f} "
+                f"count_mae={parts['count_mae']:.3f} "
                 f"context_gap={shuffled['loss'] - validation['loss']:.4f} "
                 f"epoch_s={epoch_seconds:.1f} "
                 f"elapsed_min={elapsed / 60.0:.1f}",
