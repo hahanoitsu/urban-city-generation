@@ -267,6 +267,39 @@ def spatial_anchor_loss(
     reconstruction = torch.stack(list(losses.values())).mean()
     total = reconstruction + kl * kl_weight
     metrics = {name: float(value.detach()) for name, value in losses.items()}
+    predicted_nodes = torch.expm1(
+        torch.sigmoid(output["global_node_count"])
+        * math.log1p(max_active_nodes)
+    )
+    predicted_edges = torch.expm1(
+        torch.sigmoid(output["global_edge_count"])
+        * math.log1p(max_edges)
+    )
+    metrics["node_count_mae"] = float(
+        (predicted_nodes - batch["active_count"]).abs().mean().detach()
+    )
+    metrics["edge_count_mae"] = float(
+        (predicted_edges - batch["edge_count"]).abs().mean().detach()
+    )
+    scores = (
+        output["cell_occupancy"][:, :, None] + output["slot_score"]
+    ).reshape(output["slot_score"].shape[0], -1)
+    target_presence = batch["slot_presence"].reshape(
+        batch["slot_presence"].shape[0],
+        -1,
+    )
+    recalls = []
+    for batch_index in range(scores.shape[0]):
+        count = int(batch["active_count"][batch_index])
+        if count <= 0:
+            continue
+        chosen = torch.topk(scores[batch_index], k=count).indices
+        recalls.append(target_presence[batch_index, chosen].mean())
+    metrics["anchor_recall_at_target_count"] = float(
+        torch.stack(recalls).mean().detach()
+        if recalls
+        else torch.tensor(1.0, device=scores.device)
+    )
     metrics["kl"] = float(kl.detach())
     metrics["reconstruction"] = float(reconstruction.detach())
     return total, metrics
