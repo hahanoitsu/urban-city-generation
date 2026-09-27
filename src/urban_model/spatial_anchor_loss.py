@@ -180,6 +180,17 @@ def spatial_anchor_loss(
         maximum_positive_weight=20.0,
     )
 
+    active_indexes = torch.arange(
+        output["node_degree"].shape[1],
+        device=output["node_degree"].device,
+    )
+    active_node_mask = active_indexes[None] < batch["active_count"][:, None]
+    node_degree = _masked_ce(
+        output["node_degree"],
+        batch["node_degree"].clamp_max(output["node_degree"].shape[-1] - 1),
+        active_node_mask,
+    )
+
     edge_class_target, vertical, width, shape, positive = _edge_targets(
         batch,
         output["edge_exists"].shape[1],
@@ -246,6 +257,7 @@ def spatial_anchor_loss(
         "node_mode": node_mode,
         "node_vertical": node_vertical,
         "node_boundary": node_boundary,
+        "node_degree": node_degree,
         "edge_exists": edge_exists,
         "edge_class": edge_class,
         "edge_vertical": edge_vertical,
