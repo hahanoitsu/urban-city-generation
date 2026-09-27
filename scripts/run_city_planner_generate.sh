@@ -4,9 +4,9 @@ set -euo pipefail
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MAIN_ROOT="$(cd "$SCRIPT_ROOT/.." && pwd)/urban-city-generation"
 DATA="${CITY_PLAN_DATA:-$MAIN_ROOT/data/spatial-world-v1/singapore}"
-CHECKPOINT="${CITY_PLAN_CHECKPOINT:-$MAIN_ROOT/runs/city-planner-overfit-v1/best.pt}"
-OUTPUT="${CITY_PLAN_PREVIEWS:-$MAIN_ROOT/runs/city-planner-overfit-v1/previews}"
-ZIP="${CITY_PLAN_PREVIEW_ZIP:-$MAIN_ROOT/city-planner-overfit-v1-previews.zip}"
+CHECKPOINT="${CITY_PLAN_CHECKPOINT:-$MAIN_ROOT/runs/city-planner-overfit-v2/best.pt}"
+OUTPUT="${CITY_PLAN_PREVIEWS:-$MAIN_ROOT/runs/city-planner-overfit-v2/previews}"
+ZIP="${CITY_PLAN_PREVIEW_ZIP:-$MAIN_ROOT/city-planner-overfit-v2-previews.zip}"
 
 if command -v conda >/dev/null 2>&1; then
     CONDA_BASE="$(conda info --base)"
