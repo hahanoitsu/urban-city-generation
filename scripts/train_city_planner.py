@@ -31,7 +31,24 @@ def distributed_state():
     return rank, local_rank, world_size
 
 
-def move_batch(batch, device, *, zero_controls):
+CONDITION_KEYS = (
+    "context_cells",
+    "context_line_points",
+    "context_line_mode",
+    "context_line_class",
+    "context_line_vertical",
+    "context_line_width",
+    "context_line_length",
+    "context_line_padding",
+    "ports",
+    "port_mode",
+    "port_class",
+    "port_vertical",
+    "port_padding",
+)
+
+
+def move_batch(batch, device, *, zero_controls, shuffle_context=False):
     values = {
         key: value.to(device, non_blocking=True)
         if torch.is_tensor(value)
@@ -40,6 +57,9 @@ def move_batch(batch, device, *, zero_controls):
     }
     if zero_controls:
         values["controls"] = torch.zeros_like(values["controls"])
+    if shuffle_context and values["context_cells"].shape[0] > 1:
+        for key in CONDITION_KEYS:
+            values[key] = torch.roll(values[key], shifts=1, dims=0)
     return values
 
 
@@ -81,6 +101,7 @@ def run_epoch(
     *,
     optimizer=None,
     zero_controls=True,
+    shuffle_context=False,
 ):
     training = optimizer is not None
     model.train(training)
@@ -100,6 +121,7 @@ def run_epoch(
                 batch,
                 device,
                 zero_controls=zero_controls,
+                shuffle_context=shuffle_context,
             )
             batch_size = int(batch["plan_global"].shape[0])
 
@@ -357,6 +379,14 @@ def main():
             device,
             zero_controls=not args.use_target_controls,
         )
+        shuffled = run_epoch(
+            model,
+            validation_loader,
+            dataset,
+            device,
+            zero_controls=not args.use_target_controls,
+            shuffle_context=True,
+        )
         elapsed = time.time() - started
         epoch_seconds = time.time() - epoch_started
 
@@ -413,6 +443,7 @@ def main():
                 "epoch": epoch,
                 "train": train,
                 "validation": validation,
+                "shuffled_context": shuffled,
                 "seconds": elapsed,
             }
             with (
@@ -432,6 +463,7 @@ def main():
                 f"component_mae={parts['component_mae']:.2f} "
                 f"occupancy_iou={parts['occupancy_iou']:.3f} "
                 f"plan_mae={parts['raw_plan_mae']:.3f} "
+                f"context_gap={shuffled['loss'] - validation['loss']:.4f} "
                 f"epoch_s={epoch_seconds:.1f} "
                 f"elapsed_min={elapsed / 60.0:.1f}",
                 flush=True,
