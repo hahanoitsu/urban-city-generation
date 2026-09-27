@@ -49,6 +49,9 @@ def target_graph(model, batch):
                 "position_local_m": to_metres(flat_positions[anchor]),
                 "mode": "road" if int(flat_mode[anchor]) == 0 else "rail",
                 "vertical_mode": VERTICAL_MODES[int(flat_vertical[anchor])],
+                "boundary": bool(
+                    batch["node_boundary"][0].reshape(-1)[anchor] > 0.5
+                ),
             }
         )
 
@@ -91,6 +94,10 @@ def generated_graph(model, output):
     flat_mode = output["node_mode"][0].reshape(-1, 2)
     flat_vertical = output["node_vertical"][0].reshape(-1, 4)
 
+    boundary_ids = {
+        int(output["boundary_anchor_ids"][0, index])
+        for index in range(int(output["boundary_count"][0]))
+    }
     nodes = []
     for index, anchor_id in enumerate(ids):
         anchor = int(anchor_id)
@@ -103,6 +110,7 @@ def generated_graph(model, output):
                 "vertical_mode": VERTICAL_MODES[
                     int(flat_vertical[anchor].argmax())
                 ],
+                "boundary": anchor in boundary_ids,
             }
         )
 
@@ -216,6 +224,12 @@ def graph_stats(graph):
             adjacency[right].add(left)
 
     isolated = sum(not values for values in adjacency)
+    boundary_nodes = [
+        index
+        for index, node in enumerate(graph["nodes"])
+        if bool(node.get("boundary", False))
+    ]
+    connected_boundary = sum(bool(adjacency[index]) for index in boundary_nodes)
     seen = set()
     components = []
     for start in range(nodes):
@@ -242,6 +256,13 @@ def graph_stats(graph):
         "largest_component_fraction": max(components, default=0) / max(nodes, 1),
         "road_edges": sum(edge["mode"] == "road" for edge in graph["edges"]),
         "rail_edges": sum(edge["mode"] == "rail" for edge in graph["edges"]),
+        "boundary_nodes": len(boundary_nodes),
+        "connected_boundary_nodes": connected_boundary,
+        "boundary_connected_fraction": (
+            connected_boundary / len(boundary_nodes)
+            if boundary_nodes
+            else 1.0
+        ),
     }
 
 
@@ -323,6 +344,12 @@ def main():
     parser.add_argument("--samples", type=int, default=6)
     parser.add_argument("--seeds", type=int, default=3)
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--drop-controls", action="store_true")
+    parser.add_argument(
+        "--split",
+        choices=("train", "validation", "test"),
+        default="test",
+    )
     args = parser.parse_args()
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
@@ -338,7 +365,7 @@ def main():
     candidates = [
         index
         for index, sample in enumerate(dataset.samples)
-        if sample["split"] == "test"
+        if sample["split"] == args.split
     ]
     candidates.sort(
         key=lambda index: hashlib.sha1(
@@ -361,6 +388,8 @@ def main():
     for sample_index, dataset_index in enumerate(indexes):
         sample = dataset[dataset_index]
         batch = move_sample(sample, device)
+        if args.drop_controls:
+            batch["controls"] = torch.zeros_like(batch["controls"])
         target = target_graph(model, batch)
         images = [render(target, sample, tensor_config)]
         record = {
