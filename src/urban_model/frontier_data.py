@@ -229,8 +229,9 @@ def build_frontier_program(
                         active_value=generated[active],
                     )
 
-            append(OP_CLOSE, active_value=generated[active])
             queue.popleft()
+            next_active = generated[queue[0]] if queue else -1
+            append(OP_CLOSE, active_value=next_active)
 
     append(OP_EOS)
 
