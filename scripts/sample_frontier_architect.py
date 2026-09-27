@@ -219,6 +219,7 @@ def rollout(model, sample, tensor_config, program_config, device, temperature):
     roots = 0
     clamped_nodes = 0
     prefix = 1
+    terminated = False
 
     while prefix < program_config.max_steps:
         batch["program_length"][0] = prefix + 1
@@ -242,6 +243,7 @@ def rollout(model, sample, tensor_config, program_config, device, temperature):
         if op == OP_EOS:
             write_event(batch, prefix, op=OP_EOS)
             prefix += 1
+            terminated = True
             break
 
         if op == OP_ROOT:
@@ -495,6 +497,7 @@ def rollout(model, sample, tensor_config, program_config, device, temperature):
         "program_steps": prefix,
         "roots": roots,
         "clamped_nodes": clamped_nodes,
+        "terminated_eos": terminated,
     }
 
 
@@ -584,6 +587,7 @@ def graph_stats(graph, sample, tensor_config):
         "roots": int(graph.get("roots", 0)),
         "program_steps": int(graph.get("program_steps", 0)),
         "clamped_nodes": int(graph.get("clamped_nodes", 0)),
+        "terminated_eos": bool(graph.get("terminated_eos", True)),
     }
 
 
