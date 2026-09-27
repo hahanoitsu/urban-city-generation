@@ -182,9 +182,16 @@ class AnchoredSpatialWorldDataset(torch.utils.data.Dataset):
             left = active_lookup[left_anchor]
             right = active_lookup[right_anchor]
             shape = sample["edge_shape"][edge_index].clone()
+            start = sample["node_xy"][left_original].clone()
+            end = sample["node_xy"][right_original].clone()
             if left > right:
                 left, right = right, left
+                start, end = end, start
                 shape = torch.flip(shape, dims=[0])
+            chord = end - start
+            chord_length = torch.linalg.vector_norm(chord).clamp_min(1e-4)
+            normal = torch.stack([-chord[1], chord[0]]) / chord_length
+            curve = (shape * normal[None]).sum(dim=-1) / chord_length
             key = (left, right)
             if key in kept_edges:
                 self.duplicate_edges += 1
@@ -195,7 +202,7 @@ class AnchoredSpatialWorldDataset(torch.utils.data.Dataset):
                 "class": int(sample["edge_class"][edge_index]),
                 "vertical": int(sample["edge_vertical"][edge_index]),
                 "width": float(sample["edge_width"][edge_index, 0]),
-                "shape": shape,
+                "curve": curve,
             }
 
         if len(kept_edges) > self.anchor_config.max_edges:
@@ -216,11 +223,10 @@ class AnchoredSpatialWorldDataset(torch.utils.data.Dataset):
             (self.anchor_config.max_edges, 1),
             dtype=np.float32,
         )
-        edge_shape = np.zeros(
+        edge_curve = np.zeros(
             (
                 self.anchor_config.max_edges,
                 self.tensor_config.edge_shape_points,
-                2,
             ),
             dtype=np.float32,
         )
@@ -233,7 +239,7 @@ class AnchoredSpatialWorldDataset(torch.utils.data.Dataset):
             edge_class[index] = value["class"]
             edge_vertical[index] = value["vertical"]
             edge_width[index, 0] = value["width"]
-            edge_shape[index] = value["shape"].numpy()
+            edge_curve[index] = value["curve"].numpy()
 
         keep = {
             key: value
@@ -275,7 +281,7 @@ class AnchoredSpatialWorldDataset(torch.utils.data.Dataset):
                 "edge_class": torch.from_numpy(edge_class),
                 "edge_vertical": torch.from_numpy(edge_vertical),
                 "edge_width": torch.from_numpy(edge_width),
-                "edge_shape": torch.from_numpy(edge_shape),
+                "edge_curve": torch.from_numpy(edge_curve),
             }
         )
         return keep
