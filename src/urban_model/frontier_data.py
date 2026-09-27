@@ -231,6 +231,11 @@ def build_frontier_program(
                 else:
                     append(
                         OP_LINK,
+                        xy_value=(
+                            sample["node_xy"][neighbour]
+                            - sample["node_xy"][active]
+                        )
+                        / 2.0,
                         edge_class_value=sample["edge_class"][edge_index],
                         edge_vertical_value=sample["edge_vertical"][edge_index],
                         edge_width_value=sample["edge_width"][edge_index, 0],
