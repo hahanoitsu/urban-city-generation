@@ -136,7 +136,6 @@ class PlanSetGraphArchitect(nn.Module):
         )
         self.query_norm = nn.LayerNorm(d)
 
-        self.node_presence = nn.Linear(d, 1)
         self.node_xy = nn.Linear(d, 2)
         self.node_mode = nn.Linear(d, 2)
         self.node_vertical = nn.Linear(d, 4)
@@ -308,10 +307,14 @@ class PlanSetGraphArchitect(nn.Module):
             :, : self.config.plan_grid_size**2
         ]
         batch_size = memory.shape[0]
+        query_count = max(
+            1,
+            int(batch["node_count"].max()),
+        )
         queries = (
-            self.query_embedding.weight
+            self.query_embedding.weight[:query_count]
             + self.query_position(
-                self.query_reference
+                self.query_reference[:query_count]
             )
         )[None].expand(
             batch_size,
@@ -324,22 +327,11 @@ class PlanSetGraphArchitect(nn.Module):
                 memory,
             )
         )
-        reference = self.query_reference[None]
-        reference_logit = torch.atanh(
-            reference.clamp(
-                -0.999,
-                0.999,
-            )
-        )
         xy = torch.tanh(
-            reference_logit
-            + self.node_xy(hidden)
+            self.node_xy(hidden)
         )
         output = {
             "query_hidden": hidden,
-            "node_presence": self.node_presence(
-                hidden
-            ).squeeze(-1),
             "node_xy": xy,
             "node_mode": self.node_mode(hidden),
             "node_vertical": self.node_vertical(
