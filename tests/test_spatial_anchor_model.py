@@ -58,7 +58,7 @@ def test_spatial_anchor_architect_forward_and_loss():
         "edge_class": torch.zeros(batch_size, edges, dtype=torch.long),
         "edge_vertical": torch.zeros(batch_size, edges, dtype=torch.long),
         "edge_width": torch.rand(batch_size, edges, 1),
-        "edge_shape": torch.rand(batch_size, edges, 3, 2) - 0.5,
+        "edge_curve": torch.rand(batch_size, edges, 3) - 0.5,
     }
 
     for batch_index, count in enumerate((4, 5)):
@@ -98,6 +98,12 @@ def test_spatial_anchor_architect_forward_and_loss():
     )
     assert output["edge_exists"].shape == (batch_size, active, active)
     assert output["edge_class"].shape == (batch_size, active, active, 8)
+    assert output["edge_curve"].shape == (
+        batch_size,
+        active,
+        active,
+        config.edge_shape_points,
+    )
 
     loss, metrics = spatial_anchor_loss(
         output,
@@ -182,7 +188,7 @@ def test_spatial_anchor_prior_overfits_nonempty_graph():
         "edge_class": torch.zeros(1, 8, dtype=torch.long),
         "edge_vertical": torch.zeros(1, 8, dtype=torch.long),
         "edge_width": torch.ones(1, 8, 1) * 0.2,
-        "edge_shape": torch.zeros(1, 8, 2, 2),
+        "edge_curve": torch.zeros(1, 8, 2),
     }
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-3)
     model.train()
