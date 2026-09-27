@@ -9,6 +9,7 @@ def test_balanced_context_encoder_handles_empty_transport_sets():
         context_dimensions=7,
         style_dimensions=4,
         plan_dimensions=8,
+        orientation_dimensions=4,
         global_dimensions=8,
         grid_size=4,
         context_line_points=3,
