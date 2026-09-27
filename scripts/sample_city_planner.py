@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -10,6 +11,7 @@ from PIL import Image, ImageDraw
 
 from urban_model.city_plan_data import (
     GLOBAL_CHANNELS,
+    ORIENTATION_CHANNELS,
     PLAN_CHANNELS,
     CityPlanConfig,
     CityPlanDataset,
@@ -30,10 +32,20 @@ def move_sample(sample, device, zero_controls):
     return batch
 
 
-def render_channel(values, grid_size, *, scale=None, size=384):
+def render_channel(
+    values,
+    presence,
+    grid_size,
+    *,
+    orientation=None,
+    size=384,
+):
     tensor = values.reshape(grid_size, grid_size).detach().cpu()
-    maximum = float(tensor.max()) if scale is None else float(scale)
-    maximum = max(maximum, 1e-6)
+    occupied = presence.reshape(
+        grid_size,
+        grid_size,
+    ).detach().cpu()
+    maximum = max(float(tensor.max()), 1.0)
     cell = max(size // grid_size, 1)
     image = Image.new(
         "RGB",
@@ -43,11 +55,19 @@ def render_channel(values, grid_size, *, scale=None, size=384):
     draw = ImageDraw.Draw(image)
     for row in range(grid_size):
         for column in range(grid_size):
+            probability = float(occupied[row, column])
             value = float(tensor[row, column])
+            density = min(max(value / maximum, 0.0), 1.0)
             level = int(
                 round(
                     255.0
-                    * min(max(value / maximum, 0.0), 1.0)
+                    * min(
+                        max(
+                            probability * (0.35 + 0.65 * density),
+                            0.0,
+                        ),
+                        1.0,
+                    )
                 )
             )
             colour = (255 - level, 255 - level, 255 - level)
@@ -57,12 +77,45 @@ def render_channel(values, grid_size, *, scale=None, size=384):
                 [x0, y0, x0 + cell - 1, y0 + cell - 1],
                 fill=colour,
             )
+
+    if orientation is not None:
+        vectors = orientation.reshape(
+            grid_size,
+            grid_size,
+            2,
+        ).detach().cpu()
+        for row in range(grid_size):
+            for column in range(grid_size):
+                if float(occupied[row, column]) < 0.5:
+                    continue
+                vector = vectors[row, column]
+                magnitude = float(torch.linalg.vector_norm(vector))
+                if magnitude < 0.1:
+                    continue
+                angle = 0.5 * math.atan2(
+                    float(vector[1]),
+                    float(vector[0]),
+                )
+                cx = column * cell + cell * 0.5
+                cy = (grid_size - 1 - row) * cell + cell * 0.5
+                radius = cell * 0.35
+                dx = math.cos(angle) * radius
+                dy = -math.sin(angle) * radius
+                draw.line(
+                    [cx - dx, cy - dy, cx + dx, cy + dy],
+                    fill=(180, 45, 45),
+                    width=max(1, cell // 10),
+                )
     return image
 
 
 def compose_sample(
-    target,
-    predicted,
+    target_counts,
+    target_presence,
+    target_orientation,
+    predicted_counts,
+    predicted_probability,
+    predicted_orientation,
     grid_size,
     channels,
 ):
@@ -70,24 +123,36 @@ def compose_sample(
     labels = []
     for channel in channels:
         index = PLAN_CHANNELS.index(channel)
-        maximum = max(
-            float(target[:, index].max()),
-            float(predicted[:, index].max()),
-            1.0,
+        orientation_index = (
+            ORIENTATION_CHANNELS.index(channel)
+            if channel in ORIENTATION_CHANNELS
+            else None
+        )
+        target_vector = (
+            target_orientation[:, orientation_index]
+            if orientation_index is not None
+            else None
+        )
+        predicted_vector = (
+            predicted_orientation[:, orientation_index]
+            if orientation_index is not None
+            else None
         )
         tiles.append(
             render_channel(
-                target[:, index],
+                target_counts[:, index],
+                target_presence[:, index],
                 grid_size,
-                scale=maximum,
+                orientation=target_vector,
             )
         )
         labels.append(f"target {channel}")
         tiles.append(
             render_channel(
-                predicted[:, index],
+                predicted_counts[:, index],
+                predicted_probability[:, index],
                 grid_size,
-                scale=maximum,
+                orientation=predicted_vector,
             )
         )
         labels.append(f"pred {channel}")
@@ -105,6 +170,14 @@ def compose_sample(
         panel.paste(tile, (x, 28))
         draw.text((x + 5, 7), labels[index], fill=(0, 0, 0))
     return panel
+
+
+def channel_iou(predicted, target):
+    predicted = predicted > 0.5
+    target = target > 0.5
+    intersection = int((predicted & target).sum())
+    union = int((predicted | target).sum())
+    return intersection / max(union, 1)
 
 
 @torch.inference_mode()
@@ -164,8 +237,6 @@ def main():
     if not indexes:
         raise RuntimeError("No city planner samples found")
 
-    plan_mean = checkpoint["plan_mean"].to(device)
-    plan_std = checkpoint["plan_std"].to(device)
     global_mean = checkpoint["global_mean"].to(device)
     global_std = checkpoint["global_std"].to(device)
     zero_controls = not bool(
@@ -177,9 +248,9 @@ def main():
     panels = []
     channels = (
         "junctions",
-        "major_edges",
-        "local_edges",
-        "rail_edges",
+        "major_corridor",
+        "local_corridor",
+        "rail_corridor",
     )
 
     for order, index in enumerate(indexes):
@@ -190,20 +261,37 @@ def main():
             zero_controls,
         )
         output = model(batch)
-        predicted_plan = (
-            output["plan_grid"][0] * plan_std[None]
-            + plan_mean[None]
-        ).clamp_min(0.0).detach().cpu()
+        predicted_probability = torch.sigmoid(
+            output["plan_presence"][0]
+        ).detach().cpu()
+        predicted_counts = (
+            torch.expm1(output["plan_log_count"][0])
+            .clamp_min(0.0)
+            .detach()
+            .cpu()
+        )
+        predicted_orientation = (
+            output["plan_orientation"][0]
+            .detach()
+            .cpu()
+        )
         predicted_global = (
             output["plan_global"][0] * global_std
             + global_mean
         ).detach().cpu()
-        target_plan = sample["plan_grid_raw"]
+
+        target_counts = sample["plan_counts"]
+        target_presence = sample["plan_presence"]
+        target_orientation = sample["plan_orientation"]
         target_global = sample["plan_global_raw"]
 
         panel = compose_sample(
-            target_plan,
-            predicted_plan,
+            target_counts,
+            target_presence,
+            target_orientation,
+            predicted_counts,
+            predicted_probability,
+            predicted_orientation,
             plan_config.grid_size,
             channels,
         )
@@ -223,11 +311,18 @@ def main():
                 name: float(predicted_global[position])
                 for position, name in enumerate(GLOBAL_CHANNELS)
             },
-            "plan_channel_mae": {
+            "presence_iou": {
+                name: channel_iou(
+                    predicted_probability[:, position],
+                    target_presence[:, position],
+                )
+                for position, name in enumerate(PLAN_CHANNELS)
+            },
+            "count_mae": {
                 name: float(
                     (
-                        predicted_plan[:, position]
-                        - target_plan[:, position]
+                        predicted_counts[:, position]
+                        - target_counts[:, position]
                     )
                     .abs()
                     .mean()
