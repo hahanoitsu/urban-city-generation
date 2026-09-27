@@ -93,6 +93,7 @@ def make_sample():
         "program_curve": torch.zeros(steps, 2),
         "program_pointer": torch.zeros(steps, dtype=torch.long),
         "program_active_node": torch.zeros(steps, dtype=torch.long),
+        "program_active_xy": torch.zeros(steps, 2),
     }
 
 
