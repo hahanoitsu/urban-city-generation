@@ -44,10 +44,13 @@ class FakeFrontierModel:
             "op": op,
             "xy_mean": xy_mean,
             "xy_logstd": torch.full((1, steps, 2), -5.0, device=device),
-            "node_mode": torch.tensor(
-                [[[20.0, -20.0]]] * steps,
-                device=device,
-            ).transpose(0, 1).transpose(0, 1),
+            "node_mode": torch.stack(
+                [
+                    torch.full((1, steps), 20.0, device=device),
+                    torch.full((1, steps), -20.0, device=device),
+                ],
+                dim=-1,
+            ),
             "node_vertical": torch.zeros(1, steps, 4, device=device),
             "node_boundary": torch.zeros(1, steps, device=device),
             "edge_class": torch.zeros(1, steps, 8, device=device),
