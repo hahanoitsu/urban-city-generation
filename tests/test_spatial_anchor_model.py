@@ -52,6 +52,7 @@ def test_spatial_anchor_architect_forward_and_loss():
         "node_boundary": torch.zeros(batch_size, cells, slots),
         "active_count": torch.tensor([4, 5]),
         "active_anchor_ids": torch.zeros(batch_size, active, dtype=torch.long),
+        "node_degree": torch.zeros(batch_size, active, dtype=torch.long),
         "edge_count": torch.tensor([3, 4]),
         "edge_pairs": torch.zeros(batch_size, edges, 2, dtype=torch.long),
         "edge_class": torch.zeros(batch_size, edges, dtype=torch.long),
@@ -72,6 +73,8 @@ def test_spatial_anchor_architect_forward_and_loss():
             batch["edge_pairs"][batch_index, edge_index] = torch.tensor(
                 [edge_index, edge_index + 1]
             )
+            batch["node_degree"][batch_index, edge_index] += 1
+            batch["node_degree"][batch_index, edge_index + 1] += 1
 
     output = model(batch)
     model.eval()
@@ -88,6 +91,11 @@ def test_spatial_anchor_architect_forward_and_loss():
     assert output["cell_count"].shape == (batch_size, cells, slots)
     assert output["slot_score"].shape == (batch_size, cells, slots)
     assert output["node_offset"].shape == (batch_size, cells, slots, 2)
+    assert output["node_degree"].shape == (
+        batch_size,
+        active,
+        config.max_degree + 1,
+    )
     assert output["edge_exists"].shape == (batch_size, active, active)
     assert output["edge_class"].shape == (batch_size, active, active, 8)
 
@@ -166,6 +174,7 @@ def test_spatial_anchor_prior_overfits_nonempty_graph():
         "node_boundary": torch.zeros(1, 4, 2),
         "active_count": torch.tensor([6]),
         "active_anchor_ids": torch.tensor([[0, 1, 2, 3, 4, 5, 0, 0]]),
+        "node_degree": torch.tensor([[1, 2, 2, 2, 2, 1, 0, 0]]),
         "edge_count": torch.tensor([5]),
         "edge_pairs": torch.tensor(
             [[[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 0], [0, 0], [0, 0]]]
