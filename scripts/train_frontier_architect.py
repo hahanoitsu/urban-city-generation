@@ -168,6 +168,7 @@ def main():
             "link": 0,
             "close": 0,
         }
+        curve_values = []
         for sample in dataset.samples:
             length = int(sample["program_length"])
             ops = sample["program_op"][:length]
@@ -175,6 +176,16 @@ def main():
             op_counts["grow"] += int((ops == OP_GROW).sum())
             op_counts["link"] += int((ops == OP_LINK).sum())
             op_counts["close"] += int((ops == OP_CLOSE).sum())
+            edge_mask = (ops == OP_GROW) | (ops == OP_LINK)
+            if bool(edge_mask.any()):
+                curve_values.append(
+                    sample["program_curve"][:length][edge_mask].abs().flatten()
+                )
+        curves = (
+            torch.cat(curve_values)
+            if curve_values
+            else torch.zeros(1)
+        )
         print(
             json.dumps(
                 {
@@ -191,6 +202,11 @@ def main():
                         "max": max(lengths),
                     },
                     "program_ops": op_counts,
+                    "curve_abs": {
+                        "p95": float(torch.quantile(curves, 0.95)),
+                        "p99": float(torch.quantile(curves, 0.99)),
+                        "max": float(curves.max()),
+                    },
                     "world_size": world_size,
                     "overfit": args.overfit,
                 },
