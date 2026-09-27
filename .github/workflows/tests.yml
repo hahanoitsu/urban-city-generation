@@ -25,6 +25,6 @@ jobs:
       - name: Test
         run: pytest -q --ignore=tests/model
       - name: Compile
-        run: python -m compileall -q src
+        run: python -m compileall -q src scripts
       - name: Lint
         run: ruff check src tests --exclude tests/model
