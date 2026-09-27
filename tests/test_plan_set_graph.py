@@ -161,12 +161,11 @@ def test_plan_set_graph_forward_and_loss():
     model = PlanSetGraphArchitect(config)
     output = model(batch)
 
-    assert output["node_presence"].shape == (2, 8)
-    assert output["node_xy"].shape == (2, 8, 2)
-    assert output["edge_exists"].shape == (2, 8, 8)
-    assert output["edge_curve"].shape == (2, 8, 8, 3)
+    assert output["node_xy"].shape == (2, 5, 2)
+    assert output["edge_exists"].shape == (2, 5, 5)
+    assert output["edge_curve"].shape == (2, 5, 5, 3)
 
-    loss, metrics, assignments = plan_set_graph_loss(
+    loss, metrics, orders = plan_set_graph_loss(
         output,
         batch,
         target_size_m=1024.0,
@@ -174,10 +173,11 @@ def test_plan_set_graph_forward_and_loss():
     loss.backward()
 
     assert torch.isfinite(loss)
-    assert len(assignments) == 2
-    assert len(torch.unique(assignments[0])) == 4
-    assert len(torch.unique(assignments[1])) == 5
+    assert len(orders) == 2
+    assert len(torch.unique(orders[0])) == 4
+    assert len(torch.unique(orders[1])) == 5
     assert "set_chamfer_m" in metrics
+    assert "node_cell_iou" in metrics
     unused = [
         name
         for name, parameter in model.named_parameters()
