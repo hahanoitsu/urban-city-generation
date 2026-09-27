@@ -115,15 +115,21 @@ class FrontierArchitect(nn.Module):
         )
         return self.input_norm(hidden)
 
-    def forward(
+    def encode_context(
         self,
         batch: dict[str, torch.Tensor],
-        *,
-        input_length: int | None = None,
-    ) -> dict[str, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         memory, memory_padding, _pool = self.context(batch)
-        if input_length is None:
-            input_length = self.config.max_steps - 1
+        return memory, memory_padding
+
+    def decode_program(
+        self,
+        batch: dict[str, torch.Tensor],
+        memory: torch.Tensor,
+        memory_padding: torch.Tensor,
+        *,
+        input_length: int,
+    ) -> dict[str, torch.Tensor]:
         hidden = self._token_embedding(batch, input_length)
         causal = nn.Transformer.generate_square_subsequent_mask(
             input_length,
@@ -163,3 +169,19 @@ class FrontierArchitect(nn.Module):
             "curve_logstd": curve[..., 1].clamp(-5.0, 1.0),
             "pointer": self.pointer_head(decoded),
         }
+
+    def forward(
+        self,
+        batch: dict[str, torch.Tensor],
+        *,
+        input_length: int | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if input_length is None:
+            input_length = self.config.max_steps - 1
+        memory, memory_padding = self.encode_context(batch)
+        return self.decode_program(
+            batch,
+            memory,
+            memory_padding,
+            input_length=input_length,
+        )
