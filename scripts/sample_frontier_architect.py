@@ -148,6 +148,7 @@ def empty_program(batch):
         "program_curve",
         "program_pointer",
         "program_active_node",
+        "program_active_xy",
     )
     for name in names:
         batch[name] = torch.zeros_like(batch[name])
@@ -171,6 +172,7 @@ def write_event(
     curve=None,
     pointer=0,
     active=-1,
+    active_xy=None,
 ):
     batch["program_op"][0, index] = op
     if xy is not None:
@@ -185,6 +187,8 @@ def write_event(
         batch["program_curve"][0, index] = curve
     batch["program_pointer"][0, index] = pointer
     batch["program_active_node"][0, index] = active
+    if active_xy is not None:
+        batch["program_active_xy"][0, index] = active_xy
 
 
 def legal_op_logits(logits, active, node_count, edge_count, max_nodes, max_edges):
@@ -281,6 +285,7 @@ def rollout(model, sample, tensor_config, program_config, device, temperature):
                 node_vertical=node_vertical,
                 node_boundary=boundary,
                 active=node_id,
+                active_xy=value,
             )
 
         elif op == OP_GROW:
@@ -361,6 +366,7 @@ def rollout(model, sample, tensor_config, program_config, device, temperature):
                 width=width,
                 curve=curve,
                 active=active,
+                active_xy=nodes[active]["position"],
             )
 
         elif op == OP_LINK:
@@ -421,6 +427,7 @@ def rollout(model, sample, tensor_config, program_config, device, temperature):
                     curve=curve,
                     pointer=pointer,
                     active=active,
+                    active_xy=nodes[active]["position"],
                 )
 
         if op == OP_CLOSE:
@@ -432,6 +439,11 @@ def rollout(model, sample, tensor_config, program_config, device, temperature):
                 prefix,
                 op=OP_CLOSE,
                 active=active if active is not None else -1,
+                active_xy=(
+                    nodes[active]["position"]
+                    if active is not None
+                    else None
+                ),
             )
 
         prefix += 1
