@@ -58,7 +58,7 @@ def curve_points(start, end, curve):
     for index in range(curve.shape[0]):
         fraction = (index + 1) / (curve.shape[0] + 1)
         base = start + chord * fraction
-        values.append(base + normal * curve[index] * length)
+        values.append(base + normal * curve[index])
     values.append(end)
     return values
 
