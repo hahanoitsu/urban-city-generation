@@ -1,8 +1,16 @@
+import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 
-from scripts.sample_spatial_anchor import render
+
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "sample_spatial_anchor.py"
+SPEC = importlib.util.spec_from_file_location("sample_spatial_anchor", SCRIPT)
+MODULE = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+SPEC.loader.exec_module(MODULE)
+render = MODULE.render
 
 
 def test_anchor_preview_accepts_tensor_coordinates():
