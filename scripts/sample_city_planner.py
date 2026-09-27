@@ -193,11 +193,11 @@ def main():
         predicted_plan = (
             output["plan_grid"][0] * plan_std[None]
             + plan_mean[None]
-        ).clamp_min(0.0)
+        ).clamp_min(0.0).detach().cpu()
         predicted_global = (
             output["plan_global"][0] * global_std
             + global_mean
-        )
+        ).detach().cpu()
         target_plan = sample["plan_grid_raw"]
         target_global = sample["plan_global_raw"]
 
