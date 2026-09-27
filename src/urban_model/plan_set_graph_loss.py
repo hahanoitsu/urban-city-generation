@@ -35,122 +35,37 @@ def _balanced_bce(
     )
 
 
-def _match_queries(
-    output: dict[str, torch.Tensor],
-    batch: dict[str, torch.Tensor],
-    batch_index: int,
-    *,
-    candidates: int = 24,
+def _spread_bits(value: torch.Tensor) -> torch.Tensor:
+    value = value.to(torch.int64) & 0xFFFF
+    value = (value | (value << 8)) & 0x00FF00FF
+    value = (value | (value << 4)) & 0x0F0F0F0F
+    value = (value | (value << 2)) & 0x33333333
+    value = (value | (value << 1)) & 0x55555555
+    return value
+
+
+def _canonical_order(
+    xy: torch.Tensor,
 ) -> torch.Tensor:
-    count = int(batch["node_count"][batch_index])
-    predicted_xy = output["node_xy"][batch_index]
-    target_xy = batch["node_xy"][
-        batch_index,
-        :count,
-    ]
-    cost = torch.cdist(
-        predicted_xy,
-        target_xy,
-        p=1,
+    unit = (
+        (xy + 1.0) * 0.5
+    ).clamp(
+        0.0,
+        1.0 - 1e-7,
     )
-    mode_log = F.log_softmax(
-        output["node_mode"][batch_index],
-        dim=-1,
+    quantized = torch.floor(
+        unit * 65535.0
+    ).to(torch.int64)
+    x = _spread_bits(
+        quantized[:, 0]
     )
-    target_mode = batch["node_mode"][
-        batch_index,
-        :count,
-    ]
-    cost = (
-        cost * 4.0
-        - mode_log[:, target_mode] * 0.35
-        - torch.sigmoid(
-            output["node_presence"][batch_index]
-        )[:, None]
-        * 0.1
+    y = _spread_bits(
+        quantized[:, 1]
     )
-
-    keep = min(
-        candidates,
-        cost.shape[0],
-    )
-    values, indexes = torch.topk(
-        cost,
-        k=keep,
-        dim=0,
-        largest=False,
-    )
-    values_cpu = values.detach().cpu()
-    indexes_cpu = indexes.detach().cpu()
-    proposals = []
-    for target in range(count):
-        for rank in range(keep):
-            proposals.append(
-                (
-                    float(
-                        values_cpu[
-                            rank,
-                            target,
-                        ]
-                    ),
-                    target,
-                    int(
-                        indexes_cpu[
-                            rank,
-                            target,
-                        ]
-                    ),
-                )
-            )
-    proposals.sort(
-        key=lambda value: value[0]
-    )
-
-    assigned = [-1] * count
-    used = set()
-    remaining = count
-    for _cost, target, query in proposals:
-        if (
-            assigned[target] >= 0
-            or query in used
-        ):
-            continue
-        assigned[target] = query
-        used.add(query)
-        remaining -= 1
-        if remaining == 0:
-            break
-
-    if remaining:
-        available = torch.ones(
-            cost.shape[0],
-            dtype=torch.bool,
-            device=cost.device,
-        )
-        if used:
-            available[
-                torch.tensor(
-                    sorted(used),
-                    device=cost.device,
-                )
-            ] = False
-        for target in range(count):
-            if assigned[target] >= 0:
-                continue
-            values = cost[:, target].masked_fill(
-                ~available,
-                float("inf"),
-            )
-            query = int(
-                values.argmin().item()
-            )
-            assigned[target] = query
-            available[query] = False
-
-    return torch.tensor(
-        assigned,
-        dtype=torch.long,
-        device=cost.device,
+    morton = x | (y << 1)
+    return torch.argsort(
+        morton,
+        stable=True,
     )
 
 
@@ -195,8 +110,19 @@ def _edge_targets(
     batch: dict[str, torch.Tensor],
     batch_index: int,
     node_count: int,
+    order: torch.Tensor,
 ):
     device = batch["edge_from"].device
+    inverse = torch.empty(
+        node_count,
+        dtype=torch.long,
+        device=device,
+    )
+    inverse[order] = torch.arange(
+        node_count,
+        device=device,
+    )
+
     exists = torch.zeros(
         node_count,
         node_count,
@@ -241,33 +167,38 @@ def _edge_targets(
         :node_count,
     ]
     for edge_index in range(edge_count):
-        left = int(
+        source_left = int(
             batch["edge_from"][
                 batch_index,
                 edge_index,
             ]
         )
-        right = int(
+        source_right = int(
             batch["edge_to"][
                 batch_index,
                 edge_index,
             ]
         )
         if (
-            left == right
-            or left >= node_count
-            or right >= node_count
+            source_left == source_right
+            or source_left >= node_count
+            or source_right >= node_count
         ):
             continue
 
+        left = int(
+            inverse[source_left]
+        )
+        right = int(
+            inverse[source_right]
+        )
         shape = batch["edge_shape"][
             batch_index,
             edge_index,
         ]
-        start = xy[left]
-        end = xy[right]
-        reverse = left > right
-        if reverse:
+        start = xy[source_left]
+        end = xy[source_right]
+        if left > right:
             left, right = right, left
             start, end = end, start
             shape = torch.flip(
@@ -298,11 +229,77 @@ def _edge_targets(
         edge_curve[left, right] = curve
 
     return (
+        inverse,
         exists,
         edge_class,
         edge_vertical,
         edge_width,
         edge_curve,
+    )
+
+
+def _cell_iou(
+    predicted_xy: torch.Tensor,
+    target_xy: torch.Tensor,
+    grid_size: int = 16,
+) -> torch.Tensor:
+    predicted_unit = (
+        (predicted_xy + 1.0) * 0.5
+    ).clamp(
+        0.0,
+        1.0 - 1e-7,
+    )
+    target_unit = (
+        (target_xy + 1.0) * 0.5
+    ).clamp(
+        0.0,
+        1.0 - 1e-7,
+    )
+    predicted_index = (
+        torch.floor(
+            predicted_unit[:, 1]
+            * grid_size
+        ).long()
+        * grid_size
+        + torch.floor(
+            predicted_unit[:, 0]
+            * grid_size
+        ).long()
+    )
+    target_index = (
+        torch.floor(
+            target_unit[:, 1]
+            * grid_size
+        ).long()
+        * grid_size
+        + torch.floor(
+            target_unit[:, 0]
+            * grid_size
+        ).long()
+    )
+    predicted_mask = torch.zeros(
+        grid_size * grid_size,
+        dtype=torch.bool,
+        device=predicted_xy.device,
+    )
+    target_mask = torch.zeros_like(
+        predicted_mask
+    )
+    predicted_mask[
+        torch.unique(predicted_index)
+    ] = True
+    target_mask[
+        torch.unique(target_index)
+    ] = True
+    intersection = (
+        predicted_mask & target_mask
+    ).sum()
+    union = (
+        predicted_mask | target_mask
+    ).sum().clamp_min(1)
+    return (
+        intersection.to(torch.float32)
+        / union.to(torch.float32)
     )
 
 
@@ -317,17 +314,10 @@ def plan_set_graph_loss(
     list[torch.Tensor],
 ]:
     device = output["node_xy"].device
-    batch_size = output["node_xy"].shape[0]
-    query_count = output[
+    batch_size = output[
         "node_xy"
-    ].shape[1]
+    ].shape[0]
 
-    presence_target = torch.zeros(
-        batch_size,
-        query_count,
-        dtype=torch.float32,
-        device=device,
-    )
     node_xy_losses = []
     node_mode_losses = []
     node_vertical_losses = []
@@ -340,40 +330,42 @@ def plan_set_graph_loss(
     edge_curve_losses = []
     curve_smooth_losses = []
     node_errors_m = []
-    query_recalls = []
+    cell_ious = []
     set_chamfers_m = []
     edge_recalls = []
-    assignments = []
+    orders = []
 
     for batch_index in range(batch_size):
         node_count = int(
-            batch["node_count"][batch_index]
+            batch["node_count"][
+                batch_index
+            ]
         )
-        query_ids = _match_queries(
-            output,
-            batch,
-            batch_index,
-        )
-        assignments.append(query_ids)
-        presence_target[
-            batch_index,
-            query_ids,
-        ] = 1.0
-
-        predicted_xy = output[
+        target_xy_unsorted = batch[
             "node_xy"
-        ][batch_index, query_ids]
-        target_xy = batch["node_xy"][
+        ][
             batch_index,
             :node_count,
         ]
-        xy_error = F.smooth_l1_loss(
-            predicted_xy,
-            target_xy,
-            reduction="none",
+        order = _canonical_order(
+            target_xy_unsorted
         )
+        orders.append(order)
+        target_xy = target_xy_unsorted[
+            order
+        ]
+        predicted_xy = output[
+            "node_xy"
+        ][
+            batch_index,
+            :node_count,
+        ]
+
         node_xy_losses.append(
-            xy_error.mean()
+            F.smooth_l1_loss(
+                predicted_xy,
+                target_xy,
+            )
         )
         node_errors_m.append(
             torch.linalg.vector_norm(
@@ -385,48 +377,74 @@ def plan_set_graph_loss(
                 / 2.0
             )
         )
+        cell_ious.append(
+            _cell_iou(
+                predicted_xy,
+                target_xy,
+            )
+        )
+        distances = torch.cdist(
+            predicted_xy,
+            target_xy,
+        )
+        set_chamfers_m.append(
+            (
+                distances.min(
+                    dim=1
+                ).values.mean()
+                + distances.min(
+                    dim=0
+                ).values.mean()
+            )
+            * 0.25
+            * target_size_m
+        )
 
         node_mode_losses.append(
             F.cross_entropy(
                 output["node_mode"][
                     batch_index,
-                    query_ids,
+                    :node_count,
                 ],
                 batch["node_mode"][
                     batch_index,
                     :node_count,
-                ],
+                ][order],
             )
         )
         node_vertical_losses.append(
             F.cross_entropy(
                 output["node_vertical"][
                     batch_index,
-                    query_ids,
+                    :node_count,
                 ],
                 batch["node_vertical"][
                     batch_index,
                     :node_count,
-                ],
+                ][order],
             )
         )
         node_boundary_losses.append(
             F.binary_cross_entropy_with_logits(
                 output["node_boundary"][
                     batch_index,
-                    query_ids,
+                    :node_count,
                 ],
                 batch["node_boundary"][
                     batch_index,
                     :node_count,
-                ],
+                ][order],
             )
         )
-        degree = _target_degree(
+
+        source_degree = _target_degree(
             batch,
             batch_index,
             node_count,
-        ).clamp_max(
+        )
+        target_degree = source_degree[
+            order
+        ].clamp_max(
             output["node_degree"].shape[-1]
             - 1
         )
@@ -434,13 +452,14 @@ def plan_set_graph_loss(
             F.cross_entropy(
                 output["node_degree"][
                     batch_index,
-                    query_ids,
+                    :node_count,
                 ],
-                degree,
+                target_degree,
             )
         )
 
         (
+            _inverse,
             target_exists,
             target_class,
             target_vertical,
@@ -450,36 +469,42 @@ def plan_set_graph_loss(
             batch,
             batch_index,
             node_count,
+            order,
         )
         predicted_exists = output[
             "edge_exists"
-        ][batch_index][
-            query_ids[:, None],
-            query_ids[None, :],
+        ][
+            batch_index,
+            :node_count,
+            :node_count,
         ]
         predicted_class = output[
             "edge_class"
-        ][batch_index][
-            query_ids[:, None],
-            query_ids[None, :],
+        ][
+            batch_index,
+            :node_count,
+            :node_count,
         ]
         predicted_vertical = output[
             "edge_vertical"
-        ][batch_index][
-            query_ids[:, None],
-            query_ids[None, :],
+        ][
+            batch_index,
+            :node_count,
+            :node_count,
         ]
         predicted_width = output[
             "edge_width"
-        ][batch_index][
-            query_ids[:, None],
-            query_ids[None, :],
+        ][
+            batch_index,
+            :node_count,
+            :node_count,
         ]
         predicted_curve = output[
             "edge_curve"
-        ][batch_index][
-            query_ids[:, None],
-            query_ids[None, :],
+        ][
+            batch_index,
+            :node_count,
+            :node_count,
         ]
 
         tri = torch.triu(
@@ -491,41 +516,58 @@ def plan_set_graph_loss(
             ),
             diagonal=1,
         )
-        tri_target = target_exists[tri].to(
-            predicted_exists.dtype
-        )
         edge_exists_losses.append(
             _balanced_bce(
                 predicted_exists[tri],
-                tri_target,
+                target_exists[tri].to(
+                    predicted_exists.dtype
+                ),
                 maximum_positive_weight=80.0,
             )
         )
 
         positive = target_exists
-        if bool(positive.any()):
+        if bool(
+            positive.any()
+        ):
             edge_class_losses.append(
                 F.cross_entropy(
-                    predicted_class[positive],
-                    target_class[positive],
+                    predicted_class[
+                        positive
+                    ],
+                    target_class[
+                        positive
+                    ],
                 )
             )
             edge_vertical_losses.append(
                 F.cross_entropy(
-                    predicted_vertical[positive],
-                    target_vertical[positive],
+                    predicted_vertical[
+                        positive
+                    ],
+                    target_vertical[
+                        positive
+                    ],
                 )
             )
             edge_width_losses.append(
                 F.smooth_l1_loss(
-                    predicted_width[positive],
-                    target_width[positive],
+                    predicted_width[
+                        positive
+                    ],
+                    target_width[
+                        positive
+                    ],
                 )
             )
             edge_curve_losses.append(
                 F.smooth_l1_loss(
-                    predicted_curve[positive],
-                    target_curve[positive],
+                    predicted_curve[
+                        positive
+                    ],
+                    target_curve[
+                        positive
+                    ],
                 )
             )
             second = (
@@ -544,77 +586,58 @@ def plan_set_graph_loss(
                 second.square().mean()
             )
         else:
-            zero = predicted_exists.sum() * 0.0
-            edge_class_losses.append(zero)
-            edge_vertical_losses.append(zero)
-            edge_width_losses.append(zero)
-            edge_curve_losses.append(zero)
-            curve_smooth_losses.append(zero)
-
-        selected = torch.topk(
-            output["node_presence"][
-                batch_index
-            ],
-            k=node_count,
-        ).indices
-        matched_set = torch.zeros(
-            query_count,
-            dtype=torch.bool,
-            device=device,
-        )
-        matched_set[query_ids] = True
-        query_recalls.append(
-            matched_set[selected]
-            .to(torch.float32)
-            .mean()
-        )
-
-        selected_xy = output[
-            "node_xy"
-        ][batch_index, selected]
-        distances = torch.cdist(
-            selected_xy,
-            target_xy,
-        )
-        chamfer = (
-            distances.min(dim=1).values.mean()
-            + distances.min(dim=0).values.mean()
-        ) * 0.5
-        set_chamfers_m.append(
-            chamfer
-            * (
-                target_size_m
-                / 2.0
+            zero = (
+                predicted_exists.sum()
+                * 0.0
             )
-        )
+            edge_class_losses.append(
+                zero
+            )
+            edge_vertical_losses.append(
+                zero
+            )
+            edge_width_losses.append(
+                zero
+            )
+            edge_curve_losses.append(
+                zero
+            )
+            curve_smooth_losses.append(
+                zero
+            )
 
-        pair_scores = predicted_exists[tri]
         target_edges = int(
             target_exists.sum()
         )
         if target_edges > 0:
+            pair_scores = predicted_exists[
+                tri
+            ]
             requested = min(
                 target_edges,
-                int(pair_scores.numel()),
+                int(
+                    pair_scores.numel()
+                ),
             )
             chosen = torch.topk(
                 pair_scores,
                 k=requested,
             ).indices
-            target_flat = target_exists[tri]
+            flat_target = target_exists[
+                tri
+            ]
             edge_recalls.append(
-                target_flat[chosen]
-                .to(torch.float32)
+                flat_target[
+                    chosen
+                ]
+                .to(
+                    torch.float32
+                )
                 .sum()
                 / target_edges
             )
 
     losses = {
-        "presence": _balanced_bce(
-            output["node_presence"],
-            presence_target,
-            maximum_positive_weight=100.0,
-        ),
         "node_xy": torch.stack(
             node_xy_losses
         ).mean(),
@@ -650,8 +673,7 @@ def plan_set_graph_loss(
         ).mean(),
     }
     weights = {
-        "presence": 1.5,
-        "node_xy": 4.0,
+        "node_xy": 5.0,
         "node_mode": 0.5,
         "node_vertical": 0.35,
         "node_boundary": 0.35,
@@ -664,33 +686,47 @@ def plan_set_graph_loss(
         "curve_smooth": 0.05,
     }
     total = sum(
-        losses[name] * weights[name]
+        losses[name]
+        * weights[name]
         for name in losses
-    ) / sum(weights.values())
+    ) / sum(
+        weights.values()
+    )
 
     metrics = {
-        name: float(value.detach())
-        for name, value in losses.items()
+        name: float(
+            value.detach()
+        )
+        for name, value
+        in losses.items()
     }
     metrics["total"] = float(
         total.detach()
     )
-    metrics["node_position_mae_m"] = float(
+    metrics[
+        "node_position_mae_m"
+    ] = float(
         torch.stack(
             node_errors_m
         ).mean().detach()
     )
-    metrics["query_recall"] = float(
+    metrics[
+        "node_cell_iou"
+    ] = float(
         torch.stack(
-            query_recalls
+            cell_ious
         ).mean().detach()
     )
-    metrics["set_chamfer_m"] = float(
+    metrics[
+        "set_chamfer_m"
+    ] = float(
         torch.stack(
             set_chamfers_m
         ).mean().detach()
     )
-    metrics["edge_recall"] = float(
+    metrics[
+        "edge_recall"
+    ] = float(
         torch.stack(
             edge_recalls
         ).mean().detach()
@@ -703,5 +739,5 @@ def plan_set_graph_loss(
     return (
         total,
         metrics,
-        assignments,
+        orders,
     )
