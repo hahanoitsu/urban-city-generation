@@ -124,6 +124,7 @@ def build_frontier_program(
     curve = [[0.0] * config.curve_points]
     pointer = [0]
     active_node = [-1]
+    active_xy = [[0.0, 0.0]]
 
     generated: dict[int, int] = {}
     emitted_edges = set()
@@ -141,6 +142,7 @@ def build_frontier_program(
         curve_value=None,
         pointer_value=0,
         active_value=-1,
+        active_xy_value=(0.0, 0.0),
     ):
         ops.append(op)
         xy.append([float(xy_value[0]), float(xy_value[1])])
@@ -159,6 +161,12 @@ def build_frontier_program(
             curve.append([float(value) for value in values])
         pointer.append(int(pointer_value))
         active_node.append(int(active_value))
+        active_xy.append(
+            [
+                float(active_xy_value[0]),
+                float(active_xy_value[1]),
+            ]
+        )
 
     for component in components:
         root = min(component, key=lambda node: _root_key(node, sample))
@@ -170,6 +178,7 @@ def build_frontier_program(
             node_vertical_value=sample["node_vertical"][root],
             node_boundary_value=sample["node_boundary"][root],
             active_value=generated[root],
+            active_xy_value=sample["node_xy"][root],
         )
         queue = deque([root])
 
@@ -216,6 +225,7 @@ def build_frontier_program(
                         edge_width_value=sample["edge_width"][edge_index, 0],
                         curve_value=edge_curve,
                         active_value=generated[active],
+                        active_xy_value=sample["node_xy"][active],
                     )
                     queue.append(neighbour)
                 else:
@@ -227,11 +237,21 @@ def build_frontier_program(
                         curve_value=edge_curve,
                         pointer_value=generated[neighbour],
                         active_value=generated[active],
+                        active_xy_value=sample["node_xy"][active],
                     )
 
             queue.popleft()
             next_active = generated[queue[0]] if queue else -1
-            append(OP_CLOSE, active_value=next_active)
+            next_xy = (
+                sample["node_xy"][queue[0]]
+                if queue
+                else (0.0, 0.0)
+            )
+            append(
+                OP_CLOSE,
+                active_value=next_active,
+                active_xy_value=next_xy,
+            )
 
     append(OP_EOS)
 
@@ -303,6 +323,11 @@ def build_frontier_program(
             active_node,
             (config.max_steps,),
             torch.long,
+        ),
+        "program_active_xy": padded_tensor(
+            active_xy,
+            (config.max_steps, 2),
+            torch.float32,
         ),
         "program_nodes": torch.tensor(len(generated), dtype=torch.long),
         "program_edges": torch.tensor(len(emitted_edges), dtype=torch.long),
