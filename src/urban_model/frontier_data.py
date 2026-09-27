@@ -37,7 +37,7 @@ def _curve_from_shape(
     chord = end - start
     length = torch.linalg.vector_norm(chord).clamp_min(1e-5)
     normal = torch.stack([-chord[1], chord[0]]) / length
-    curve = (shape * normal[None]).sum(dim=-1) / length
+    curve = (shape * normal[None]).sum(dim=-1)
     if reverse:
         curve = -torch.flip(curve, dims=[0])
     return curve
