@@ -391,7 +391,13 @@ class SpatialAnchorArchitect(nn.Module):
         self,
         output: dict[str, torch.Tensor],
         batch: dict[str, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         batch_size = output["cell_occupancy"].shape[0]
         maximum = self.config.max_active_nodes
         scores = (
@@ -438,7 +444,13 @@ class SpatialAnchorArchitect(nn.Module):
                     device=scores.device,
                 )
             counts[batch_index] = len(selected)
-        return active_ids, counts, boundary_ids, boundary_positions
+        return (
+            active_ids,
+            counts,
+            boundary_ids,
+            boundary_positions,
+            boundary_counts,
+        )
 
     def forward(
         self,
@@ -492,9 +504,13 @@ class SpatialAnchorArchitect(nn.Module):
         latent = self._sample(mu, logvar, temperature=temperature)
         output = self._node_predictions(cells, latent)
         positions = self.node_positions(output["node_offset"])
-        active_ids, active_count, boundary_ids, boundary_positions = (
-            self._predicted_active_ids(output, batch)
-        )
+        (
+            active_ids,
+            active_count,
+            boundary_ids,
+            boundary_positions,
+            boundary_counts,
+        ) = self._predicted_active_ids(output, batch)
         active_hidden, active_positions = self._active_nodes(
             output["node_hidden"],
             positions,
@@ -505,9 +521,7 @@ class SpatialAnchorArchitect(nn.Module):
                 int(boundary_ids[batch_index, index]): boundary_positions[
                     batch_index, index
                 ]
-                for index in range(boundary_ids.shape[1])
-                if int(boundary_ids[batch_index, index]) != 0
-                or not bool(batch["port_padding"][batch_index, index])
+                for index in range(int(boundary_counts[batch_index]))
             }
             count = int(active_count[batch_index])
             for active_index in range(count):
