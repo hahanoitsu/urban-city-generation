@@ -49,7 +49,7 @@ class FrontierArchitect(nn.Module):
         self.active = nn.Embedding(config.max_nodes + 1, d)
         self.position = nn.Embedding(config.max_steps, d)
         self.continuous = nn.Sequential(
-            nn.Linear(2 + 1 + config.curve_points + 1, d),
+            nn.Linear(2 + 2 + 1 + config.curve_points + 1, d),
             nn.GELU(),
             nn.Linear(d, d),
         )
@@ -95,6 +95,7 @@ class FrontierArchitect(nn.Module):
         continuous = torch.cat(
             [
                 batch["program_xy"][:, :length],
+                batch["program_active_xy"][:, :length],
                 batch["program_edge_width"][:, :length],
                 batch["program_curve"][:, :length],
                 batch["program_node_boundary"][:, :length, None],
