@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import math
 from collections import defaultdict
@@ -52,20 +53,14 @@ def _iter_lines(geometry: BaseGeometry) -> Iterable[LineString]:
 
 
 def _line_payload(
-    frame: gpd.GeoDataFrame,
-    geometry: BaseGeometry,
-    *,
-    mode: str,
-    origin_x: float,
-    origin_y: float,
+    frame: gpd.GeoDataFrame, geometry: BaseGeometry, *, mode: str, origin_x: float, origin_y: float
 ) -> list[dict[str, Any]]:
     clipped = _clip_frame(frame, geometry)
     records = []
     for index, row in clipped.iterrows():
         for part_index, line in enumerate(_iter_lines(row.geometry)):
             coordinates = [
-                [float(x - origin_x), float(y - origin_y)]
-                for x, y, *_rest in line.coords
+                [float(x - origin_x), float(y - origin_y)] for x, y, *_rest in line.coords
             ]
             if len(coordinates) < 2:
                 continue
@@ -108,16 +103,9 @@ def _build_context_grid(
     for row in range(first_row, last_row + 1):
         for column in range(first_col, last_col + 1):
             scanned += 1
-            cell = box(
-                column * cell_m,
-                row * cell_m,
-                (column + 1) * cell_m,
-                (row + 1) * cell_m,
-            )
+            cell = box(column * cell_m, row * cell_m, (column + 1) * cell_m, (row + 1) * cell_m)
             values[(row, column)] = _region_stats(layers, cell)
-            if show_progress and (
-                scanned == 1 or scanned % 500 == 0 or scanned == total
-            ):
+            if show_progress and (scanned == 1 or scanned % 500 == 0 or scanned == total):
                 print(f"context grid: {scanned}/{total}", flush=True)
     return values
 
@@ -127,6 +115,7 @@ def _context_cells(
     target: Polygon,
     cell_m: float,
     context_grid: dict[tuple[int, int], dict[str, float]],
+    layers=None,
 ):
     minx, miny, maxx, maxy = context.bounds
     first_col = math.floor(minx / cell_m)
@@ -138,16 +127,16 @@ def _context_cells(
         for local_column in range(columns):
             column = first_col + local_column
             row = first_row + local_row
-            cell = box(
-                column * cell_m,
-                row * cell_m,
-                (column + 1) * cell_m,
-                (row + 1) * cell_m,
-            )
-            masked_fraction = float(
-                cell.intersection(target).area / max(cell.area, 1.0)
-            )
-            features = {} if masked_fraction >= 1.0 - 1e-8 else context_grid[(row, column)]
+            cell = box(column * cell_m, row * cell_m, (column + 1) * cell_m, (row + 1) * cell_m)
+            masked_fraction = float(cell.intersection(target).area / max(cell.area, 1.0))
+            if masked_fraction > 1e-8:
+                features = {}
+            else:
+                if (row, column) not in context_grid:
+                    if layers is None:
+                        raise ValueError("Missing context cell statistics")
+                    context_grid[(row, column)] = _region_stats(layers, cell)
+                features = context_grid[(row, column)]
             values.append(
                 {
                     "row": local_row,
@@ -163,11 +152,16 @@ def _context_cells(
     return values
 
 
-def _edge_signature(edge: dict[str, Any]) -> tuple[str, str, str]:
+def _edge_signature(edge: dict[str, Any]) -> tuple[Any, ...]:
     return (
         str(edge.get("transport_mode") or "road"),
         str(edge.get("class") or "local"),
         str(edge.get("vertical_mode") or "unknown"),
+        float(edge.get("layer_order") or 0.0),
+        round(float(edge.get("width_m", 5.0)), 3),
+        str(edge.get("oneway") or "no"),
+        str(edge.get("bridge") or "no"),
+        str(edge.get("tunnel") or "no"),
     )
 
 
@@ -193,6 +187,10 @@ def simplify_transport_graph(graph: dict[str, Any]) -> dict[str, Any]:
             node.get("boundary_port_key") is not None
             or len(indexes) != 2
             or len(signatures) != 1
+            or any(
+                str(edges[index].get("oneway") or "no") not in ("no", "0", "false")
+                for index in indexes
+            )
         ):
             critical.add(node_id)
 
@@ -236,19 +234,28 @@ def simplify_transport_graph(graph: dict[str, Any]) -> dict[str, Any]:
 
         simplified.append(
             {
+                **edges[first_index],
                 "id": f"chain:{len(simplified)}",
                 "from_node": start,
                 "to_node": end,
                 "transport_mode": signature[0],
                 "class": signature[1],
                 "vertical_mode": signature[2],
-                "width_m": sum(width * length for width, length in zip(widths, lengths, strict=True))
+                "width_m": sum(
+                    width * length for width, length in zip(widths, lengths, strict=True)
+                )
                 / max(sum(lengths), 1e-6),
                 "length_m": float(LineString([point[:2] for point in geometry]).length),
                 "geometry_local_m": geometry,
                 "source_ids": source_ids,
             }
         )
+        if start != str(edges[first_index]["from_node"]):
+            oneway = str(edges[first_index].get("oneway") or "no").lower()
+            if oneway in ("yes", "1", "true"):
+                simplified[-1]["oneway"] = "-1"
+            elif oneway == "-1":
+                simplified[-1]["oneway"] = "yes"
 
     for node_id in sorted(critical):
         for edge_index in adjacency[node_id]:
@@ -261,6 +268,7 @@ def simplify_transport_graph(graph: dict[str, Any]) -> dict[str, Any]:
         visited.add(edge_index)
         simplified.append(
             {
+                **edge,
                 "id": f"cycle:{len(simplified)}",
                 "from_node": str(edge["from_node"]),
                 "to_node": str(edge["to_node"]),
@@ -275,9 +283,7 @@ def simplify_transport_graph(graph: dict[str, Any]) -> dict[str, Any]:
         )
 
     used = {
-        node_id
-        for edge in simplified
-        for node_id in (str(edge["from_node"]), str(edge["to_node"]))
+        node_id for edge in simplified for node_id in (str(edge["from_node"]), str(edge["to_node"]))
     }
     degree = defaultdict(int)
     for edge in simplified:
@@ -307,8 +313,7 @@ def simplify_transport_graph(graph: dict[str, Any]) -> dict[str, Any]:
             "raw_nodes": len(graph["nodes"]),
             "raw_edges": len(graph["edges"]),
             "boundary_ports": sum(
-                node.get("boundary_port_key") is not None
-                for node in result_nodes
+                node.get("boundary_port_key") is not None for node in result_nodes
             ),
         },
     }
@@ -326,7 +331,15 @@ def _target_graph(layers, target: Polygon, city_id: str):
         maxx=float(target.bounds[2]),
         maxy=float(target.bounds[3]),
     )
-    return simplify_transport_graph(build_transport_graph(roads, rail, tile))
+    graph = simplify_transport_graph(build_transport_graph(roads, rail, tile))
+    # Vertical categories are observed tags; the compiler's deck heights are not measurements.
+    for node in graph["nodes"]:
+        node["position_local_m"][2] = None
+        node["position_projected_m"][2] = None
+    for edge in graph["edges"]:
+        edge["geometry_local_m"] = [[*point[:2], None] for point in edge["geometry_local_m"]]
+        edge["z_source"] = "unavailable"
+    return graph
 
 
 def _line_length(frame: gpd.GeoDataFrame) -> float:
@@ -339,6 +352,7 @@ def build_spatial_world(
     *,
     config: SpatialWorldConfig | None = None,
     show_progress: bool = False,
+    maximum_samples: int | None = None,
 ) -> dict[str, Any]:
     city_path = Path(city_path).expanduser().resolve()
     output_dir = Path(output_dir).expanduser().resolve()
@@ -350,13 +364,7 @@ def build_spatial_world(
     city_bounds = _frame_bounds(layers)
     whole_city = box(*city_bounds)
     city_style = _region_stats(layers, whole_city)
-    context_grid = _build_context_grid(
-        layers,
-        city_bounds,
-        config.context_cell_m,
-        config.context_size_m / 2.0,
-        show_progress=show_progress,
-    )
+    context_grid = {}
 
     minx, miny, maxx, maxy = city_bounds
     stride = config.target_stride_m
@@ -371,128 +379,136 @@ def build_spatial_world(
     rows = []
     scanned = 0
 
-    for row in range(first_row, last_row + 1):
-        for column in range(first_col, last_col + 1):
-            scanned += 1
-            target_minx = column * stride
-            target_miny = row * stride
-            target = box(
-                target_minx,
-                target_miny,
-                target_minx + config.target_size_m,
-                target_miny + config.target_size_m,
-            )
-            roads = _clip_frame(layers.roads, target)
-            rail = _clip_frame(layers.rail, target)
-            transport_length = _line_length(roads) + _line_length(rail)
-            if transport_length < config.minimum_transport_length_m:
-                if show_progress and (scanned == 1 or scanned % 100 == 0 or scanned == total):
-                    print(f"spatial world: {scanned}/{total} scanned, {len(rows)} kept", flush=True)
-                continue
-
-            center = target.centroid
-            context = box(
-                center.x - config.context_size_m / 2.0,
-                center.y - config.context_size_m / 2.0,
-                center.x + config.context_size_m / 2.0,
-                center.y + config.context_size_m / 2.0,
-            )
-            local_vector = box(
-                center.x - config.local_vector_size_m / 2.0,
-                center.y - config.local_vector_size_m / 2.0,
-                center.x + config.local_vector_size_m / 2.0,
-                center.y + config.local_vector_size_m / 2.0,
-            )
-            visible_local = local_vector.difference(target)
-            sample_id = f"{city_id}_w{row:+06d}_{column:+06d}"
-            ports = _target_ports(layers, target, config.port_probe_m)
-            for port in ports:
-                port["position_local_m"] = [
-                    float(port["position_projected_m"][0] - target.bounds[0]),
-                    float(port["position_projected_m"][1] - target.bounds[1]),
-                ]
-
-            graph = _target_graph(layers, target, city_id)
-            payload = {
-                "format": "aether-spatial-world-sample",
-                "version": "0.1.0",
-                "id": sample_id,
-                "city_id": city_id,
-                "coordinate_system": {
-                    "units": "metres",
-                    "source_projected_crs": str(layers.roads.crs),
-                    "target_origin_projected_m": [
-                        float(target.bounds[0]),
-                        float(target.bounds[1]),
-                    ],
-                },
-                "bounds": {
-                    "target_projected_m": list(map(float, target.bounds)),
-                    "local_vector_projected_m": list(map(float, local_vector.bounds)),
-                    "context_projected_m": list(map(float, context.bounds)),
-                },
-                "style": city_style,
-                "controls": _region_stats(layers, target),
-                "input": {
-                    "context_cells": _context_cells(
-                        context,
-                        target,
-                        config.context_cell_m,
-                        context_grid,
-                    ),
-                    "visible_transport": {
-                        "roads": _line_payload(
-                            layers.roads,
-                            visible_local,
-                            mode="road",
-                            origin_x=target.bounds[0],
-                            origin_y=target.bounds[1],
-                        ),
-                        "rail": _line_payload(
-                            layers.rail,
-                            visible_local,
-                            mode="rail",
-                            origin_x=target.bounds[0],
-                            origin_y=target.bounds[1],
-                        ),
-                    },
-                    "boundary_ports": ports,
-                },
-                "target": {
-                    "transport_graph": graph,
-                    "buildings": _local_buildings(layers.buildings, target),
-                    "green": _local_polygons(layers.green, target, kind="green"),
-                    "water": _local_polygons(layers.water, target, kind="water"),
-                    "landuse": _local_polygons(layers.landuse, target, kind="landuse"),
-                },
-            }
-
-            path = samples_dir / f"{sample_id}.json.gz"
-            with gzip.open(path, "wt", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False)
-
-            rows.append(
-                {
-                    "id": sample_id,
-                    "city_id": city_id,
-                    "sample_path": path.relative_to(output_dir).as_posix(),
-                    "transport_length_m": transport_length,
-                    "ports": len(ports),
-                    "context_cells": len(payload["input"]["context_cells"]),
-                    "visible_roads": len(payload["input"]["visible_transport"]["roads"]),
-                    "visible_rail": len(payload["input"]["visible_transport"]["rail"]),
-                    "nodes": graph["statistics"]["nodes"],
-                    "edges": graph["statistics"]["edges"],
-                    "raw_nodes": graph["statistics"]["raw_nodes"],
-                    "raw_edges": graph["statistics"]["raw_edges"],
-                    "buildings": len(payload["target"]["buildings"]),
-                    "green": len(payload["target"]["green"]),
-                    "water": len(payload["target"]["water"]),
-                    "landuse": len(payload["target"]["landuse"]),
-                }
-            )
+    locations = [
+        (row, column)
+        for row in range(first_row, last_row + 1)
+        for column in range(first_col, last_col + 1)
+    ]
+    if maximum_samples is not None:
+        if maximum_samples < 1:
+            raise ValueError("maximum_samples must be positive")
+        locations.sort(
+            key=lambda value: hashlib.sha1(
+                f"{city_id}:{value[0]}:{value[1]}".encode(), usedforsecurity=False
+            ).digest()
+        )
+    for row, column in locations:
+        if maximum_samples is not None and len(rows) >= maximum_samples:
+            break
+        scanned += 1
+        target_minx = column * stride
+        target_miny = row * stride
+        target = box(
+            target_minx,
+            target_miny,
+            target_minx + config.target_size_m,
+            target_miny + config.target_size_m,
+        )
+        roads = _clip_frame(layers.roads, target)
+        rail = _clip_frame(layers.rail, target)
+        transport_length = _line_length(roads) + _line_length(rail)
+        if transport_length < config.minimum_transport_length_m:
             if show_progress and (scanned == 1 or scanned % 100 == 0 or scanned == total):
                 print(f"spatial world: {scanned}/{total} scanned, {len(rows)} kept", flush=True)
+            continue
+
+        center = target.centroid
+        context = box(
+            center.x - config.context_size_m / 2.0,
+            center.y - config.context_size_m / 2.0,
+            center.x + config.context_size_m / 2.0,
+            center.y + config.context_size_m / 2.0,
+        )
+        local_vector = box(
+            center.x - config.local_vector_size_m / 2.0,
+            center.y - config.local_vector_size_m / 2.0,
+            center.x + config.local_vector_size_m / 2.0,
+            center.y + config.local_vector_size_m / 2.0,
+        )
+        visible_local = local_vector.difference(target)
+        sample_id = f"{city_id}_w{row:+06d}_{column:+06d}"
+        ports = _target_ports(layers, target, config.port_probe_m)
+        for port in ports:
+            port["position_local_m"] = [
+                float(port["position_projected_m"][0] - target.bounds[0]),
+                float(port["position_projected_m"][1] - target.bounds[1]),
+            ]
+
+        graph = _target_graph(layers, target, city_id)
+        payload = {
+            "format": "aether-spatial-world-sample",
+            "version": "0.2.0",
+            "id": sample_id,
+            "city_id": city_id,
+            "coordinate_system": {
+                "units": "metres",
+                "source_projected_crs": str(layers.roads.crs),
+                "target_origin_projected_m": [float(target.bounds[0]), float(target.bounds[1])],
+            },
+            "bounds": {
+                "target_projected_m": list(map(float, target.bounds)),
+                "local_vector_projected_m": list(map(float, local_vector.bounds)),
+                "context_projected_m": list(map(float, context.bounds)),
+            },
+            "style": city_style,
+            "controls": _region_stats(layers, target),
+            "input": {
+                "context_cells": _context_cells(
+                    context, target, config.context_cell_m, context_grid, layers=layers
+                ),
+                "visible_transport": {
+                    "roads": _line_payload(
+                        layers.roads,
+                        visible_local,
+                        mode="road",
+                        origin_x=target.bounds[0],
+                        origin_y=target.bounds[1],
+                    ),
+                    "rail": _line_payload(
+                        layers.rail,
+                        visible_local,
+                        mode="rail",
+                        origin_x=target.bounds[0],
+                        origin_y=target.bounds[1],
+                    ),
+                },
+                "boundary_ports": ports,
+            },
+            "target": {
+                "transport_graph": graph,
+                "buildings": _local_buildings(layers.buildings, target),
+                "green": _local_polygons(layers.green, target, kind="green"),
+                "water": _local_polygons(layers.water, target, kind="water"),
+                "landuse": _local_polygons(layers.landuse, target, kind="landuse"),
+            },
+        }
+
+        path = samples_dir / f"{sample_id}.json.gz"
+        with gzip.open(path, "wt", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+
+        rows.append(
+            {
+                "id": sample_id,
+                "city_id": city_id,
+                "sample_path": path.relative_to(output_dir).as_posix(),
+                "transport_length_m": transport_length,
+                "ports": len(ports),
+                "context_cells": len(payload["input"]["context_cells"]),
+                "visible_roads": len(payload["input"]["visible_transport"]["roads"]),
+                "visible_rail": len(payload["input"]["visible_transport"]["rail"]),
+                "nodes": graph["statistics"]["nodes"],
+                "edges": graph["statistics"]["edges"],
+                "raw_nodes": graph["statistics"]["raw_nodes"],
+                "raw_edges": graph["statistics"]["raw_edges"],
+                "buildings": len(payload["target"]["buildings"]),
+                "green": len(payload["target"]["green"]),
+                "water": len(payload["target"]["water"]),
+                "landuse": len(payload["target"]["landuse"]),
+            }
+        )
+        if show_progress and (scanned == 1 or scanned % 100 == 0 or scanned == total):
+            print(f"spatial world: {scanned}/{total} scanned, {len(rows)} kept", flush=True)
 
     with (output_dir / "samples.jsonl").open("w", encoding="utf-8") as handle:
         for row in rows:
@@ -500,7 +516,7 @@ def build_spatial_world(
 
     summary = {
         "format": "aether-spatial-world",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "city_id": city_id,
         "source_city": str(city_path),
         "city_bounds_projected_m": list(map(float, city_bounds)),
@@ -508,8 +524,5 @@ def build_spatial_world(
         "style": city_style,
         "config": asdict(config),
     }
-    (output_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     return summary

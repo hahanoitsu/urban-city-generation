@@ -12,6 +12,8 @@ import numpy as np
 import torch
 from shapely.geometry import LineString
 
+from urban_dataset.transport_graph import simple_transport_graph
+
 
 ROAD_CLASSES = ("major", "secondary", "local")
 RAIL_CLASSES = ("rail", "subway", "light_rail", "tram", "monorail")
@@ -32,6 +34,16 @@ class SpatialTensorConfig:
     max_nodes: int = 384
     max_edges: int = 512
     width_scale_m: float = 32.0
+    simple_graph: bool = False
+
+    @classmethod
+    def from_dataset(cls, root: str | Path, **overrides):
+        summary = json.loads((Path(root) / "summary.json").read_text())
+        sizes = {
+            name: summary["config"][name]
+            for name in ("target_size_m", "context_size_m", "local_vector_size_m")
+        }
+        return cls(**(sizes | overrides))
 
 
 def _class_index(mode: str, value: str) -> int:
@@ -69,17 +81,15 @@ def _normalise_target_xy(points: np.ndarray, size: float) -> np.ndarray:
     return points / size * 2.0 - 1.0
 
 
-def _normalise_context_xy(points: np.ndarray, target_size: float, context_size: float) -> np.ndarray:
+def _normalise_context_xy(
+    points: np.ndarray, target_size: float, context_size: float
+) -> np.ndarray:
     center = target_size / 2.0
     return (points - center) / (context_size / 2.0)
 
 
 def _edge_geometry_target(
-    geometry: list[list[float]],
-    start: np.ndarray,
-    end: np.ndarray,
-    count: int,
-    target_size: float,
+    geometry: list[list[float]], start: np.ndarray, end: np.ndarray, count: int, target_size: float
 ) -> np.ndarray:
     points = _normalise_target_xy(_resample_line(geometry, count + 2), target_size)
     straight = np.linspace(start, end, count + 2, dtype=np.float32)
@@ -93,8 +103,7 @@ def _line_distance(record: dict[str, Any], target_size: float) -> float:
 
 
 def _prepare_context_lines(
-    payload: dict[str, Any],
-    config: SpatialTensorConfig,
+    payload: dict[str, Any], config: SpatialTensorConfig
 ) -> dict[str, torch.Tensor]:
     roads = list(payload["input"]["visible_transport"].get("roads", []))
     rail = list(payload["input"]["visible_transport"].get("rail", []))
@@ -108,10 +117,7 @@ def _prepare_context_lines(
     )
     records = [*rail, *roads][: config.max_context_lines]
 
-    points = np.zeros(
-        (config.max_context_lines, config.context_line_points, 2),
-        dtype=np.float32,
-    )
+    points = np.zeros((config.max_context_lines, config.context_line_points, 2), dtype=np.float32)
     mode = np.zeros(config.max_context_lines, dtype=np.int64)
     class_index = np.zeros(config.max_context_lines, dtype=np.int64)
     vertical = np.zeros(config.max_context_lines, dtype=np.int64)
@@ -122,9 +128,7 @@ def _prepare_context_lines(
     for index, record in enumerate(records):
         values = _resample_line(record["geometry_local_m"], config.context_line_points)
         points[index] = _normalise_context_xy(
-            values,
-            config.target_size_m,
-            config.local_vector_size_m,
+            values, config.target_size_m, config.local_vector_size_m
         )
         current_mode = str(record["mode"])
         mode[index] = _mode_index(current_mode)
@@ -147,10 +151,7 @@ def _prepare_context_lines(
     }
 
 
-def _prepare_ports(
-    payload: dict[str, Any],
-    config: SpatialTensorConfig,
-) -> dict[str, torch.Tensor]:
+def _prepare_ports(payload: dict[str, Any], config: SpatialTensorConfig) -> dict[str, torch.Tensor]:
     records = payload["input"].get("boundary_ports", [])[: config.max_ports]
     continuous = np.zeros((config.max_ports, 5), dtype=np.float32)
     mode = np.zeros(config.max_ports, dtype=np.int64)
@@ -185,10 +186,11 @@ def _prepare_ports(
 
 
 def _prepare_target_graph(
-    payload: dict[str, Any],
-    config: SpatialTensorConfig,
+    payload: dict[str, Any], config: SpatialTensorConfig
 ) -> dict[str, torch.Tensor]:
     graph = payload["target"]["transport_graph"]
+    if config.simple_graph:
+        graph = simple_transport_graph(graph)
     nodes = list(graph["nodes"])
     nodes.sort(
         key=lambda value: (
@@ -246,10 +248,7 @@ def _prepare_target_graph(
     edge_class = np.zeros(config.max_edges, dtype=np.int64)
     edge_vertical = np.zeros(config.max_edges, dtype=np.int64)
     edge_width = np.zeros((config.max_edges, 1), dtype=np.float32)
-    edge_shape = np.zeros(
-        (config.max_edges, config.edge_shape_points, 2),
-        dtype=np.float32,
-    )
+    edge_shape = np.zeros((config.max_edges, config.edge_shape_points, 2), dtype=np.float32)
 
     for index, (left, right, edge) in enumerate(edges):
         edge_from[index] = left
@@ -290,15 +289,41 @@ def geographic_split(row: dict[str, Any], group_size: int = 5) -> str:
     grid_row = int(parts[-2].removeprefix("w"))
     grid_column = int(parts[-1])
     parent = f"{grid_row // group_size}:{grid_column // group_size}"
-    value = int.from_bytes(
-        hashlib.sha1(parent.encode("utf-8"), usedforsecurity=False).digest()[:4],
-        "little",
-    ) % 100
+    value = (
+        int.from_bytes(
+            hashlib.sha1(parent.encode("utf-8"), usedforsecurity=False).digest()[:4], "little"
+        )
+        % 100
+    )
     if value < 75:
         return "train"
     if value < 88:
         return "validation"
     return "test"
+
+
+def buffered_splits(payloads, context_size_m):
+    cities = {}
+    for row, payload in payloads:
+        cities.setdefault(payload.get("city_id", ""), []).append((row, payload))
+    result = {}
+    for samples in cities.values():
+        bounds = np.asarray([payload["bounds"]["target_projected_m"] for _, payload in samples])
+        lower, upper = bounds[:, :2].min(axis=0), bounds[:, 2:].max(axis=0)
+        axis = int(np.argmax(upper - lower))
+        cut1, cut2 = lower[axis] + (upper[axis] - lower[axis]) * np.asarray([0.7, 0.85])
+        margin = context_size_m / 2
+        for (row, _), bound in zip(samples, bounds, strict=True):
+            center = (bound[axis] + bound[axis + 2]) / 2
+            split = "buffer"
+            if center + margin <= cut1:
+                split = "train"
+            elif center - margin >= cut1 and center + margin <= cut2:
+                split = "validation"
+            elif center - margin >= cut2:
+                split = "test"
+            result[row["id"]] = split
+    return result
 
 
 class SpatialWorldDataset(torch.utils.data.Dataset):
@@ -308,9 +333,22 @@ class SpatialWorldDataset(torch.utils.data.Dataset):
         *,
         config: SpatialTensorConfig | None = None,
         maximum_samples: int | None = None,
+        normalization: dict | None = None,
+        normalization_split: str = "all",
+        split_strategy: str = "legacy",
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.config = config or SpatialTensorConfig()
+        summary_path = self.root / "summary.json"
+        if summary_path.exists():
+            sizes = json.loads(summary_path.read_text()).get("config", {})
+            for name in ("target_size_m", "context_size_m", "local_vector_size_m"):
+                if name in sizes and not math.isclose(
+                    float(sizes[name]), getattr(self.config, name)
+                ):
+                    raise ValueError(
+                        f"Dataset {name}={sizes[name]} disagrees with tensor configuration"
+                    )
         rows = [
             json.loads(line)
             for line in (self.root / "samples.jsonl").read_text(encoding="utf-8").splitlines()
@@ -319,8 +357,7 @@ class SpatialWorldDataset(torch.utils.data.Dataset):
         if maximum_samples is not None:
             rows.sort(
                 key=lambda value: hashlib.sha1(
-                    str(value["id"]).encode("utf-8"),
-                    usedforsecurity=False,
+                    str(value["id"]).encode("utf-8"), usedforsecurity=False
                 ).digest()
             )
             rows = rows[:maximum_samples]
@@ -331,9 +368,16 @@ class SpatialWorldDataset(torch.utils.data.Dataset):
             with gzip.open(self.root / row["sample_path"], "rt", encoding="utf-8") as handle:
                 payload = json.load(handle)
             payloads.append((row, payload))
-            for cell in payload["input"]["context_cells"]:
-                if cell["features"]:
-                    feature_values.append(cell["features"])
+        split_map = (
+            buffered_splits(payloads, self.config.context_size_m)
+            if split_strategy == "buffered"
+            else {row["id"]: geographic_split(row) for row, _ in payloads}
+        )
+        for row, payload in payloads:
+            if normalization_split == "all" or split_map[row["id"]] == normalization_split:
+                for cell in payload["input"]["context_cells"]:
+                    if cell["features"]:
+                        feature_values.append(cell["features"])
 
         if not payloads:
             raise RuntimeError("No spatial world samples found")
@@ -345,8 +389,16 @@ class SpatialWorldDataset(torch.utils.data.Dataset):
             ],
             dtype=np.float32,
         )
-        self.feature_mean = feature_array.mean(axis=0)
-        self.feature_std = feature_array.std(axis=0)
+        if normalization is not None:
+            if self.feature_names != normalization["feature_names"]:
+                raise ValueError("Dataset feature names differ from checkpoint")
+            self.feature_mean = np.asarray(normalization["feature_mean"], dtype=np.float32)
+            self.feature_std = np.asarray(normalization["feature_std"], dtype=np.float32)
+        else:
+            if not feature_values:
+                raise ValueError("No context cells available to fit training normalization")
+            self.feature_mean = feature_array.mean(axis=0)
+            self.feature_std = feature_array.std(axis=0)
         self.feature_std[self.feature_std < 1e-6] = 1.0
 
         self.samples = []
@@ -360,17 +412,11 @@ class SpatialWorldDataset(torch.utils.data.Dataset):
                 continue
 
             cells = payload["input"]["context_cells"]
-            context = np.zeros(
-                (len(cells), len(self.feature_names) + 3),
-                dtype=np.float32,
-            )
+            context = np.zeros((len(cells), len(self.feature_names) + 3), dtype=np.float32)
             for index, cell in enumerate(cells):
                 if cell["features"]:
                     raw = np.asarray(
-                        [
-                            float(cell["features"].get(name, 0.0))
-                            for name in self.feature_names
-                        ],
+                        [float(cell["features"].get(name, 0.0)) for name in self.feature_names],
                         dtype=np.float32,
                     )
                     context[index, : len(self.feature_names)] = (
@@ -378,9 +424,7 @@ class SpatialWorldDataset(torch.utils.data.Dataset):
                     ) / self.feature_std
                 center = np.asarray(cell["center_local_m"], dtype=np.float32)
                 center = _normalise_context_xy(
-                    center[None],
-                    self.config.target_size_m,
-                    self.config.context_size_m,
+                    center[None], self.config.target_size_m, self.config.context_size_m
                 )[0]
                 context[index, -3:-1] = center
                 context[index, -1] = float(cell["masked_fraction"])
@@ -405,7 +449,13 @@ class SpatialWorldDataset(torch.utils.data.Dataset):
                 **_prepare_ports(payload, self.config),
                 **graph,
                 "sample_id": row["id"],
-                "split": geographic_split(row),
+                "split": split_map[row["id"]],
+                "city_id": payload.get("city_id", row.get("city_id", "")),
+                "target_bounds": torch.tensor(
+                    payload["bounds"]["target_projected_m"], dtype=torch.float64
+                )
+                if "bounds" in payload
+                else torch.zeros(4, dtype=torch.float64),
             }
             self.samples.append(prepared)
 

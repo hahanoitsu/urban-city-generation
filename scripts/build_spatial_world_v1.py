@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--stride", type=float, default=1024.0)
     parser.add_argument("--context-cell", type=float, default=512.0)
     parser.add_argument("--minimum-transport", type=float, default=100.0)
+    parser.add_argument("--maximum-samples", type=int)
     args = parser.parse_args()
 
     config = SpatialWorldConfig(
@@ -32,6 +33,7 @@ def main():
         args.output,
         config=config,
         show_progress=True,
+        maximum_samples=args.maximum_samples,
     )
     print(json.dumps(summary, indent=2))
 

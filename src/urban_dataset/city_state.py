@@ -7,9 +7,9 @@ from typing import Any, Iterable
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from shapely.geometry import GeometryCollection, LineString, MultiLineString, mapping
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, mapping
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import linemerge, transform, unary_union
+from shapely.ops import transform, unary_union
 
 from .classify import clean_tag, first_number
 from .tile import TileSpec
@@ -27,12 +27,7 @@ DEFAULT_VERTICAL_Z_M: dict[str, float | None] = {
     "unknown": None,
 }
 
-_RAIL_WIDTH_M = {
-    "rail": 6.0,
-    "subway": 6.0,
-    "light_rail": 5.0,
-    "tram": 4.0,
-}
+_RAIL_WIDTH_M = {"rail": 6.0, "subway": 6.0, "light_rail": 5.0, "tram": 4.0}
 
 
 def _clean_properties(row: Any, geometry_column: str = "geometry") -> dict[str, Any]:
@@ -121,11 +116,7 @@ def _group_key(record: dict[str, Any]) -> tuple[Any, ...]:
     if record["vertical_mode"] == "unknown":
         # Unknown stacking must not be connected to another feature merely because
         # their two-dimensional lines cross.
-        return (
-            record["transport_mode"],
-            record["vertical_mode"],
-            record["source_key"],
-        )
+        return (record["transport_mode"], record["vertical_mode"], record["source_key"])
     layer = record["layer_order"]
     return (
         record["transport_mode"],
@@ -136,10 +127,8 @@ def _group_key(record: dict[str, Any]) -> tuple[Any, ...]:
 
 def _noded_lines(records: list[dict[str, Any]]) -> list[LineString]:
     union = unary_union([record["geometry"] for record in records])
-    if isinstance(union, LineString):
-        return [union]
-    merged = linemerge(union)
-    return list(_iter_lines(merged))
+    # Merging here would erase changes in class, width and direction at way ends.
+    return list(_iter_lines(union))
 
 
 def _nearest_source(segment: LineString, records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -152,13 +141,15 @@ def _node_key(
     transport_mode: str,
     vertical_mode: str,
     layer_order: float | None,
+    source_key: str | None = None,
 ) -> tuple[Any, ...]:
     return (
         transport_mode,
         vertical_mode,
-        None if layer_order is None else round(float(layer_order), 6),
+        0.0 if layer_order is None else round(float(layer_order), 6),
         round(float(point[0]), 3),
         round(float(point[1]), 3),
+        source_key if vertical_mode == "unknown" else None,
     )
 
 
@@ -172,9 +163,7 @@ def _boundary_node(x: float, y: float, tile: TileSpec, tolerance: float = 0.05) 
 
 
 def build_transport_graph(
-    roads: gpd.GeoDataFrame,
-    rail: gpd.GeoDataFrame,
-    tile: TileSpec,
+    roads: gpd.GeoDataFrame, rail: gpd.GeoDataFrame, tile: TileSpec
 ) -> dict[str, Any]:
     records = [*_source_records(roads, "road"), *_source_records(rail, "rail")]
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
@@ -191,6 +180,11 @@ def build_transport_graph(
             if segment.length <= 1e-6:
                 continue
             source = _nearest_source(segment, group)
+            source_line = source["geometry"]
+            if not source_line.is_ring and source_line.project(
+                Point(segment.coords[0])
+            ) > source_line.project(Point(segment.coords[-1])):
+                segment = LineString(list(reversed(segment.coords)))
             properties = source["properties"]
             transport_mode = source["transport_mode"]
             vertical_mode = source["vertical_mode"]
@@ -201,7 +195,9 @@ def build_transport_graph(
 
             node_ids: list[str] = []
             for point in (start, end):
-                key = _node_key(point, transport_mode, vertical_mode, layer_order)
+                key = _node_key(
+                    point, transport_mode, vertical_mode, layer_order, source["source_key"]
+                )
                 node_id = node_lookup.get(key)
                 if node_id is None:
                     node_id = _stable_id(tile.tile_id, "node", *key)
@@ -222,8 +218,7 @@ def build_transport_graph(
 
             width_m, width_source = _width(properties, transport_mode)
             local_coordinates = [
-                [float(x - tile.minx), float(y - tile.miny), z]
-                for x, y, *_rest in segment.coords
+                [float(x - tile.minx), float(y - tile.miny), z] for x, y, *_rest in segment.coords
             ]
             edge_id = _stable_id(
                 tile.tile_id,
@@ -321,20 +316,11 @@ def building_solids(buildings: gpd.GeoDataFrame, tile: TileSpec) -> list[dict[st
     return solids
 
 
-def city_state_header(
-    tile: TileSpec,
-    crs: str,
-    *,
-    area_id: str | None,
-) -> dict[str, Any]:
+def city_state_header(tile: TileSpec, crs: str, *, area_id: str | None) -> dict[str, Any]:
     return {
         "format": "urban-city-state-tile",
         "version": CITY_STATE_VERSION,
-        "tile": {
-            "tile_id": tile.tile_id,
-            "city_id": tile.city_id,
-            "area_id": area_id,
-        },
+        "tile": {"tile_id": tile.tile_id, "city_id": tile.city_id, "area_id": area_id},
         "coordinate_system": {
             "units": "metres",
             "origin_projected": [tile.minx, tile.miny],

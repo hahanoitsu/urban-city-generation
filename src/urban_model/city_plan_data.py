@@ -20,12 +20,7 @@ PLAN_CHANNELS = (
     "boundary_nodes",
 )
 
-ORIENTATION_CHANNELS = (
-    "major_corridor",
-    "secondary_corridor",
-    "local_corridor",
-    "rail_corridor",
-)
+ORIENTATION_CHANNELS = ("major_corridor", "secondary_corridor", "local_corridor", "rail_corridor")
 
 GLOBAL_CHANNELS = (
     "nodes",
@@ -53,10 +48,7 @@ def _cell_index(xy: torch.Tensor, grid_size: int) -> tuple[int, int]:
 
 
 def _components(
-    node_count: int,
-    edge_from: torch.Tensor,
-    edge_to: torch.Tensor,
-    edge_count: int,
+    node_count: int, edge_from: torch.Tensor, edge_to: torch.Tensor, edge_count: int
 ) -> int:
     adjacency = [[] for _ in range(node_count)]
     for index in range(edge_count):
@@ -83,10 +75,7 @@ def _components(
     return components
 
 
-def _edge_polyline(
-    sample: dict[str, Any],
-    edge_index: int,
-) -> torch.Tensor:
+def _edge_polyline(sample: dict[str, Any], edge_index: int) -> torch.Tensor:
     left = int(sample["edge_from"][edge_index])
     right = int(sample["edge_to"][edge_index])
     start = sample["node_xy"][left]
@@ -102,9 +91,7 @@ def _edge_polyline(
 
 
 def _corridor_cells(
-    polyline: torch.Tensor,
-    grid_size: int,
-    samples_per_cell: int,
+    polyline: torch.Tensor, grid_size: int, samples_per_cell: int
 ) -> dict[tuple[int, int], list[torch.Tensor]]:
     cells: dict[tuple[int, int], list[torch.Tensor]] = {}
     for index in range(polyline.shape[0] - 1):
@@ -112,17 +99,9 @@ def _corridor_cells(
         end = polyline[index + 1]
         delta = end - start
         span_cells = float(delta.abs().max()) * 0.5 * grid_size
-        steps = max(
-            2,
-            int(math.ceil(span_cells * samples_per_cell)) + 1,
-        )
+        steps = max(2, int(math.ceil(span_cells * samples_per_cell)) + 1)
         angle = torch.atan2(delta[1], delta[0])
-        orientation = torch.stack(
-            [
-                torch.cos(angle * 2.0),
-                torch.sin(angle * 2.0),
-            ]
-        )
+        orientation = torch.stack([torch.cos(angle * 2.0), torch.sin(angle * 2.0)])
         for step in range(steps):
             fraction = step / (steps - 1)
             point = start + delta * fraction
@@ -132,34 +111,12 @@ def _corridor_cells(
 
 
 def build_city_plan(
-    sample: dict[str, Any],
-    config: CityPlanConfig,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-]:
+    sample: dict[str, Any], config: CityPlanConfig
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     grid = config.grid_size
-    counts = torch.zeros(
-        grid,
-        grid,
-        len(PLAN_CHANNELS),
-        dtype=torch.float32,
-    )
-    orientation_sum = torch.zeros(
-        grid,
-        grid,
-        len(ORIENTATION_CHANNELS),
-        2,
-        dtype=torch.float32,
-    )
-    orientation_weight = torch.zeros(
-        grid,
-        grid,
-        len(ORIENTATION_CHANNELS),
-        dtype=torch.float32,
-    )
+    counts = torch.zeros(grid, grid, len(PLAN_CHANNELS), dtype=torch.float32)
+    orientation_sum = torch.zeros(grid, grid, len(ORIENTATION_CHANNELS), 2, dtype=torch.float32)
+    orientation_weight = torch.zeros(grid, grid, len(ORIENTATION_CHANNELS), dtype=torch.float32)
     node_count = int(sample["node_count"])
     edge_count = int(sample["edge_count"])
 
@@ -189,38 +146,19 @@ def build_city_plan(
             rail_edges += 1
 
         cells = _corridor_cells(
-            _edge_polyline(sample, index),
-            grid,
-            config.corridor_samples_per_cell,
+            _edge_polyline(sample, index), grid, config.corridor_samples_per_cell
         )
         for (row, column), orientations in cells.items():
             counts[row, column, plan_index] += 1.0
             values = torch.stack(orientations)
-            orientation_sum[
-                row,
-                column,
-                orientation_index,
-            ] += values.mean(dim=0)
-            orientation_weight[
-                row,
-                column,
-                orientation_index,
-            ] += 1.0
+            orientation_sum[row, column, orientation_index] += values.mean(dim=0)
+            orientation_weight[row, column, orientation_index] += 1.0
 
-    orientation = orientation_sum / orientation_weight[
-        ..., None
-    ].clamp_min(1.0)
+    orientation = orientation_sum / orientation_weight[..., None].clamp_min(1.0)
     orientation_mask = orientation_weight > 0
 
-    components = _components(
-        node_count,
-        sample["edge_from"],
-        sample["edge_to"],
-        edge_count,
-    )
-    boundary_nodes = int(
-        (sample["node_boundary"][:node_count] > 0.5).sum()
-    )
+    components = _components(node_count, sample["edge_from"], sample["edge_to"], edge_count)
+    boundary_nodes = int((sample["node_boundary"][:node_count] > 0.5).sum())
     total_edges = max(edge_count, 1)
     total_nodes = max(node_count, 1)
     global_values = torch.tensor(
@@ -238,15 +176,8 @@ def build_city_plan(
     )
     return (
         counts.reshape(grid * grid, -1),
-        orientation.reshape(
-            grid * grid,
-            len(ORIENTATION_CHANNELS),
-            2,
-        ),
-        orientation_mask.reshape(
-            grid * grid,
-            len(ORIENTATION_CHANNELS),
-        ),
+        orientation.reshape(grid * grid, len(ORIENTATION_CHANNELS), 2),
+        orientation_mask.reshape(grid * grid, len(ORIENTATION_CHANNELS)),
         global_values,
     )
 
@@ -259,6 +190,9 @@ class CityPlanDataset(torch.utils.data.Dataset):
         tensor_config: SpatialTensorConfig | None = None,
         plan_config: CityPlanConfig | None = None,
         maximum_samples: int | None = None,
+        normalization: dict | None = None,
+        normalization_split: str = "all",
+        split_strategy: str = "legacy",
     ) -> None:
         self.tensor_config = tensor_config or SpatialTensorConfig()
         self.plan_config = plan_config or CityPlanConfig()
@@ -266,6 +200,9 @@ class CityPlanDataset(torch.utils.data.Dataset):
             root,
             config=self.tensor_config,
             maximum_samples=maximum_samples,
+            normalization=normalization,
+            normalization_split=normalization_split,
+            split_strategy=split_strategy,
         )
         self.feature_names = base.feature_names
         self.feature_mean = base.feature_mean
@@ -280,14 +217,8 @@ class CityPlanDataset(torch.utils.data.Dataset):
         orientation_masks = []
         globals_ = []
         for sample in base.samples:
-            (
-                plan_counts,
-                plan_orientation,
-                plan_orientation_mask,
-                global_values,
-            ) = build_city_plan(
-                sample,
-                self.plan_config,
+            (plan_counts, plan_orientation, plan_orientation_mask, global_values) = build_city_plan(
+                sample, self.plan_config
             )
             counts.append(plan_counts)
             orientations.append(plan_orientation)
@@ -297,47 +228,47 @@ class CityPlanDataset(torch.utils.data.Dataset):
         count_stack = torch.stack(counts)
         global_stack = torch.stack(globals_)
         presence = count_stack > 0
-        positives = presence.sum(dim=(0, 1)).to(torch.float32)
-        total = float(
-            presence.shape[0] * presence.shape[1]
-        )
+        fit_indices = [
+            i
+            for i, sample in enumerate(base.samples)
+            if normalization_split == "all" or sample["split"] == normalization_split
+        ]
+        if normalization is None and not fit_indices:
+            raise ValueError("No training samples available to fit plan normalization")
+        fit_presence = presence[fit_indices]
+        positives = fit_presence.sum(dim=(0, 1)).to(torch.float32)
+        total = float(fit_presence.shape[0] * presence.shape[1])
         negatives = total - positives
-        self.presence_pos_weight = (
-            negatives / positives.clamp_min(1.0)
-        ).clamp(1.0, 30.0)
-        self.global_mean = global_stack.mean(dim=0)
-        self.global_std = global_stack.std(dim=0).clamp_min(0.05)
+        self.presence_pos_weight = (negatives / positives.clamp_min(1.0)).clamp(1.0, 30.0)
+        if normalization is not None:
+            self.global_mean = torch.tensor(normalization["global_mean"], dtype=torch.float32)
+            self.global_std = torch.tensor(normalization["global_std"], dtype=torch.float32)
+            self.presence_pos_weight = torch.tensor(
+                normalization["presence_pos_weight"], dtype=torch.float32
+            )
+        else:
+            self.global_mean = global_stack[fit_indices].mean(dim=0)
+            self.global_std = global_stack[fit_indices].std(dim=0, correction=0).clamp_min(0.05)
+        self.normalization = {
+            "feature_names": self.feature_names,
+            "feature_mean": self.feature_mean.tolist(),
+            "feature_std": self.feature_std.tolist(),
+            "global_mean": self.global_mean.tolist(),
+            "global_std": self.global_std.tolist(),
+            "presence_pos_weight": self.presence_pos_weight.tolist(),
+        }
 
-        for (
-            sample,
-            plan_counts,
-            plan_orientation,
-            plan_orientation_mask,
-            global_values,
-        ) in zip(
-            base.samples,
-            counts,
-            orientations,
-            orientation_masks,
-            globals_,
-            strict=True,
+        for sample, plan_counts, plan_orientation, plan_orientation_mask, global_values in zip(
+            base.samples, counts, orientations, orientation_masks, globals_, strict=True
         ):
             prepared = dict(sample)
             prepared["plan_counts"] = plan_counts
-            prepared["plan_presence"] = (
-                plan_counts > 0
-            ).to(torch.float32)
-            prepared["plan_log_counts"] = torch.log1p(
-                plan_counts
-            )
+            prepared["plan_presence"] = (plan_counts > 0).to(torch.float32)
+            prepared["plan_log_counts"] = torch.log1p(plan_counts)
             prepared["plan_orientation"] = plan_orientation
-            prepared["plan_orientation_mask"] = (
-                plan_orientation_mask
-            )
+            prepared["plan_orientation_mask"] = plan_orientation_mask
             prepared["plan_global_raw"] = global_values
-            prepared["plan_global"] = (
-                global_values - self.global_mean
-            ) / self.global_std
+            prepared["plan_global"] = (global_values - self.global_mean) / self.global_std
             self.samples.append(prepared)
 
     @property
