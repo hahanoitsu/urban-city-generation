@@ -47,6 +47,10 @@ if [[ -n "${MAXIMUM_SAMPLES:-}" ]]; then
     ARGS+=(--maximum-samples "$MAXIMUM_SAMPLES")
 fi
 
+if [[ -n "${RESUME_CHECKPOINT:-}" ]]; then
+    ARGS+=(--resume "$RESUME_CHECKPOINT")
+fi
+
 NUM_GPUS="${NUM_GPUS:-1}"
 if (( NUM_GPUS > 1 )); then
     torchrun         --standalone         --nproc_per_node="$NUM_GPUS"         scripts/train_plan_set_graph.py         "${ARGS[@]}"
