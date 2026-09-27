@@ -190,7 +190,8 @@ def write_event(
 def legal_op_logits(logits, active, node_count, edge_count, max_nodes, max_edges):
     result = torch.full_like(logits, float("-inf"))
     if active is None:
-        result[OP_ROOT] = logits[OP_ROOT]
+        if node_count < max_nodes:
+            result[OP_ROOT] = logits[OP_ROOT]
         result[OP_EOS] = logits[OP_EOS]
     else:
         result[OP_CLOSE] = logits[OP_CLOSE]
@@ -423,15 +424,15 @@ def rollout(model, sample, tensor_config, program_config, device, temperature):
                 )
 
         if op == OP_CLOSE:
+            if queue:
+                queue.pop(0)
+            active = queue[0] if queue else None
             write_event(
                 batch,
                 prefix,
                 op=OP_CLOSE,
                 active=active if active is not None else -1,
             )
-            if queue:
-                queue.pop(0)
-            active = queue[0] if queue else None
 
         prefix += 1
 
