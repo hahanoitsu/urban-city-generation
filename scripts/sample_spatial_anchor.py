@@ -32,6 +32,19 @@ def to_metres(value):
     ]
 
 
+def curve_points(start, end, curve):
+    chord = end - start
+    length = torch.linalg.vector_norm(chord).clamp_min(1e-6)
+    normal = torch.stack([-chord[1], chord[0]]) / length
+    values = [start]
+    for point_index in range(curve.shape[0]):
+        fraction = (point_index + 1) / (curve.shape[0] + 1)
+        base = start + chord * fraction
+        values.append(base + normal * curve[point_index] * length)
+    values.append(end)
+    return values
+
+
 def target_graph(model, batch):
     positions = model.node_positions(batch["node_offset"])[0]
     flat_positions = positions.reshape(-1, 2)
@@ -62,12 +75,11 @@ def target_graph(model, batch):
         right = int(batch["edge_pairs"][0, index, 1])
         start = flat_positions[int(ids[left])]
         end = flat_positions[int(ids[right])]
-        internal = []
-        for point_index in range(batch["edge_shape"].shape[-2]):
-            fraction = (point_index + 1) / (batch["edge_shape"].shape[-2] + 1)
-            base = start + (end - start) * fraction
-            internal.append(base + batch["edge_shape"][0, index, point_index])
-        values = [start, *internal, end]
+        values = curve_points(
+            start,
+            end,
+            batch["edge_curve"][0, index],
+        )
         class_index = int(batch["edge_class"][0, index])
         transport_class = TRANSPORT_CLASSES[class_index]
         edges.append(
@@ -180,13 +192,11 @@ def generated_graph(model, output):
             transport_class = TRANSPORT_CLASSES[class_index]
             start = positions[left]
             end = positions[right]
-            internal = []
-            shape = output["edge_shape"][0, left, right]
-            for point_index in range(shape.shape[0]):
-                fraction = (point_index + 1) / (shape.shape[0] + 1)
-                base = start + (end - start) * fraction
-                internal.append(base + shape[point_index])
-            values = [start, *internal, end]
+            values = curve_points(
+                start,
+                end,
+                output["edge_curve"][0, left, right],
+            )
             edges.append(
                 {
                     "id": len(edges),
