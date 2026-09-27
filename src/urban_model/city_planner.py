@@ -15,6 +15,7 @@ class CityPlannerConfig:
     context_dimensions: int
     style_dimensions: int
     plan_dimensions: int
+    orientation_dimensions: int
     global_dimensions: int
     grid_size: int = 16
     context_line_points: int = 6
@@ -70,10 +71,23 @@ class CityPlanner(nn.Module):
             config.planner_layers,
         )
         self.grid_norm = nn.LayerNorm(d)
-        self.plan_head = nn.Sequential(
+        self.presence_head = nn.Sequential(
             nn.Linear(d, d),
             nn.GELU(),
             nn.Linear(d, config.plan_dimensions),
+        )
+        self.count_head = nn.Sequential(
+            nn.Linear(d, d),
+            nn.GELU(),
+            nn.Linear(d, config.plan_dimensions),
+        )
+        self.orientation_head = nn.Sequential(
+            nn.Linear(d, d),
+            nn.GELU(),
+            nn.Linear(
+                d,
+                config.orientation_dimensions * 2,
+            ),
         )
         self.global_head = nn.Sequential(
             nn.Linear(d, d),
@@ -99,7 +113,17 @@ class CityPlanner(nn.Module):
                 memory_key_padding_mask=padding,
             )
         )
+        orientation = self.orientation_head(hidden).reshape(
+            hidden.shape[0],
+            hidden.shape[1],
+            self.config.orientation_dimensions,
+            2,
+        )
         return {
-            "plan_grid": self.plan_head(hidden),
+            "plan_presence": self.presence_head(hidden),
+            "plan_log_count": torch.nn.functional.softplus(
+                self.count_head(hidden)
+            ),
+            "plan_orientation": torch.tanh(orientation),
             "plan_global": self.global_head(pool),
         }
