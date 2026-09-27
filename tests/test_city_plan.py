@@ -24,6 +24,7 @@ def test_city_plan_tracks_spatial_transport_structure():
         "edge_from": torch.tensor([0, 1, 2]),
         "edge_to": torch.tensor([1, 2, 3]),
         "edge_class": torch.tensor([0, 2, 3]),
+        "edge_shape": torch.zeros(3, 3, 2),
     }
     plan, orientation, orientation_mask, global_values = build_city_plan(
         sample,
