@@ -125,7 +125,7 @@ def generated_graph(output, sample, tensor_config):
         1,
         min(
             int(round(float(sample["plan_global_raw"][0]))),
-            output["node_presence"].shape[1],
+            output["node_xy"].shape[1],
         ),
     )
     edge_count = max(
