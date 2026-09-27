@@ -394,7 +394,7 @@ def main():
                 f"cell={parts['cell_occupancy']:.4f}/{parts['cell_count']:.4f} "
                 f"slot={parts['slot_score']:.4f} offset={parts['node_offset']:.4f} "
                 f"edge={parts['edge_exists']:.4f}/{parts['edge_class']:.4f} "
-                f"shape={parts['edge_shape']:.4f} "
+                f"curve={parts['edge_curve']:.4f} "
                 f"epoch_s={epoch_seconds:.1f} elapsed_min={elapsed / 60.0:.1f}",
                 flush=True,
             )
