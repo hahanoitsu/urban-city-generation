@@ -130,11 +130,17 @@ class FrontierArchitect(nn.Module):
         memory_padding: torch.Tensor,
         *,
         input_length: int,
+        last_only: bool = False,
     ) -> dict[str, torch.Tensor]:
         hidden = self._token_embedding(batch, input_length)
-        causal = nn.Transformer.generate_square_subsequent_mask(
-            input_length,
-            device=hidden.device,
+        causal = torch.triu(
+            torch.ones(
+                input_length,
+                input_length,
+                dtype=torch.bool,
+                device=hidden.device,
+            ),
+            diagonal=1,
         )
         positions = torch.arange(input_length, device=hidden.device)
         padding = positions[None] >= (batch["program_length"] - 1)[:, None]
@@ -147,6 +153,8 @@ class FrontierArchitect(nn.Module):
                 memory_key_padding_mask=memory_padding,
             )
         )
+        if last_only:
+            decoded = decoded[:, -1:]
         xy = self.xy_head(decoded)
         width = self.width_head(decoded)
         curve = self.curve_head(decoded).reshape(
