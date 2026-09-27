@@ -247,35 +247,51 @@ def _cell_iou(
         (predicted_xy + 1.0) * 0.5
     ).clamp(
         0.0,
-        1.0 - 1e-7,
+        1.0,
     )
     target_unit = (
         (target_xy + 1.0) * 0.5
     ).clamp(
         0.0,
-        1.0 - 1e-7,
+        1.0,
+    )
+    predicted_column = torch.floor(
+        predicted_unit[:, 0]
+        * grid_size
+    ).long().clamp(
+        0,
+        grid_size - 1,
+    )
+    predicted_row = torch.floor(
+        predicted_unit[:, 1]
+        * grid_size
+    ).long().clamp(
+        0,
+        grid_size - 1,
+    )
+    target_column = torch.floor(
+        target_unit[:, 0]
+        * grid_size
+    ).long().clamp(
+        0,
+        grid_size - 1,
+    )
+    target_row = torch.floor(
+        target_unit[:, 1]
+        * grid_size
+    ).long().clamp(
+        0,
+        grid_size - 1,
     )
     predicted_index = (
-        torch.floor(
-            predicted_unit[:, 1]
-            * grid_size
-        ).long()
+        predicted_row
         * grid_size
-        + torch.floor(
-            predicted_unit[:, 0]
-            * grid_size
-        ).long()
+        + predicted_column
     )
     target_index = (
-        torch.floor(
-            target_unit[:, 1]
-            * grid_size
-        ).long()
+        target_row
         * grid_size
-        + torch.floor(
-            target_unit[:, 0]
-            * grid_size
-        ).long()
+        + target_column
     )
     predicted_mask = torch.zeros(
         grid_size * grid_size,
