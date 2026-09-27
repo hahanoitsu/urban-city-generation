@@ -202,6 +202,10 @@ class AnchoredSpatialWorldDataset(torch.utils.data.Dataset):
             self.rejected["edges"] += 1
             return None
 
+        node_degree = np.zeros(
+            self.anchor_config.max_active_nodes,
+            dtype=np.int64,
+        )
         edge_pairs = np.zeros(
             (self.anchor_config.max_edges, 2),
             dtype=np.int64,
@@ -224,6 +228,8 @@ class AnchoredSpatialWorldDataset(torch.utils.data.Dataset):
             sorted(kept_edges.values(), key=lambda item: (item["left"], item["right"]))
         ):
             edge_pairs[index] = [value["left"], value["right"]]
+            node_degree[value["left"]] += 1
+            node_degree[value["right"]] += 1
             edge_class[index] = value["class"]
             edge_vertical[index] = value["vertical"]
             edge_width[index, 0] = value["width"]
@@ -263,6 +269,7 @@ class AnchoredSpatialWorldDataset(torch.utils.data.Dataset):
                 "node_boundary": torch.from_numpy(node_boundary),
                 "active_count": torch.tensor(active_count, dtype=torch.long),
                 "active_anchor_ids": torch.from_numpy(active_ids),
+                "node_degree": torch.from_numpy(node_degree),
                 "edge_count": torch.tensor(len(kept_edges), dtype=torch.long),
                 "edge_pairs": torch.from_numpy(edge_pairs),
                 "edge_class": torch.from_numpy(edge_class),
