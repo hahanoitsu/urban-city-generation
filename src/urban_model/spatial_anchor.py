@@ -536,6 +536,8 @@ class SpatialAnchorArchitect(nn.Module):
         output["active_anchor_ids"] = active_ids
         output["active_count"] = active_count
         output["active_positions"] = active_positions
+        output["boundary_anchor_ids"] = boundary_ids
+        output["boundary_count"] = boundary_counts
         output["predicted_edge_count"] = self._decode_count(
             output["global_edge_count"],
             self.config.max_edges,
