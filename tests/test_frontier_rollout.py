@@ -31,9 +31,17 @@ class FakeFrontierModel:
             torch.zeros(1, 1, dtype=torch.bool, device=device),
         )
 
-    def decode_program(self, batch, memory, memory_padding, *, input_length):
+    def decode_program(
+        self,
+        batch,
+        memory,
+        memory_padding,
+        *,
+        input_length,
+        last_only=False,
+    ):
         device = memory.device
-        steps = input_length
+        steps = 1 if last_only else input_length
         op = torch.full((1, steps, 7), -20.0, device=device)
         next_op = self.ops[min(steps - 1, len(self.ops) - 1)]
         op[0, -1, next_op] = 20.0
