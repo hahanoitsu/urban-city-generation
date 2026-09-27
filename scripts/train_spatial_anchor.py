@@ -75,6 +75,7 @@ def run_epoch(
     optimizer=None,
     kl_weight=0.0,
     use_posterior=True,
+    sample_latent=False,
     control_dropout=0.0,
     drop_controls=False,
 ):
@@ -104,7 +105,7 @@ def run_epoch(
                 output = model(
                     batch,
                     use_posterior=use_posterior,
-                    sample_latent=training,
+                    sample_latent=sample_latent,
                 )
                 loss, metrics = spatial_anchor_loss(
                     output,
@@ -145,6 +146,7 @@ def main():
     parser.add_argument("--kl-weight", type=float, default=0.02)
     parser.add_argument("--kl-warmup", type=int, default=8)
     parser.add_argument("--control-dropout", type=float, default=0.5)
+    parser.add_argument("--posterior-training", action="store_true")
     parser.add_argument("--maximum-samples", type=int)
     parser.add_argument("--save-every", type=int, default=5)
     parser.add_argument("--resume", type=Path)
@@ -291,6 +293,7 @@ def main():
             "parameters": sum(parameter.numel() for parameter in model.parameters()),
             "world_size": world_size,
             "global_batch_size": args.batch_size * world_size,
+            "posterior_training": args.posterior_training,
         }
         (args.output / "experiment.json").write_text(
             json.dumps(metadata, indent=2) + "\n",
@@ -311,8 +314,9 @@ def main():
             max_active_nodes=anchor_config.max_active_nodes,
             max_edges=anchor_config.max_edges,
             optimizer=optimizer,
-            kl_weight=kl_weight,
-            use_posterior=True,
+            kl_weight=kl_weight if args.posterior_training else 0.0,
+            use_posterior=args.posterior_training,
+            sample_latent=args.posterior_training,
             control_dropout=args.control_dropout,
         )
         validation = run_epoch(
@@ -321,8 +325,9 @@ def main():
             device,
             max_active_nodes=anchor_config.max_active_nodes,
             max_edges=anchor_config.max_edges,
-            kl_weight=kl_weight,
-            use_posterior=True,
+            kl_weight=kl_weight if args.posterior_training else 0.0,
+            use_posterior=args.posterior_training,
+            sample_latent=False,
         )
         prior = run_epoch(
             model,
@@ -332,6 +337,7 @@ def main():
             max_edges=anchor_config.max_edges,
             kl_weight=0.0,
             use_posterior=False,
+            sample_latent=False,
         )
         context_prior = run_epoch(
             model,
@@ -341,6 +347,7 @@ def main():
             max_edges=anchor_config.max_edges,
             kl_weight=0.0,
             use_posterior=False,
+            sample_latent=False,
             drop_controls=True,
         )
 
