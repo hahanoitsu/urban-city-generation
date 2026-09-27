@@ -132,12 +132,14 @@ def generated_graph(output, sample, tensor_config):
         0,
         int(round(float(sample["plan_global_raw"][1]))),
     )
-    selected = torch.topk(
-        output["node_presence"][0],
-        k=node_count,
-    ).indices
-    selected = torch.sort(selected).values
-    positions = output["node_xy"][0, selected]
+    selected = torch.arange(
+        node_count,
+        device=output["node_xy"].device,
+    )
+    positions = output["node_xy"][
+        0,
+        :node_count,
+    ]
     nodes = []
     for index, query in enumerate(selected):
         query_index = int(query)
