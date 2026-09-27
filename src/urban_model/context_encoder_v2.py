@@ -66,11 +66,19 @@ class SetResampler(nn.Module):
             -1,
             -1,
         )
+        safe_values = values
+        safe_padding = padding
+        empty = padding.all(dim=1)
+        if bool(empty.any()):
+            safe_values = values.clone()
+            safe_padding = padding.clone()
+            safe_values[empty, 0] = 0.0
+            safe_padding[empty, 0] = False
         return self.norm(
             self.decoder(
                 queries,
-                values,
-                memory_key_padding_mask=padding,
+                safe_values,
+                memory_key_padding_mask=safe_padding,
             )
         )
 
