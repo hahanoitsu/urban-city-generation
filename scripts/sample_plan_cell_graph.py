@@ -142,6 +142,142 @@ def target_graph(sample, tensor_config, grid_size):
     return {"nodes": nodes, "edges": edges}
 
 
+def edge_candidates(output, node_count):
+    pairs = torch.triu_indices(
+        node_count,
+        node_count,
+        offset=1,
+        device=output["edge_exists"].device,
+    )
+    scores = output["edge_exists"][
+        0,
+        pairs[0],
+        pairs[1],
+    ]
+    return pairs, scores
+
+
+def choose_edges_raw(output, node_count, edge_count):
+    if node_count < 2 or edge_count <= 0:
+        return []
+    pairs, scores = edge_candidates(
+        output,
+        node_count,
+    )
+    requested = min(
+        edge_count,
+        int(scores.numel()),
+    )
+    chosen = torch.topk(
+        scores,
+        k=requested,
+    ).indices
+    return [
+        (
+            int(pairs[0, index]),
+            int(pairs[1, index]),
+        )
+        for index in chosen
+    ]
+
+
+def choose_edges_component(
+    output,
+    node_count,
+    edge_count,
+    component_count,
+):
+    if node_count < 2 or edge_count <= 0:
+        return []
+    pairs, scores = edge_candidates(
+        output,
+        node_count,
+    )
+    order = torch.argsort(
+        scores,
+        descending=True,
+    )
+    mode = output["node_mode"][
+        0,
+        :node_count,
+    ].argmax(dim=-1)
+    parent = list(range(node_count))
+    rank = [0] * node_count
+
+    def find(value):
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = parent[value]
+        return value
+
+    def union(left, right):
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return False
+        if rank[left_root] < rank[right_root]:
+            left_root, right_root = right_root, left_root
+        parent[right_root] = left_root
+        if rank[left_root] == rank[right_root]:
+            rank[left_root] += 1
+        return True
+
+    target_components = max(
+        1,
+        min(
+            int(component_count),
+            node_count,
+        ),
+    )
+    current_components = node_count
+    selected = []
+    selected_set = set()
+
+    for candidate_value in order:
+        if current_components <= target_components:
+            break
+        candidate = int(candidate_value)
+        left = int(pairs[0, candidate])
+        right = int(pairs[1, candidate])
+        if int(mode[left]) != int(mode[right]):
+            continue
+        if union(left, right):
+            selected.append(candidate)
+            selected_set.add(candidate)
+            current_components -= 1
+
+    for candidate_value in order:
+        if len(selected) >= edge_count:
+            break
+        candidate = int(candidate_value)
+        if candidate in selected_set:
+            continue
+        left = int(pairs[0, candidate])
+        right = int(pairs[1, candidate])
+        if int(mode[left]) != int(mode[right]):
+            continue
+        selected.append(candidate)
+        selected_set.add(candidate)
+
+    if len(selected) < edge_count:
+        for candidate_value in order:
+            if len(selected) >= edge_count:
+                break
+            candidate = int(candidate_value)
+            if candidate in selected_set:
+                continue
+            selected.append(candidate)
+            selected_set.add(candidate)
+
+    return [
+        (
+            int(pairs[0, index]),
+            int(pairs[1, index]),
+        )
+        for index in selected[:edge_count]
+    ]
+
+
 def choose_edges(output, node_count, edge_count):
     if node_count < 2 or edge_count <= 0:
         return []
@@ -249,7 +385,13 @@ def choose_edges(output, node_count, edge_count):
     ]
 
 
-def generated_graph(output, sample, tensor_config):
+def generated_graph(
+    output,
+    sample,
+    tensor_config,
+    *,
+    strategy="degree",
+):
     node_count = int(sample["node_count"])
     edge_count = int(round(float(sample["plan_global_raw"][1])))
     positions = output["node_xy"][0, :node_count]
@@ -271,12 +413,28 @@ def generated_graph(output, sample, tensor_config):
             }
         )
 
+    if strategy == "raw":
+        pairs = choose_edges_raw(
+            output,
+            node_count,
+            edge_count,
+        )
+    elif strategy == "component":
+        pairs = choose_edges_component(
+            output,
+            node_count,
+            edge_count,
+            int(round(float(sample["plan_global_raw"][2]))),
+        )
+    else:
+        pairs = choose_edges(
+            output,
+            node_count,
+            edge_count,
+        )
+
     edges = []
-    for left, right in choose_edges(
-        output,
-        node_count,
-        edge_count,
-    ):
+    for left, right in pairs:
         class_index = int(
             output["edge_class"][0, left, right].argmax()
         )
@@ -558,31 +716,68 @@ def main():
             tensor_config,
             plan_config.grid_size,
         )
-        generated = generated_graph(
+        raw_generated = generated_graph(
             output,
             sample,
             tensor_config,
+            strategy="raw",
+        )
+        degree_generated = generated_graph(
+            output,
+            sample,
+            tensor_config,
+            strategy="degree",
+        )
+        component_generated = generated_graph(
+            output,
+            sample,
+            tensor_config,
+            strategy="component",
         )
         target_stats = graph_stats(target)
-        generated_stats = graph_stats(generated)
-        comparison = comparison_stats(target, generated)
+        decoder_graphs = {
+            "raw": raw_generated,
+            "degree": degree_generated,
+            "component": component_generated,
+        }
+        decoder_stats = {
+            name: {
+                "graph": graph_stats(graph),
+                "comparison": comparison_stats(target, graph),
+            }
+            for name, graph in decoder_graphs.items()
+        }
 
         target_image = render(
             target,
             sample,
             tensor_config.target_size_m,
         )
-        generated_image = render(
-            generated,
+        raw_image = render(
+            raw_generated,
             sample,
             tensor_config.target_size_m,
         )
-        panel = Image.new("RGB", (1440, 750), "white")
+        degree_image = render(
+            degree_generated,
+            sample,
+            tensor_config.target_size_m,
+        )
+        component_image = render(
+            component_generated,
+            sample,
+            tensor_config.target_size_m,
+        )
+        panel = Image.new("RGB", (2880, 750), "white")
         panel.paste(target_image, (0, 30))
-        panel.paste(generated_image, (720, 30))
+        panel.paste(raw_image, (720, 30))
+        panel.paste(degree_image, (1440, 30))
+        panel.paste(component_image, (2160, 30))
         draw = ImageDraw.Draw(panel)
         draw.text((8, 8), "target", fill=(0, 0, 0))
-        draw.text((728, 8), "generated", fill=(0, 0, 0))
+        draw.text((728, 8), "raw top-E", fill=(0, 0, 0))
+        draw.text((1448, 8), "degree decode", fill=(0, 0, 0))
+        draw.text((2168, 8), "component decode", fill=(0, 0, 0))
         panel.save(
             args.output / f"{order:02d}-{sample['sample_id']}.png"
         )
@@ -591,8 +786,7 @@ def main():
         record = {
             "sample_id": sample["sample_id"],
             "target": target_stats,
-            "generated": generated_stats,
-            "comparison": comparison,
+            "decoders": decoder_stats,
         }
         records.append(record)
         (
@@ -601,7 +795,7 @@ def main():
             json.dumps(
                 {
                     "target": target,
-                    "generated": generated,
+                    "generated": decoder_graphs,
                     "statistics": record,
                 },
                 indent=2,
@@ -612,7 +806,7 @@ def main():
 
     sheet = Image.new(
         "RGB",
-        (1440, 750 * len(panels)),
+        (2880, 750 * len(panels)),
         "white",
     )
     for index, panel in enumerate(panels):
