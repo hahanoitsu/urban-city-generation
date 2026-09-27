@@ -6,7 +6,8 @@ from typing import Any
 import torch
 from torch import nn
 
-from urban_model.spatial_world import SpatialContextEncoder, _decoder
+from urban_model.context_encoder_v2 import SpatialContextEncoderV2
+from urban_model.spatial_world import _decoder
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,7 @@ class CityPlanner(nn.Module):
         super().__init__()
         self.config = config
         d = config.model_dimensions
-        self.context = SpatialContextEncoder(config)
+        self.context = SpatialContextEncoderV2(config)
         self.register_buffer(
             "grid_coordinates",
             _grid_coordinates(config.grid_size),
