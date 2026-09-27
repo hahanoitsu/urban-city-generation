@@ -23,6 +23,7 @@ SPEC.loader.exec_module(MODULE)
 class FakeFrontierModel:
     def __init__(self):
         self.ops = [OP_ROOT, OP_GROW, OP_CLOSE, OP_CLOSE, OP_EOS]
+        self.calls = 0
 
     def encode_context(self, batch):
         device = batch["context_cells"].device
@@ -43,7 +44,8 @@ class FakeFrontierModel:
         device = memory.device
         steps = 1 if last_only else input_length
         op = torch.full((1, steps, 7), -20.0, device=device)
-        next_op = self.ops[min(steps - 1, len(self.ops) - 1)]
+        next_op = self.ops[min(self.calls, len(self.ops) - 1)]
+        self.calls += 1
         op[0, -1, next_op] = 20.0
         xy_mean = torch.zeros(1, steps, 2, device=device)
         if next_op == OP_GROW:
