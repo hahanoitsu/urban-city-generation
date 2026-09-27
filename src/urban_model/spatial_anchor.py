@@ -163,7 +163,7 @@ class SpatialAnchorArchitect(nn.Module):
         self.edge_class = nn.Linear(e, 8)
         self.edge_vertical = nn.Linear(e, 4)
         self.edge_width = nn.Linear(e, 1)
-        self.edge_shape = nn.Linear(e, config.edge_shape_points * 2)
+        self.edge_curve = nn.Linear(e, config.edge_shape_points)
 
     def _cell_field(
         self,
@@ -309,13 +309,12 @@ class SpatialAnchorArchitect(nn.Module):
             "edge_class": self.edge_class(pair),
             "edge_vertical": self.edge_vertical(pair),
             "edge_width": self.edge_width(pair),
-            "edge_shape": 0.55
-            * torch.tanh(self.edge_shape(pair)).reshape(
+            "edge_curve": 0.75
+            * torch.tanh(self.edge_curve(pair)).reshape(
                 batch,
                 pair.shape[1],
                 pair.shape[2],
                 self.config.edge_shape_points,
-                2,
             ),
         }
 
