@@ -209,11 +209,13 @@ def render(graph, sample, tensor_config, size=720):
     margin = (local_size - target_size) / 2.0
 
     def point(value):
+        x = float(value[0])
+        y = float(value[1])
         return (
-            int(round((value[0] + margin) / local_size * (size - 1))),
+            int(round((x + margin) / local_size * (size - 1))),
             int(
                 round(
-                    (1.0 - (value[1] + margin) / local_size)
+                    (1.0 - (y + margin) / local_size)
                     * (size - 1)
                 )
             ),
