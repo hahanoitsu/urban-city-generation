@@ -3,9 +3,9 @@ set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MAIN_ROOT="$(cd "$SCRIPT_ROOT/.." && pwd)/urban-city-generation"
-RUN="${CITY_PLAN_RUN:-$MAIN_ROOT/runs/city-planner-overfit-v1}"
+RUN="${CITY_PLAN_RUN:-$MAIN_ROOT/runs/city-planner-overfit-v2}"
 PREVIEWS="${CITY_PLAN_PREVIEWS:-$RUN/previews}"
-ZIP="${CITY_PLAN_PREVIEW_ZIP:-$MAIN_ROOT/city-planner-overfit-v1-previews.zip}"
+ZIP="${CITY_PLAN_PREVIEW_ZIP:-$MAIN_ROOT/city-planner-overfit-v2-previews.zip}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
