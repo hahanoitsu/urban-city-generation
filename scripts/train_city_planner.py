@@ -330,6 +330,7 @@ def main():
             "global_batch_size": args.batch_size * world_size,
             "overfit": args.overfit,
             "target_controls": args.use_target_controls,
+            "maximum_samples": args.maximum_samples,
         }
         (args.output / "experiment.json").write_text(
             json.dumps(metadata, indent=2) + "\n",
@@ -384,6 +385,7 @@ def main():
                     validation["loss"],
                 ),
                 "target_controls": args.use_target_controls,
+                "maximum_samples": args.maximum_samples,
             }
             torch.save(
                 checkpoint,
