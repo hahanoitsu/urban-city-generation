@@ -206,6 +206,7 @@ def main():
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--time-power", type=float, default=0.5)
+    parser.add_argument("--overfit", action="store_true")
     args = parser.parse_args()
 
     rank, local_rank, world_size = distributed_state()
@@ -229,6 +230,9 @@ def main():
         show_cache_progress=rank == 0,
     )
     splits = split_indices(dataset)
+    if args.overfit:
+        all_indices = list(range(len(dataset)))
+        splits = {"train": all_indices, "validation": all_indices, "test": []}
     if not splits["train"] or not splits["validation"]:
         raise RuntimeError("Structured split produced an empty train or validation set")
 
@@ -262,6 +266,7 @@ def main():
         edge_shape_points=scene_config.edge_shape_points,
         building_points=scene_config.building_points,
         area_points=scene_config.area_points,
+        dropout=0.0 if args.overfit else 0.1,
     )
     model = StructuredCityDenoiser(model_config).to(device)
     trainable_parameters = [
@@ -366,6 +371,7 @@ def main():
         "global_batch_size": args.batch_size * world_size,
         "learning_rate": args.learning_rate,
         "time_power": args.time_power,
+        "overfit": args.overfit,
         "class_weights": {
             name: value.tolist()
             for name, value in dataset.class_weights.items()
@@ -426,6 +432,7 @@ def main():
                 "scene_config": scene_config.__dict__,
                 "best_validation_loss": min(best, validation_high["loss"]),
                 "world_size": world_size,
+                "overfit": args.overfit,
             }
             torch.save(checkpoint, args.output / "latest.pt")
             if args.save_every > 0 and epoch % args.save_every == 0:
