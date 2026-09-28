@@ -122,7 +122,10 @@ def plan_cell_graph_loss(
     *,
     target_size_m: float,
     grid_size: int,
+    geometry_scale_m: float | None = None,
 ):
+    if geometry_scale_m is not None and geometry_scale_m <= 0:
+        raise ValueError("geometry_scale_m must be positive")
     batch_size = output["node_xy"].shape[0]
     device = output["node_xy"].device
     losses = {
@@ -138,7 +141,13 @@ def plan_cell_graph_loss(
         "edge_curve": [],
         "curve_smooth": [],
     }
-    metrics = {"node_position_mae_m": [], "set_chamfer_m": [], "edge_recall": [], "curve_mae_m": []}
+    metrics = {
+        "node_position_mae_m": [],
+        "set_chamfer_m": [],
+        "edge_recall": [],
+        "curve_mae_m": [],
+        "edge_shape_mae_m": [],
+    }
     orders = []
 
     for batch_index in range(batch_size):
@@ -161,9 +170,17 @@ def plan_cell_graph_loss(
             ],
             dim=-1,
         ).clamp(0.0, 1.0)
-        losses["node_local"].append(
-            F.smooth_l1_loss(output["node_local"][batch_index, :node_count], target_local)
-        )
+        if geometry_scale_m is None:
+            position_loss = F.smooth_l1_loss(
+                output["node_local"][batch_index, :node_count], target_local
+            )
+        else:
+            position_loss = F.smooth_l1_loss(
+                predicted_xy.float() * (target_size_m / 2 / geometry_scale_m),
+                target_xy.float() * (target_size_m / 2 / geometry_scale_m),
+                beta=1.0 / geometry_scale_m,
+            )
+        losses["node_local"].append(position_loss)
         metrics["node_position_mae_m"].append(
             torch.linalg.vector_norm(predicted_xy - target_xy, dim=-1).mean()
             * (target_size_m / 2.0)
@@ -229,21 +246,44 @@ def plan_cell_graph_loss(
             losses["edge_width"].append(
                 F.smooth_l1_loss(predicted_width[positive], target_width[positive])
             )
-            losses["edge_curve"].append(
-                F.smooth_l1_loss(predicted_curve[positive], target_curve[positive])
-            )
-            curve = predicted_curve[positive]
-            target = target_curve[positive]
+            curve = predicted_curve[positive].float()
+            target = target_curve[positive].float()
+            scale = target_size_m / 2 / geometry_scale_m if geometry_scale_m is not None else 1.0
+            beta = 1.0 / geometry_scale_m if geometry_scale_m is not None else 1.0
+            if geometry_scale_m is not None and curve.ndim != 3:
+                raise ValueError("Metric geometry loss requires x/y curve residuals")
+            losses["edge_curve"].append(F.smooth_l1_loss(curve * scale, target * scale, beta=beta))
             if curve.ndim == 3:
                 metrics["curve_mae_m"].append(
                     torch.linalg.vector_norm(curve - target, dim=-1).mean() * target_size_m / 2
+                )
+                left, right = positive.nonzero(as_tuple=True)
+                fraction = torch.arange(1, curve.shape[1] + 1, device=device)[None, :, None] / (
+                    curve.shape[1] + 1
+                )
+                points = (
+                    predicted_xy[left, None] * (1 - fraction)
+                    + predicted_xy[right, None] * fraction
+                    + curve
+                )
+                target_points = (
+                    target_xy[left, None] * (1 - fraction)
+                    + target_xy[right, None] * fraction
+                    + target
+                )
+                metrics["edge_shape_mae_m"].append(
+                    torch.linalg.vector_norm(points - target_points, dim=-1).mean()
+                    * target_size_m
+                    / 2
                 )
             axis = -2 if curve.ndim == 3 else -1
             if curve.shape[axis] >= 3:
                 # Match real bends instead of penalising every bend towards a straight line.
                 second = torch.diff(curve, n=2, dim=axis)
                 target_second = torch.diff(target, n=2, dim=axis)
-                losses["curve_smooth"].append(F.smooth_l1_loss(second, target_second))
+                losses["curve_smooth"].append(
+                    F.smooth_l1_loss(second * scale, target_second * scale, beta=beta)
+                )
             else:
                 losses["curve_smooth"].append(curve.sum() * 0)
         else:

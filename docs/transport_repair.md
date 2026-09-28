@@ -71,6 +71,24 @@ This loads `best.pt` and the data path in `experiment.json`. It writes a new `de
 
 The overfit set has only 16 examples. Any improvement here is a debugging result. It does not establish generalization, diverse generation or novelty.
 
+## Audit result and geometry fine-tuning
+
+The six examples in `decode-audit-20260928-114140` contain 518 target edges. Degree selection raised reconstruction recall from 372/518 (71.8%) to 417/518 (80.5%), and removed all 75 isolated nodes. The dense example went from 61 triangles to 13, against five in the target. Generation still had 50 triangles across the six examples, against 169 with the old selection. Removing isolated nodes did not always improve the largest connected component.
+
+The saved predictions exposed another inference mismatch. Corridor directions are trained only where that corridor exists. The target plan supplies zeros elsewhere, but generation was passing the unconstrained predictions through. Absent direction channels averaged about 0.36 to 0.45 in absolute value. They are now zeroed using the predicted corridor presence. This changes generated conditioning without supplying target data.
+
+The old geometry loss used cell-relative coordinates for junctions and whole-window coordinates for curves. In a 512 m window, a four-metre curve error is only 0.0156 in normalized coordinates. The new optional metric loss applies the same ten-metre scale and one-metre Huber transition to junction positions and curve residuals. It still supervises real bends and their second differences. `edge_shape_mae_m` measures interior point error including both endpoint and curve errors.
+
+Fine-tune the saved model and compare both stages:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_context_plan_finetune.sh /path/to/run
+```
+
+This first exports the existing checkpoint with the orientation fix. It then runs 80 additional epochs at a learning rate of 0.00005 using the saved model configuration, sample IDs and normalization. The geometry scale is 10 m. An additional count loss of weight 0.1 supervises actual conditional counts rather than only their logarithms. The optimizer starts fresh because the objective changed. `EPOCHS`, `LEARNING_RATE`, `AUDIT_SAMPLES` and `FINETUNE_RUN` can override the runner settings.
+
+The result directory has `before`, `training` and `after` folders. `best.pt` starts as a copy of the initial weights and is replaced only when validation improves under the new objective. The old and new total losses use different scales; compare metre errors, decoded cell counts and exported graph metrics instead. The runner packages the comparisons and predictions in one ZIP. This remains an overfit experiment with target-plan graph supervision; it is not validation of multi-city or diverse generation.
+
 ## Remaining gaps
 
 - Buildings, water, green space and land use contribute contextual statistics; this experiment generates transport only.

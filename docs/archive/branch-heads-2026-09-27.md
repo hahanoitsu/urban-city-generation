@@ -1,10 +1,11 @@
 # Archived branch heads
 
-The active development branches are `main` and `context-graph-model-v1`.
+Keep `main` and `transport-pipeline-repair`. The context graph work is included in the repair branch.
 
 | Branch | Archived head |
 | --- | --- |
 | citygen-tree-test | 24b81f52add98533bf11a6221deed7678be64bc2 |
+| context-graph-model-v1 | 5a3f7af192366cbba78993aef3bbf21609370099 |
 | context-graph-v1 | f92932423e9584444c67ea606bbc7dd93cc3d9a5 |
 | cuda-training-v1 | bdd964e503594dc2d461b40e9eafa2881647f5ba |
 | dev | 59dbefc170f16b11362a6093cd328496a404ba80 |
@@ -29,4 +30,4 @@ The active development branches are `main` and `context-graph-model-v1`.
 | whole-singapore-overfit | 1af79d881a3a18ef64787b65c02d68f8c5252a2a |
 | whole-singapore-overfit-v2 | 33a2ccd0ae956a55404a2099346bebe215b72c92 |
 
-The cleanup script creates a matching `archive/<branch>` tag before deleting each remote branch.
+Run `bash scripts/archive_old_branches.sh` from an authenticated checkout after closing the obsolete diffusion PRs #8, #9 and #10 without merging. The script keeps the two branches above and creates `archive/<branch>` tags for the other 25. It refuses to overwrite an existing different tag or delete a branch that changed after it was archived. Missing branches are skipped. This script is provided for manual cleanup; it has not been run against GitHub.

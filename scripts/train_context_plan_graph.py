@@ -48,6 +48,7 @@ def run_epoch(model, loader, device, tensor_config, args, optimizer=None):
                     batch,
                     target_size_m=tensor_config.target_size_m,
                     grid_size=args.grid_size,
+                    geometry_scale_m=args.geometry_scale_m,
                 )
                 plan_loss, plan_metrics = city_plan_loss(
                     plan,
@@ -67,7 +68,17 @@ def run_epoch(model, loader, device, tensor_config, args, optimizer=None):
                 if occupied.any()
                 else rate.sum() * 0
             )
-            loss = graph_loss + 0.5 * plan_loss + 0.05 * count_loss
+            present = batch["plan_presence"] > 0
+            conditional_counts = torch.expm1(plan["plan_log_count"].float().clamp_max(8))
+            count_error = F.smooth_l1_loss(
+                conditional_counts[present], batch["plan_counts"][present], beta=0.5
+            )
+            loss = (
+                graph_loss
+                + 0.5 * plan_loss
+                + 0.05 * count_loss
+                + args.count_error_weight * count_error
+            )
             if not torch.isfinite(loss):
                 raise RuntimeError(f"Non-finite loss for {batch['sample_id']}")
             if training:
@@ -78,7 +89,13 @@ def run_epoch(model, loader, device, tensor_config, args, optimizer=None):
                 "loss": float(loss.detach()),
                 **graph_metrics,
                 **{f"plan_{key}": value for key, value in plan_metrics.items()},
+                "conditional_count_error": float(count_error.detach()),
             }
+            with torch.no_grad():
+                decoded = model.predicted_plan(plan)
+                count_difference = decoded["plan_counts"][..., 0] - batch["plan_counts"][..., 0]
+                metrics["decoded_node_mae"] = float(count_difference.sum(dim=1).abs().mean())
+                metrics["decoded_cell_count_l1"] = float(count_difference.abs().sum(dim=1).mean())
             count = len(batch["sample_id"])
             examples += count
             for name, value in metrics.items():
@@ -94,6 +111,9 @@ def main():
     parser.add_argument("--maximum-samples", type=int)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
+    parser.add_argument("--init-checkpoint", type=Path)
+    parser.add_argument("--geometry-scale-m", type=float)
+    parser.add_argument("--count-error-weight", type=float, default=0.0)
     parser.add_argument("--grid-size", type=int, default=8)
     parser.add_argument("--dimensions", type=int, default=256)
     parser.add_argument("--layers", type=int, default=3)
@@ -105,6 +125,24 @@ def main():
     parser.add_argument("--no-context", action="store_true")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
+    initial = None
+    if args.init_checkpoint:
+        initial = torch.load(args.init_checkpoint, map_location="cpu", weights_only=False)
+        if initial.get("format") != "context-plan-graph-v1":
+            raise ValueError("Expected a context-plan-graph-v1 checkpoint")
+        args.grid_size = initial["plan_config"]["grid_size"]
+        args.dimensions = initial["graph_config"]["model_dimensions"]
+        args.layers = initial["graph_config"]["node_layers"]
+        args.max_nodes = initial["tensor_config"]["max_nodes"]
+        args.max_edges = initial["tensor_config"]["max_edges"]
+        args.maximum_samples = initial["maximum_samples"]
+        args.overfit = initial["overfit"]
+        args.no_context = initial["no_context"]
+        args.seed = initial["arguments"]["seed"]
+    if args.epochs < 1 or args.count_error_weight < 0:
+        parser.error("Epochs must be positive and count error weight must be non-negative")
+    if args.geometry_scale_m is not None and args.geometry_scale_m <= 0:
+        parser.error("Geometry scale must be positive")
     if args.output.exists() and any(args.output.iterdir()):
         raise RuntimeError(f"Output is not empty: {args.output}. Use a new run directory.")
     if args.dimensions % 8:
@@ -114,11 +152,21 @@ def main():
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
     torch.set_float32_matmul_precision("high")
-    tensor_config = SpatialTensorConfig.from_dataset(
-        args.data, simple_graph=True, max_nodes=args.max_nodes, max_edges=args.max_edges
+    tensor_config = (
+        SpatialTensorConfig(**initial["tensor_config"])
+        if initial
+        else SpatialTensorConfig.from_dataset(
+            args.data, simple_graph=True, max_nodes=args.max_nodes, max_edges=args.max_edges
+        )
     )
-    plan_config = CityPlanConfig(grid_size=args.grid_size)
-    split_strategy = "legacy" if args.overfit else "buffered"
+    plan_config = (
+        CityPlanConfig(**initial["plan_config"])
+        if initial
+        else CityPlanConfig(grid_size=args.grid_size)
+    )
+    split_strategy = (
+        initial["split_strategy"] if initial else ("legacy" if args.overfit else "buffered")
+    )
     dataset = CityPlanDataset(
         args.data,
         tensor_config=tensor_config,
@@ -126,8 +174,18 @@ def main():
         maximum_samples=args.maximum_samples,
         normalization_split="all" if args.overfit else "train",
         split_strategy=split_strategy,
+        normalization=initial["normalization"] if initial else None,
     )
-    if args.overfit:
+    if initial:
+        indices = {sample["sample_id"]: i for i, sample in enumerate(dataset.samples)}
+        missing = set().union(*map(set, initial["sample_ids"].values())) - indices.keys()
+        if missing:
+            raise ValueError(f"Saved samples are missing from the dataset: {sorted(missing)}")
+        splits = {
+            name: [indices[sample_id] for sample_id in ids]
+            for name, ids in initial["sample_ids"].items()
+        }
+    elif args.overfit:
         splits = {name: list(range(len(dataset))) for name in ("train", "validation")}
     else:
         splits = {
@@ -171,9 +229,14 @@ def main():
         edge_shape_points=tensor_config.edge_shape_points,
         **shared,
     )
+    if initial:
+        planner_config = CityPlannerConfig.from_dict(initial["planner_config"])
+        graph_config = PlanCellGraphConfig.from_dict(initial["graph_config"])
     model = ContextPlanGraph(
         planner_config.to_dict(), graph_config.to_dict(), dataset.normalization
     ).to(device)
+    if initial:
+        model.load_state_dict(initial["model"])
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
     loaders = {
         name: DataLoader(
@@ -205,6 +268,11 @@ def main():
             for key, value in vars(args).items()
         },
         "base_rejected": dataset.base_rejected,
+        "initial_checkpoint": str(args.init_checkpoint) if initial else None,
+        "initial_epoch": initial["epoch"] if initial else None,
+        "optimizer_restarted": initial is not None,
+        "geometry_scale_m": args.geometry_scale_m,
+        "count_error_weight": args.count_error_weight,
         "source_commit": subprocess.run(
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True
         ).stdout.strip(),
@@ -224,8 +292,24 @@ def main():
         flush=True,
     )
     best = float("inf")
+    start_epoch = initial["epoch"] if initial else 0
+    if initial:
+        baseline = run_epoch(model, loaders["validation"], device, tensor_config, args)
+        (args.output / "initial_validation.json").write_text(json.dumps(baseline, indent=2) + "\n")
+        best = baseline["loss"]
+        torch.save(
+            {
+                **checkpoint_info,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epoch": start_epoch,
+                "validation": baseline,
+            },
+            args.output / "best.pt",
+        )
+        del initial
     started = time.time()
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch + 1, start_epoch + args.epochs + 1):
         train = run_epoch(model, loaders["train"], device, tensor_config, args, optimizer)
         validation = run_epoch(model, loaders["validation"], device, tensor_config, args)
         record = {
@@ -253,9 +337,10 @@ def main():
         if args.save_every and epoch % args.save_every == 0:
             torch.save(checkpoint, args.output / f"epoch-{epoch:03d}.pt")
         print(
-            f"epoch={epoch}/{args.epochs} loss={validation['loss']:.4f} "
+            f"epoch={epoch}/{start_epoch + args.epochs} loss={validation['loss']:.4f} "
             f"node_m={validation['node_position_mae_m']:.2f} edge_recall={validation['edge_recall']:.3f} "
-            f"plan_nodes_mae={validation['plan_node_mae']:.2f} elapsed_min={(time.time() - started) / 60:.1f}",
+            f"curve_m={validation['curve_mae_m']:.2f} cell_count_l1={validation['decoded_cell_count_l1']:.2f} "
+            f"elapsed_min={(time.time() - started) / 60:.1f}",
             flush=True,
         )
 

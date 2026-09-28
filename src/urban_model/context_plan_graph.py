@@ -95,7 +95,8 @@ class ContextPlanGraph(nn.Module):
             "plan_counts": counts,
             "plan_presence": (counts > 0).float(),
             "plan_log_counts": torch.log1p(counts),
-            "plan_orientation": plan["plan_orientation"].float(),
+            "plan_orientation": plan["plan_orientation"].float()
+            * (counts[..., 3:7] > 0).unsqueeze(-1),
             "plan_global": (raw - self.global_mean) / self.global_std,
             "plan_global_raw": raw,
             "node_count": raw[:, 0].long(),

@@ -127,6 +127,23 @@ def test_deterministic_conversion_uses_the_conditional_count():
     assert torch.equal(converted["node_count"], torch.tensor([5, 5]))
 
 
+def test_absent_corridors_cannot_supply_unsupervised_directions():
+    model, batch = model_and_batch()
+    predicted = {
+        "plan_presence": torch.full_like(batch["plan_presence"], -30.0),
+        "plan_log_count": torch.ones_like(batch["plan_counts"]),
+        "plan_orientation": torch.full_like(batch["plan_orientation"], 0.8),
+        "plan_global": torch.zeros_like(batch["plan_global"]),
+    }
+    predicted["plan_presence"][:, 0, 3] = 30.0
+    converted = model.predicted_plan(predicted)
+    assert torch.equal(
+        converted["plan_orientation"][:, 0, 0], predicted["plan_orientation"][:, 0, 0]
+    )
+    assert torch.count_nonzero(converted["plan_orientation"][:, :, 1:]) == 0
+    assert torch.count_nonzero(converted["plan_orientation"][:, 1:]) == 0
+
+
 def test_buffered_split_keeps_context_windows_apart():
     payloads = [
         (
