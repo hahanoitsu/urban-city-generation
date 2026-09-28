@@ -310,8 +310,7 @@ def export_one(
     }
     output.mkdir(parents=True, exist_ok=True)
     city_path = output / "city.json"
-    city_path.write_text(json.dumps(city, indent=2) + "
-", encoding="utf-8")
+    city_path.write_text(json.dumps(city, indent=2) + "\n", encoding="utf-8")
     render_generated_city(city, output / "plan.png")
     render_isometric_city(city, output / "city-isometric.png")
     obj = export_generated_city_obj(display_city(city), output / "city.obj")
@@ -339,8 +338,7 @@ def export_one(
             "OBJ vertical offsets are display values because metric elevation is not learned yet.",
         ],
     }
-    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "
-", encoding="utf-8")
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest
 
 
