@@ -94,6 +94,39 @@ def test_context_reaches_the_graph_decoder():
     assert not torch.allclose(graph_a["node_xy"], graph_b["node_xy"])
 
 
+def test_absent_mode_count_predictions_do_not_change_the_node_mix():
+    model, batch = model_and_batch()
+    plan = {
+        "plan_presence": torch.full_like(batch["plan_presence"], -30.0),
+        "plan_log_count": torch.zeros_like(batch["plan_counts"]),
+        "plan_orientation": batch["plan_orientation"],
+        "plan_global": torch.zeros_like(batch["plan_global"]),
+    }
+    plan["plan_presence"][:, 0, :2] = 30.0
+    plan["plan_log_count"][:, 0, :2] = torch.log1p(torch.tensor(4.0))
+    plan["plan_log_count"][:, :, 2] = torch.log1p(torch.tensor(1000.0))
+    converted = model.predicted_plan(plan)
+    assert torch.equal(converted["node_count"], torch.tensor([4, 4]))
+    assert torch.equal(
+        converted["plan_counts"][:, 0, :3], torch.tensor([[4.0, 4.0, 0.0], [4.0, 4.0, 0.0]])
+    )
+    assert torch.count_nonzero(converted["plan_counts"][:, 1:]) == 0
+
+
+def test_deterministic_conversion_uses_the_conditional_count():
+    model, batch = model_and_batch()
+    plan = {
+        "plan_presence": torch.full_like(batch["plan_presence"], -30.0),
+        "plan_log_count": torch.zeros_like(batch["plan_counts"]),
+        "plan_orientation": batch["plan_orientation"],
+        "plan_global": torch.zeros_like(batch["plan_global"]),
+    }
+    plan["plan_presence"][:, 0, 0] = torch.logit(torch.tensor(0.6))
+    plan["plan_log_count"][:, 0, 0] = torch.log1p(torch.tensor(5.0))
+    converted = model.predicted_plan(plan)
+    assert torch.equal(converted["node_count"], torch.tensor([5, 5]))
+
+
 def test_buffered_split_keeps_context_windows_apart():
     payloads = [
         (
