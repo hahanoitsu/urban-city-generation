@@ -3,6 +3,7 @@ set -euo pipefail
 
 branches=(
   citygen-tree-test
+  context-graph-model-v1
   context-graph-v1
   cuda-training-v1
   dev
@@ -30,13 +31,24 @@ branches=(
 
 git fetch origin --prune
 
+deletions=()
+leases=()
 for branch in "${branches[@]}"; do
+    if ! git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+        continue
+    fi
     sha="$(git rev-parse "origin/$branch")"
     tag="archive/$branch"
-    git tag -f "$tag" "$sha"
-    git push -f origin "refs/tags/$tag"
+    git push origin "$sha:refs/tags/$tag"
+    deletions+=(":refs/heads/$branch")
+    leases+=("--force-with-lease=refs/heads/$branch:$sha")
 done
 
-git push origin --delete "${branches[@]}"
+if [[ ${#deletions[@]} -eq 0 ]]; then
+    echo "No old branches remain."
+    exit 0
+fi
+
+git push --atomic "${leases[@]}" origin "${deletions[@]}"
 git fetch origin --prune
 git branch -r
