@@ -249,6 +249,15 @@ def _building_kind(value: str) -> int:
 
 def _polygon_records(payload: dict[str, Any]) -> list[tuple[str, Polygon]]:
     result = []
+    for record in payload["target"].get("green", []):
+        geometry_payload = record.get("geometry_local_m")
+        if not geometry_payload:
+            continue
+        geometry = shape(geometry_payload)
+        for polygon in _iter_polygons(geometry):
+            if polygon.area > 1e-6:
+                result.append(("green", polygon))
+
     for record in payload["target"].get("landuse", []):
         kind = str(record.get("class") or "")
         if kind not in AREA_KINDS or kind == "water":
