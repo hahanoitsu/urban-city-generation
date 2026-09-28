@@ -27,7 +27,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd "$SCRIPT_ROOT"
 
-python -m pytest -q tests/test_transport_repairs.py tests/test_plan_cell_graph.py tests/test_context_plan_graph.py
+python -m pytest -q tests/test_transport_repairs.py tests/test_plan_cell_graph.py tests/test_context_plan_graph.py tests/test_graph_decode.py
 
 if [[ ! -f "$DATA/summary.json" ]]; then
     if [[ -e "$DATA" ]]; then
@@ -63,7 +63,7 @@ python scripts/train_context_plan_graph.py \
 
 python scripts/sample_context_plan_graph.py \
     --data "$DATA" --checkpoint "$RUN/best.pt" \
-    --output "$RUN/previews" --samples 6 --seeds 7 19 37
+    --output "$RUN/previews" --samples 6 --compare-decoders --save-predictions
 
 python - "$RUN" <<'PY'
 import sys
@@ -74,7 +74,7 @@ run = Path(sys.argv[1])
 destination = run.with_suffix(".zip")
 with ZipFile(destination, "w", ZIP_DEFLATED) as archive:
     for path in sorted(run.rglob("*")):
-        if path.is_file() and path.suffix in {".json", ".jsonl", ".png"}:
+        if path.is_file() and path.suffix in {".json", ".jsonl", ".png", ".npz"}:
             archive.write(path, path.relative_to(run))
 print(f"Results: {destination}")
 PY

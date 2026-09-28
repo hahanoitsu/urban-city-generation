@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
 
+import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
@@ -20,6 +22,40 @@ from urban_model.context_plan_graph import ContextPlanGraph, context_inputs
 from urban_model.spatial_world_data import SpatialTensorConfig
 
 
+def save_predictions(path, output, plan, planner):
+    count = int(plan["node_count"])
+    arrays = {}
+    for name, value in output.items():
+        if name == "node_hidden":
+            continue
+        value = value[0, :count]
+        if name.startswith("edge_"):
+            value = value[:, :count]
+        arrays[name] = value.detach().cpu().numpy()
+    for name in (
+        "plan_counts",
+        "plan_presence",
+        "plan_orientation",
+        "plan_global_raw",
+        "node_count",
+    ):
+        arrays[name] = plan[name].detach().cpu().numpy()
+    for name, value in planner.items():
+        arrays[f"planner_{name}"] = value[0].detach().cpu().numpy()
+    np.savez_compressed(path, **arrays)
+
+
+def plan_stats(target, predicted):
+    actual = target["plan_counts"][:, 0].detach().cpu()
+    counts = predicted["plan_counts"][:, 0].detach().cpu()
+    return {
+        "node_count_error": int(counts.sum() - actual.sum()),
+        "cell_count_l1": int((counts - actual).abs().sum()),
+        "changed_cells": int((counts != actual).sum()),
+        "exact_cell_count_fraction": float((counts == actual).float().mean()),
+    }
+
+
 @torch.inference_mode()
 def main():
     parser = argparse.ArgumentParser()
@@ -27,10 +63,20 @@ def main():
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--samples", type=int, default=6)
-    parser.add_argument("--seeds", type=int, nargs="+", default=[7, 19, 37])
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=[],
+        help="Add independent count-noise samples after the deterministic result",
+    )
+    parser.add_argument("--compare-decoders", action="store_true")
+    parser.add_argument("--save-predictions", action="store_true")
     parser.add_argument("--split", choices=["train", "validation", "test"])
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
+    if args.samples < 1:
+        parser.error("--samples must be positive")
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     tensor_config = SpatialTensorConfig(**checkpoint["tensor_config"])
     plan_config = CityPlanConfig(**checkpoint["plan_config"])
@@ -63,7 +109,7 @@ def main():
         batch = move_sample(sample, device)
         context = context_inputs(batch, use_context=not checkpoint["no_context"])
         target = target_graph(sample, tensor_config, plan_config.grid_size)
-        _, output = model(context, batch)
+        predicted, output = model(context, batch)
         reconstructed = generated_graph(output, sample, tensor_config, strategy="raw")
         record = {
             "sample_id": sample["sample_id"],
@@ -79,6 +125,7 @@ def main():
                 "graph": reconstructed,
                 "uses_target_plan": True,
                 "metrics": comparison_stats(target, reconstructed),
+                "statistics": graph_stats(reconstructed),
             },
             "generations": [],
         }
@@ -86,31 +133,60 @@ def main():
             render(target, sample, tensor_config.target_size_m, size=512),
             render(reconstructed, sample, tensor_config.target_size_m, size=512),
         ]
-        labels = ["target", "reconstruction: target plan supplied"]
-        for seed in args.seeds:
-            generator = torch.Generator(device=device).manual_seed(seed)
-            plan, generated = model.generate(context, stochastic=True, generator=generator)
-            single_plan = {key: value[0] for key, value in plan.items()}
-            graph = generated_graph(generated, single_plan, tensor_config, strategy="compatible")
-            record["generations"].append(
-                {
-                    "seed": seed,
-                    "uses_target_plan": False,
-                    "controls": "disabled",
-                    "graph": graph,
-                    "statistics": graph_stats(graph),
-                    "predicted_nodes": int(single_plan["node_count"]),
-                    "predicted_edges": int(single_plan["plan_global_raw"][1]),
-                }
+        labels = ["target", "target plan: old edge selection"]
+        stem = f"{index:02d}-{sample['sample_id']}"
+        if args.save_predictions:
+            save_predictions(args.output / f"{stem}-reconstruction.npz", output, sample, predicted)
+        if args.compare_decoders:
+            decoded = generated_graph(output, sample, tensor_config, strategy="learned_degree")
+            record["degree_reconstruction"] = {
+                "graph": decoded,
+                "uses_target_plan": True,
+                "metrics": comparison_stats(target, decoded),
+                "statistics": graph_stats(decoded),
+                "solver": decoded["decoder"],
+            }
+            panels.append(render(decoded, sample, tensor_config.target_size_m, size=512))
+            labels.append("target plan: learned degree selection")
+        strategies = ["compatible", "learned_degree"] if args.compare_decoders else ["compatible"]
+        for seed in [None, *args.seeds]:
+            generator = None if seed is None else torch.Generator(device=device).manual_seed(seed)
+            plan, generated = model.generate(
+                context, stochastic=seed is not None, generator=generator
             )
-            panels.append(render(graph, single_plan, tensor_config.target_size_m, size=512))
-            labels.append(f"context generation, seed {seed}")
+            single_plan = {key: value[0] for key, value in plan.items()}
+            tag = "deterministic" if seed is None else f"seed-{seed}"
+            if args.save_predictions:
+                save_predictions(
+                    args.output / f"{stem}-{tag}.npz", generated, single_plan, predicted
+                )
+            for strategy in strategies:
+                graph = generated_graph(generated, single_plan, tensor_config, strategy=strategy)
+                record["generations"].append(
+                    {
+                        "seed": seed,
+                        "sampling": "deterministic" if seed is None else "independent count noise",
+                        "decoder": strategy,
+                        "uses_target_plan": False,
+                        "controls": "disabled",
+                        "graph": graph,
+                        "statistics": graph_stats(graph),
+                        "solver": graph.get("decoder"),
+                        "plan_metrics": plan_stats(sample, single_plan),
+                        "predicted_nodes": int(single_plan["node_count"]),
+                        "predicted_edges": int(single_plan["plan_global_raw"][1]),
+                    }
+                )
+                panels.append(render(graph, single_plan, tensor_config.target_size_m, size=512))
+                selection = (
+                    "old edge selection" if strategy == "compatible" else "learned degree selection"
+                )
+                labels.append(f"{tag}: {selection}")
         image = Image.new("RGB", (512 * len(panels), 540), "white")
         draw = ImageDraw.Draw(image)
         for column, (panel, label) in enumerate(zip(panels, labels, strict=True)):
             image.paste(panel, (column * 512, 28))
             draw.text((column * 512 + 5, 7), label, fill="black")
-        stem = f"{index:02d}-{sample['sample_id']}"
         image.save(args.output / f"{stem}.png")
         (args.output / f"{stem}.json").write_text(json.dumps(record, indent=2) + "\n")
         summaries.append(
@@ -118,12 +194,19 @@ def main():
                 "sample_id": sample["sample_id"],
                 "target": graph_stats(target),
                 "reconstruction": record["reconstruction"]["metrics"],
+                "reconstruction_statistics": record["reconstruction"]["statistics"],
+                "degree_reconstruction": {
+                    key: value
+                    for key, value in record.get("degree_reconstruction", {}).items()
+                    if key != "graph"
+                },
                 "generations": [
                     {key: value for key, value in result.items() if key != "graph"}
                     for result in record["generations"]
                 ],
             }
         )
+        print(f"Saved {sample['sample_id']} ({index + 1}/{len(samples)})", flush=True)
     (args.output / "summary.json").write_text(
         json.dumps(
             {
@@ -131,8 +214,22 @@ def main():
                 "epoch": checkpoint["epoch"],
                 "split": split,
                 "overfit": checkpoint["overfit"],
-                "sampling": "independent cell occupancy and shifted Poisson node counts",
-                "decoder": "highest scoring same-mode pairs, predicted edge budget; no component repair",
+                "sampling": "deterministic plan; optional seeds add independent cell count noise",
+                "compare_decoders": args.compare_decoders,
+                "saved_predictions": args.save_predictions,
+                "decoder": "top-count selection, plus learned degree selection when compare_decoders is true",
+                "degree_decoder": "experimental; predicted degree capacities and estimated BCE calibration",
+                "precision": "float32",
+                "source_commit": subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    cwd=Path(__file__).resolve().parents[1],
+                ).stdout.strip(),
+                "tensor_config": checkpoint["tensor_config"],
+                "graph_config": checkpoint["graph_config"],
+                "plan_config": checkpoint["plan_config"],
+                "training_source_commit": checkpoint.get("source_commit"),
                 "samples": summaries,
             },
             indent=2,

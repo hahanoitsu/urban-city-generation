@@ -25,7 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 osm = ["pyrosm>=0.11.0"]
-ml = ["torch>=2.7"]
+ml = ["torch>=2.7", "scipy>=1.15"]
 analysis = ["scipy>=1.15", "scikit-image>=0.25"]
 diffusion = [
   "torch>=2.7",

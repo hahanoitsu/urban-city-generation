@@ -37,18 +37,39 @@ The final line prints a ZIP containing previews, graph JSON, experiment settings
 python scripts/sample_context_plan_graph.py \
   --data /path/to/spatial-world-repair-512 \
   --checkpoint /path/to/run/best.pt \
-  --output /path/to/run/new-previews --samples 6 --seeds 7 19 37
+  --output /path/to/run/new-previews --samples 6 \
+  --compare-decoders --save-predictions
 ```
 
 ## Read the comparisons
 
-Each image shows the target, reconstruction with the target plan, and three generations from context. The generated columns receive no target nodes, edges, plan or target density controls. They still use the visible surroundings and the supplied city style statistics.
+Each comparison image has five columns: the target, reconstruction with old edge selection, reconstruction with predicted degree scores, context generation with old edge selection, and context generation with predicted degree scores. Both reconstruction columns use the target plan. Both generated columns use the same deterministic predicted plan. They receive no target nodes, edges, plan or target density controls. They still use the visible surroundings and the supplied city style statistics.
 
-Reconstruction uses the target edge count and reports node error and edge precision/recall. Generation uses predicted counts. Its node IDs do not correspond to the target's IDs, so it reports graph statistics rather than misleading indexed edge recall.
+The old reconstruction decoder uses the target edge count and reports node error and edge precision/recall. The degree decoder uses the predicted edge and node degree scores without a supplied edge budget. Generation uses predicted node counts. Its node IDs do not correspond to the target's IDs, so it reports graph statistics rather than indexed edge recall. Comparing the two generation columns isolates edge selection. Comparing their plan counts with the target measures a separate source of error.
 
-Generation samples cell occupancy and a shifted Poisson distribution for node counts. This is a simple stochastic baseline. It is not a learned city-level latent distribution. The decoder selects the highest scoring same-mode pairs up to its predicted edge budget. It does not repair the graph to match a target component count. Connectivity is still something to measure, not a guarantee.
+Generation is deterministic by default. Supplying `--seeds 7 19 37` adds independent occupancy and shifted Poisson count noise as a separate experiment. That noise is not a learned city-level latent distribution. Changing cell counts also changes the decoder's node slots, which were trained using target counts.
+
+The experimental degree decoder uses each node's most likely predicted degree as its capacity. Within these capacities, it jointly selects edges and degree states using edge logits and learned degree probabilities. It estimates the training BCE class-weight correction from predicted degrees, so calibration is approximate. It allows road-to-road and rail-to-rail edges, without a fixed degree limit such as four, a triangle ban, a geometric template, or a component-count constraint. It does not move nodes or smooth curves. A five-second solver limit applies to each graph; the JSON records the result, gap and any fallback. If no feasible solver result is available, the fallback accepts positive corrected edge scores only while both endpoints remain below their predicted degrees. Wrong degree predictions can now suppress real connections, so this experiment still needs comparison on the trained checkpoint.
 
 The graph decoder is trained with target plans. Poor generated plans can still cause poor graphs even when reconstruction works. Compare both columns before changing the architecture again.
+
+## Check the existing 200-epoch run
+
+The run `context-plan-graph-repair-20260928-064549` selected epoch 195. Its logged mean node error was 9.43 m and curve residual error was 5.31 m. The low total loss did not mean that road geometry was accurate.
+
+In preview `singapore_w+00278_+00725`, the target had five triangles. Reconstruction had 61 and left 50 nodes isolated. The three generated graphs had 64 to 90 triangles. These counts show that connections accumulated in small clusters even with the target plan supplied.
+
+Two inference problems are now addressed: count conversion no longer uses unconstrained absent-mode counts to set the road/rail ratio, and independent count noise is optional. The degree comparison checks a third problem: the old global edge ranking ignored the already-trained degree head. Fixing selection cannot repair position or curve errors stored in the checkpoint.
+
+Run the comparison without building data or training:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_context_plan_decode_audit.sh /path/to/run
+```
+
+This loads `best.pt` and the data path in `experiment.json`. It writes a new `decode-audit-<time>` folder and ZIP inside the existing run. Set `REPAIR_DATA` if the dataset moved. The ZIP includes graph JSON, PNG comparisons, metrics and compressed prediction arrays. The arrays contain the edge and degree logits, coordinates, curves and planner predictions so later decoding checks can run without the model weights. No checkpoint is changed.
+
+The overfit set has only 16 examples. Any improvement here is a debugging result. It does not establish generalization, diverse generation or novelty.
 
 ## Remaining gaps
 

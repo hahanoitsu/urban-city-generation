@@ -291,7 +291,12 @@ def generated_graph(output, sample, tensor_config, *, strategy="degree"):
             }
         )
 
-    if strategy == "compatible":
+    decoder = None
+    if strategy == "learned_degree":
+        from urban_model.graph_decode import learned_degree_edges
+
+        pairs, decoder = learned_degree_edges(output, node_count)
+    elif strategy == "compatible":
         pairs, scores = edge_candidates(output, node_count)
         modes = output["node_mode"][0, :node_count].argmax(dim=-1)
         valid = torch.where(modes[pairs[0]] == modes[pairs[1]])[0]
@@ -309,7 +314,7 @@ def generated_graph(output, sample, tensor_config, *, strategy="degree"):
     edges = []
     for left, right in pairs:
         class_index = int(output["edge_class"][0, left, right].argmax())
-        if strategy == "compatible":
+        if strategy in ("compatible", "learned_degree"):
             mode = int(output["node_mode"][0, left].argmax())
             logits = output["edge_class"][0, left, right]
             class_index = int(logits[:3].argmax()) if mode == 0 else int(logits[3:].argmax()) + 3
@@ -334,7 +339,10 @@ def generated_graph(output, sample, tensor_config, *, strategy="degree"):
                 ],
             }
         )
-    return {"nodes": nodes, "edges": edges}
+    graph = {"nodes": nodes, "edges": edges}
+    if decoder is not None:
+        graph["decoder"] = decoder
+    return graph
 
 
 def graph_stats(graph):
@@ -391,6 +399,14 @@ def graph_stats(graph):
         "components": len(components),
         "largest_component_fraction": (max(components, default=0) / max(node_count, 1)),
         "isolated_fraction": (sum(not values for values in adjacency) / max(node_count, 1)),
+        "max_degree": max((len(values) for values in adjacency), default=0),
+        "triangles": sum(
+            len(adjacency[a] & adjacency[b])
+            for a in range(node_count)
+            for b in adjacency[a]
+            if a < b
+        )
+        // 3,
         "road_edges": sum(edge["mode"] == "road" for edge in graph["edges"]),
         "rail_edges": sum(edge["mode"] == "rail" for edge in graph["edges"]),
         "path_chord_p50": (ratios[len(ratios) // 2] if ratios else 1.0),

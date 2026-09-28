@@ -58,7 +58,8 @@ class ContextPlanGraph(nn.Module):
         probability = torch.sigmoid(plan["plan_presence"].float() - self.presence_pos_weight.log())
         log_count = plan["plan_log_count"].float().clamp_max(8.0)
         count_mean = torch.expm1(log_count)
-        counts = torch.round(count_mean * probability).clamp_min(0)
+        occupied = probability >= 0.5
+        counts = torch.round(count_mean).clamp_min(1) * occupied
         if stochastic:
             occupied = torch.bernoulli(probability[..., 0], generator=generator)
             extra = torch.poisson((count_mean[..., 0] - 1).clamp_min(0), generator=generator)
@@ -74,7 +75,11 @@ class ContextPlanGraph(nn.Module):
                     excess -= removed
                     if excess == 0:
                         break
-        road_share = count_mean[..., 1] / count_mean[..., 1:3].sum(dim=-1).clamp_min(1e-6)
+        mode_total = counts[..., 1:3].sum(dim=-1)
+        fallback_share = probability[..., 1] / probability[..., 1:3].sum(dim=-1).clamp_min(1e-6)
+        road_share = torch.where(
+            mode_total > 0, counts[..., 1] / mode_total.clamp_min(1), fallback_share
+        )
         counts[..., 1] = torch.round(counts[..., 0] * road_share)
         counts[..., 2] = counts[..., 0] - counts[..., 1]
         counts[..., 7] = counts[..., 7].minimum(counts[..., 0])
