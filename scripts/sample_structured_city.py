@@ -384,6 +384,7 @@ def main():
     parser.add_argument("--samples", type=int, default=8)
     parser.add_argument("--steps", type=int, default=40)
     parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument("--split", choices=["all", "train", "validation", "test"])
     args = parser.parse_args()
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
@@ -394,10 +395,21 @@ def main():
         config=scene_config,
         cache_dir=args.cache_dir,
     )
+    split = args.split or ("all" if checkpoint.get("overfit") else "test")
+    def wanted(row):
+        if split == "all":
+            return True
+        bucket = region_bucket(str(row["parent_region_id"]))
+        if split == "train":
+            return bucket < 75
+        if split == "validation":
+            return 75 <= bucket < 88
+        return bucket >= 88
+
     candidates = [
         index
         for index, (row, _payload, _scene) in enumerate(dataset.samples)
-        if region_bucket(str(row["parent_region_id"])) >= 88
+        if wanted(row)
     ]
     candidates.sort(
         key=lambda index: hashlib.sha1(
@@ -407,7 +419,7 @@ def main():
     )
     indexes = candidates[: args.samples]
     if not indexes:
-        raise RuntimeError("No held-out test samples available")
+        raise RuntimeError(f"No {split} samples available")
 
     device = torch.device("cuda")
     model = StructuredCityDenoiser(model_config).to(device)
@@ -473,7 +485,7 @@ def main():
         sheet.paste(panel, (0, index * 800))
     sheet.save(args.output / "previews.png")
     (args.output / "summary.json").write_text(json.dumps({"samples": records}, indent=2) + "\n")
-    print(json.dumps({"samples": records}, indent=2))
+    print(json.dumps({"split": split, "samples": records}, indent=2))
 
 
 if __name__ == "__main__":
