@@ -1,149 +1,158 @@
 # Urban City Generation
 
-A research project on **context-conditioned structured urban generation** for Unreal Engine PCG.
+A research project on generating **large-scale, controllable 3D urban environments** from structured spatial data for Unreal Engine PCG.
 
-The goal is not to generate a city as an image and trace it afterwards. The model should reason over structured spatial context and produce a city state that can be consumed directly as roads, rail, buildings and urban-area geometry.
+The end goal is not a 512 m tile generator. The local 512 m target is a training and debugging unit inside a larger hierarchical system. The intended system should be able to build a city region-by-region while keeping a persistent structured city state so roads, rail, buildings, land use, green space and water remain coherent across boundaries.
 
 The current active branch is `context-plan-graph-v1`.
 
 ## Research question
 
-**Can a context-conditioned structured generative model learn to generate a coherent 512 m urban region from surrounding city context, including transport topology, building form and semantic urban spaces, while preserving cross-boundary continuity better than an equivalent model without regional context?**
+**Can a context-aware hierarchical generative model learn to generate coherent, controllable large-scale urban layouts from structured spatial data, while maintaining continuity across regions and producing a structured city state that can be realised as a 3D city in Unreal Engine PCG?**
 
-This gives the project a measurable comparison rather than only asking whether generated cities look realistic.
+The main questions underneath this are:
 
-The main questions underneath it are:
+- can the model learn urban relationships from structured city data rather than raster images;
+- can it generate roads and rail with realistic topology and continuation across local regions;
+- can it jointly or hierarchically generate buildings, green space, water and land-use structure around that transport network;
+- can regional context and persistent city state prevent independent local generations from becoming disconnected;
+- can the generated structured state be passed directly to Unreal Engine PCG to construct a complete 3D urban environment.
 
-- can the model infer road and rail structure inside a hidden region from the surrounding city;
-- can it preserve junction topology, hierarchy and boundary continuation;
-- can the same structured representation include building footprints, building heights and land-use/environment polygons;
-- does regional context improve these results compared with a no-context ablation;
-- can the generated state be exported to Unreal Engine without relying on raster tracing as the source of truth.
-
-## Intended learning outcomes
+## Learning outcomes
 
 By the end of the project, the work should demonstrate:
 
-1. **Structured geospatial representation**  
-   Converting real city data into graph, polygon and contextual features suitable for machine learning instead of treating the city only as a raster image.
+1. **Structured geospatial modelling**  
+   Representing a city using transport graphs, polygons, building geometry, land-use information and multi-scale spatial context.
 
-2. **Context-conditioned generative modelling**  
-   Designing and training models that use surrounding urban structure, boundary ports and regional descriptors to infer a hidden local city region.
+2. **Hierarchical generative modelling**  
+   Designing and training models that reason at more than one spatial scale: regional context, local urban structure and detailed geometry.
 
-3. **Urban topology and geometry evaluation**  
-   Evaluating more than visual similarity, including junction error, connectivity, component structure, boundary continuation, road/rail class, building geometry and semantic-area geometry.
+3. **Persistent large-scale generation**  
+   Extending generation beyond an isolated window by keeping previously generated city structure as context and enforcing continuity at region boundaries.
 
-4. **3D-ready procedural handoff**  
-   Exporting learned structured outputs as explicit coordinates and attributes that Unreal Engine PCG can use for splines, buildings, land-use regions and environment generation.
+4. **Urban topology and geometry evaluation**  
+   Measuring connectivity, junction structure, boundary continuation, geometry, building layout and semantic-space quality rather than judging only by appearance.
 
-## Final project deliverable
+5. **3D procedural integration**  
+   Converting the learned structured city state into roads, rail, buildings, terrain/environment regions and other 3D scene elements in Unreal Engine PCG.
 
-The target end-of-project system is:
+## Final deliverable
+
+The final deliverable is a **generated 3D city in Unreal Engine PCG**, driven by a learned structured urban generator.
+
+The intended end-to-end pipeline is:
 
 ```text
-prepared city data
+real structured city data
         |
         v
-multi-kilometre structured context
+city ingester / dataset
         |
         v
-context-conditioned neural generator
+multi-scale context representation
         |
         v
-512 m generated structured city state
-        |
-        +-- road and rail graph
-        +-- junction and spline geometry
-        +-- road/rail class and vertical mode
-        +-- building footprints
-        +-- building type and height
-        +-- green and water polygons
-        +-- residential/commercial/industrial/civic areas
+hierarchical neural city architect
         |
         v
-JSON / Unreal Engine PCG
+persistent structured city state
+        |
+        +-- roads and rail
+        +-- junctions and connectivity
+        +-- building footprints and heights
+        +-- land use
+        +-- green space
+        +-- water
+        +-- vertical relationships
+        |
+        v
+Unreal Engine PCG
+        |
+        v
+complete 3D urban environment
 ```
 
-The final research deliverables should include:
+The structured JSON/state is an intermediate representation, not the final product. Unreal Engine PCG is the final scene-realisation stage.
 
-- a reproducible dataset pipeline from real city data;
-- a trained context-conditioned model that generates structured 512 m city regions;
-- a held-out evaluation and a matched no-context ablation;
-- generated examples containing transport, buildings and semantic urban spaces;
-- structured JSON suitable for an Unreal Engine importer;
-- an Unreal or structural 3D demonstration showing that the learned city state can drive scene generation.
+The final project should therefore include:
 
-Metric transport Z is only part of the deliverable if reliable elevation supervision is available. Until then, the model should predict vertical categories such as surface, underground and elevated without inventing fake metric heights.
+- a reproducible structured-city dataset pipeline;
+- a trained generative model or hierarchy of models;
+- large-scale generation that extends beyond one local target;
+- continuity across generated regions;
+- generated transport, buildings and environmental/land-use spaces;
+- a structured handoff format for Unreal;
+- an Unreal Engine PCG scene demonstrating the generated city in 3D;
+- quantitative evaluation and relevant ablations of the learned model.
 
-## Current approach
+## Why 512 m targets are used
 
-The project has moved through several raster and graph baselines. The current work uses a continuous city context representation rather than unrelated tiles.
+The current experiments use 512 m x 512 m detailed targets because they are small enough to train and inspect while still containing meaningful road, rail and block structure.
 
-### Spatial context
+They are **not** the intended final city extent.
 
-The current Singapore experiments use:
+A typical local generation setup currently uses:
 
-- **512 m x 512 m target region**;
-- **2048 m x 2048 m regional context**;
-- **1536 m x 1536 m detailed visible transport context**;
-- explicit road and rail boundary ports;
-- structured buildings, green, water and land-use targets.
+- 512 m x 512 m detailed target;
+- about 2 km of regional context;
+- visible neighbouring transport geometry;
+- boundary ports indicating roads and rail entering the hidden target.
 
-The target interior is hidden from the input. Boundary ports describe transport entering the region but do not prescribe the route inside it.
+The longer-term system should repeatedly generate or refine neighbouring regions while carrying forward a persistent city graph/state. That is what allows the model to scale from a local training unit to a much larger city.
 
-### Context-plan transport model
+## Current model: context-plan graph
 
-The most developed current model is a context-conditioned hierarchical Transformer for transport-graph infilling.
+The strongest current learned component is a context-conditioned hierarchical Transformer for transport generation.
 
 ```text
-context cells + visible transport + boundary ports
-                    |
-                    v
-          shared context encoder
-                    |
-                    v
-             coarse 8x8 planner
-                    |
-                    v
-          graph architect Transformer
-                    |
-                    +-- junction positions
-                    +-- road / rail mode
-                    +-- vertical category
-                    +-- boundary probability
-                    +-- junction degree
-                    +-- edge existence
-                    +-- edge class
-                    +-- edge width
-                    +-- curve geometry
+regional context + visible transport + boundary ports
+                         |
+                         v
+                 context encoder
+                         |
+                         v
+                   coarse planner
+                         |
+                         v
+                 graph architect
+                         |
+             +-----------+-----------+
+             |                       |
+             v                       v
+       junction geometry       transport edges
+                               class / width
+                               road / rail
+                               vertical mode
+                               curve geometry
 ```
 
-A degree-aware discrete decoder selects a graph that is consistent with the model's learned edge and degree predictions. It does not procedurally decide where roads should go.
+The model predicts its own local plan at generation time. A degree-aware decoder then chooses an edge set from the model's learned edge and degree predictions.
 
-The current overfit experiment is an architecture-debugging run on 16 samples. Geometry fine-tuning reduced junction error substantially on that memorised set, but generated topology and boundary continuation still need improvement. These results are not evidence of held-out generalisation.
+The current best transport results are still from a small overfit/debugging run. They show that the representation and model can learn meaningful junction geometry and transport structure, but topology, boundary attachment and held-out generalisation still need work.
 
-### Full structured-city experiment
+## Full structured-city experiment
 
-The repository also contains a joint structured neural model, `StructuredCityDenoiser`, which directly predicts:
+The repository also contains a neural structured-city model that predicts more than transport.
+
+It has learned outputs for:
 
 ```text
-transport:
-  node count and position
-  edge count and connectivity
-  road / rail mode
-  class
+transport
+  nodes and positions
+  edge connectivity
+  road / rail class
   vertical mode
-  width
-  spline geometry
+  width and spline geometry
 
-buildings:
-  building count
+buildings
+  count
   footprint geometry
-  building type
+  type
   height
 
-urban areas:
-  area count
+urban areas
+  count
   polygon geometry
   green
   water
@@ -153,15 +162,15 @@ urban areas:
   civic
 ```
 
-This model is experimental. Earlier joint slot-denoising runs failed on held-out generation because of variable-cardinality and permutation problems. It is currently useful as a small overfit test for whether all scene layers can be learned jointly, not as a validated final architecture.
+This joint model is currently experimental. Earlier direct slot-denoising runs exposed problems with variable-cardinality sets and polygon generation. It is useful for testing full-scene learning, but it is not yet the final architecture.
 
-The longer-term direction is to keep the stronger context and transport reasoning from the context-plan model while using suitable learned representations for buildings and semantic ground areas.
+The likely final system will remain hierarchical: strong transport/context reasoning first, followed by learned generation of blocks, buildings and environmental/land-use spaces conditioned on the generated city structure.
 
 ## Data representation
 
-The city is represented as structured geometry rather than one mutually exclusive image.
+The project uses structured geometry rather than one mutually exclusive city image.
 
-### Transport graph
+### Transport
 
 Nodes contain position, transport mode, vertical category and boundary information.
 
@@ -180,152 +189,105 @@ Building targets contain:
 
 - footprint polygon;
 - building type;
-- height where supported by source evidence;
+- height where supported by source data;
 - height confidence/source metadata.
 
-### Urban areas
+### Urban spaces
 
-Area targets include:
+The dataset includes:
 
 - green;
 - water;
-- residential;
-- commercial/mixed;
-- industrial;
-- civic.
+- residential land use;
+- commercial/mixed land use;
+- industrial land use;
+- civic land use.
 
-These layers may overlap where the source semantics permit it. They are not reduced to a single colour per pixel.
+The goal is for these spaces to be generated as part of the city, not treated as empty background around roads and buildings.
 
-## Setup
+## 3D and vertical structure
 
-```bash
-git clone https://github.com/hahanoitsu/urban-city-generation.git
-cd urban-city-generation
-git switch context-plan-graph-v1
+The final Unreal city is 3D.
 
-conda env create -f environment.yml
-conda activate urban-city
-python -m pip install -e '.[ml]'
+The current dataset reliably supervises categorical vertical relationships such as:
+
+```text
+surface
+underground
+elevated
+unknown
 ```
 
-## Current transport experiment
+Exact metric road/rail Z is not yet treated as ground truth where the source data does not support it. The project should add metric terrain/elevation supervision when reliable data is available rather than inventing bridge or tunnel heights.
 
-For the existing context-plan repair/fine-tuning workflow and interpretation of the comparison panels, see `docs/transport_repair.md`.
-
-A checkpoint can be sampled with:
-
-```bash
-python scripts/sample_context_plan_graph.py \
-  --data /path/to/spatial-world-data \
-  --checkpoint /path/to/best.pt \
-  --output /path/to/previews \
-  --samples 6 \
-  --compare-decoders \
-  --save-predictions
-```
-
-## Full structured-city overfit experiment
-
-A small full-scene run can test whether transport, buildings and semantic urban areas can all be memorised by the neural model:
-
-```bash
-python scripts/train_structured_city.py \
-  --data /path/to/context-graph-v1/singapore \
-  --output /path/to/run \
-  --cache-dir /path/to/cache \
-  --maximum-samples 16 \
-  --overfit \
-  --nodes 448 \
-  --edges 512 \
-  --buildings 512 \
-  --areas 256 \
-  --batch-size 1 \
-  --epochs 40 \
-  --save-every 5
-```
-
-Generate directly from the trained network:
-
-```bash
-python scripts/sample_structured_city.py \
-  --data /path/to/context-graph-v1/singapore \
-  --checkpoint /path/to/run/best.pt \
-  --output /path/to/run/generations \
-  --cache-dir /path/to/cache \
-  --samples 6 \
-  --steps 40 \
-  --split all
-```
-
-The generated JSON contains neural predictions for transport, buildings and semantic areas. Rendering that JSON is a visualisation step, not the source of the generated geometry.
+Buildings can use learned height where source supervision is available. Unreal PCG can then realise the generated structured state as actual 3D geometry.
 
 ## Evaluation
 
-The final research test should use geographic train/validation/test separation rather than the current memorisation runs.
-
-The main comparison is:
-
-```text
-same architecture + regional context
-vs
-same architecture without regional context
-```
-
-Useful evaluation measures include:
+The final model should be evaluated on more than visual quality.
 
 ### Transport
 
 - junction position error;
-- edge precision/recall where correspondence is available;
-- junction degree distribution;
+- edge/connectivity accuracy;
 - connected components;
-- largest connected component fraction;
-- boundary-port alignment;
-- road/rail class and vertical-mode accuracy;
+- largest connected component;
+- junction degree;
+- boundary continuation;
+- road/rail class;
+- vertical-mode accuracy;
 - spline geometry error.
 
 ### Buildings
 
-- footprint geometry error / overlap;
 - building count;
-- building type accuracy;
-- height error where height supervision is valid.
+- footprint geometry;
+- building type;
+- height error where height labels are valid;
+- spatial relationship to transport and neighbouring buildings.
 
-### Urban areas
+### Urban spaces
 
-- area count;
-- class accuracy;
-- polygon overlap or boundary distance;
-- green/water/land-use coverage.
+- green/water/land-use class;
+- polygon geometry and overlap;
+- coverage;
+- spatial relationship with transport and buildings.
 
-Visual inspection remains important, but it should support rather than replace quantitative evaluation.
+### Large-scale generation
 
-## Unreal Engine path
+- cross-region road and rail continuity;
+- persistence of previously generated geometry;
+- morphology drift across repeated expansion;
+- consistency of district-scale structure.
 
-The intended handoff is structured JSON, not a preview image.
+## Unreal Engine PCG
 
-Unreal Engine PCG should receive attributes such as:
+Unreal Engine is not just a preview renderer for this project. It is the final scene-generation environment.
+
+The learned model should provide structured data such as:
 
 ```text
-transport spline points
+road and rail splines
+junctions
 width and hierarchy
-vertical mode
+vertical mode / height information
 building footprints
 building heights and types
 green and water polygons
 land-use regions
+persistent IDs and region relationships
 ```
 
-Unreal is responsible for scene assets and detailed rendering. It should not be responsible for repairing a disconnected learned city topology.
+Unreal PCG then turns this city state into the final 3D roads, buildings, terrain, vegetation and scene assets.
 
 ## Current limitations
 
-- the strongest transport results are still from a 16-sample overfit/debugging experiment;
-- the graph stage is trained with target plans, while generation uses predicted plans;
-- boundary ports are conditioning signals rather than guaranteed attachments;
-- the current transport model does not generate buildings or semantic areas;
-- the joint structured-city model has not yet demonstrated good held-out generation;
-- exact metric transport Z is not supervised;
-- multi-city generalisation has not yet been established.
+- the current transport model operates on 512 m local targets rather than generating an entire city in one pass;
+- persistent multi-region rollout is not complete yet;
+- boundary ports condition generation but are not yet guaranteed attachments;
+- the strongest transport checkpoint is still an overfit architecture test;
+- the full structured-city model has not yet reached reliable held-out generation;
+- metric transport Z still needs reliable elevation supervision;
+- multi-city generalisation remains to be demonstrated.
 
-These are active research problems, not hidden post-processing assumptions.
+These are the current research gaps between the working local model and the final whole-city Unreal deliverable.
