@@ -1,4 +1,4 @@
-from urban_analysis.structured_generation_audit import audit_scene, summarise
+from urban_analysis.structured_generation_audit import audit_scene, match_buildings, match_summary, summarise
 
 
 def square(x, y, size):
@@ -46,6 +46,14 @@ def test_transport():
     assert transport["components"] == 2
     assert transport["largest_component_nodes"] == 2
     assert abs(transport["tortuosity"][0] - 1.0) < 1e-9
+
+
+def test_matching_perfect_copy():
+    pairs = match_buildings(scene(), scene())
+    summary = match_summary(pairs)
+    assert summary["matched"] == 3
+    assert summary["median_centroid_error_m"] < 1e-9
+    assert summary["median_iou"] > 0.99
 
 
 def test_summary():

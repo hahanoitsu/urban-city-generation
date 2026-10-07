@@ -120,6 +120,52 @@ def summarise(rows):
     return result
 
 
+def match_buildings(scene, target):
+    generated = [np.asarray(item["footprint_xy_m"], dtype=float) for item in scene.get("buildings", [])]
+    real = [np.asarray(item["footprint_xy_m"], dtype=float) for item in target.get("buildings", [])]
+    if not generated or not real:
+        return []
+    from scipy.optimize import linear_sum_assignment
+
+    left = np.asarray([points.mean(axis=0) for points in generated])
+    right = np.asarray([points.mean(axis=0) for points in real])
+    cost = np.linalg.norm(left[:, None] - right[None], axis=2)
+    rows, columns = linear_sum_assignment(cost)
+    result = []
+    for row, column in zip(rows, columns):
+        guess = generated[row]
+        truth = real[column]
+        radius = float(np.sqrt(((truth - truth.mean(axis=0)) ** 2).sum(axis=1).mean()))
+        overlap = 0.0
+        shape = Polygon(truth)
+        if len(guess) >= 3 and shape.is_valid and shape.area > 0:
+            other = Polygon(guess).buffer(0)
+            overlap = float(shape.intersection(other).area / max(shape.union(other).area, 1e-9))
+        result.append(
+            {
+                "centroid_error_m": float(cost[row, column]),
+                "radius_m": radius,
+                "iou": overlap,
+            }
+        )
+    return result
+
+
+def match_summary(pairs):
+    if not pairs:
+        return {}
+    centroid = [item["centroid_error_m"] for item in pairs]
+    radius = [item["radius_m"] for item in pairs]
+    overlap = [item["iou"] for item in pairs]
+    return {
+        "matched": len(pairs),
+        "median_centroid_error_m": float(np.median(centroid)),
+        "median_radius_m": float(np.median(radius)),
+        "median_iou": float(np.median(overlap)),
+        "iou_over_half_fraction": float(np.mean([value > 0.5 for value in overlap])),
+    }
+
+
 def load_scenes(folder):
     paths = sorted(path for path in Path(folder).glob("*.json") if path.name != "summary.json")
     return [(path.name, json.loads(path.read_text(encoding="utf-8"))) for path in paths]
@@ -130,6 +176,7 @@ def main():
     parser.add_argument("--generations", type=Path, required=True)
     parser.add_argument("--size", type=float, default=512.0)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--targets", type=Path)
     args = parser.parse_args()
 
     scenes = load_scenes(args.generations)
@@ -137,6 +184,13 @@ def main():
         raise SystemExit("no json files found")
     rows = [audit_scene(scene, args.size) for _name, scene in scenes]
     summary = summarise(rows)
+    if args.targets:
+        pairs = []
+        for name, scene in scenes:
+            path = args.targets / name
+            if path.exists():
+                pairs.extend(match_buildings(scene, json.loads(path.read_text(encoding="utf-8"))))
+        summary["matched_buildings"] = match_summary(pairs)
     print(json.dumps(summary, indent=2))
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
