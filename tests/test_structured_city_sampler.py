@@ -14,8 +14,9 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
 
 
-def small_configs():
+def small_configs(local_frames=False):
     scene = SceneTensorConfig(
+        local_frames=local_frames,
         node_slots=16,
         edge_slots=24,
         building_slots=20,
@@ -42,6 +43,7 @@ def small_configs():
         building_layers=1,
         area_layers=1,
         feedforward_dimensions=64,
+        local_frames=local_frames,
     )
     return scene, model
 
@@ -63,14 +65,14 @@ def test_hold_absent_matches_training_zeros():
 
 def test_generate_runs_with_and_without_hold():
     torch.manual_seed(0)
-    scene_config, model_config = small_configs()
-    model = StructuredCityDenoiser(model_config).eval()
     context = torch.randn(1, 12, 18)
     relations = torch.rand(1, 4, 12, 12)
     context_padding = torch.zeros(1, 12, dtype=torch.bool)
     ports = torch.randn(1, 10, 21)
     port_padding = torch.zeros(1, 10, dtype=torch.bool)
-    for hold in (False, True):
+    for hold, local in ((False, False), (True, False), (True, True)):
+        scene_config, model_config = small_configs(local)
+        model = StructuredCityDenoiser(model_config).eval()
         result = MODULE.generate(
             model,
             context,
@@ -85,3 +87,8 @@ def test_generate_runs_with_and_without_hold():
         assert result["building_shape"].shape == (20, 6, 2)
         nodes = int(result["node_presence"].sum())
         assert int(result["edge_from"].max()) < max(nodes, 1)
+        if local:
+            assert result["building_frame"].shape == (20, 3)
+            back = MODULE.from_local_frames(result, scene_config)
+            payload = MODULE.export_scene(back, scene_config)
+            assert len(payload["buildings"]) == int(result["building_presence"].sum())

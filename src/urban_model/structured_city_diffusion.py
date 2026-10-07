@@ -14,6 +14,8 @@ CONTINUOUS_FIELDS = (
     "building_height",
     "building_base_z",
     "area_shape",
+    "building_frame",
+    "area_frame",
 )
 
 CATEGORY_MASKS = {
@@ -37,6 +39,8 @@ def corrupt_scene(
     result = {}
     alpha, sigma = noise_coefficients(time)
     for name in CONTINUOUS_FIELDS:
+        if name not in scene:
+            continue
         value = scene[name]
         shape = [value.shape[0]] + [1] * (value.ndim - 1)
         a = alpha.reshape(shape)
@@ -211,6 +215,9 @@ def structured_city_loss(
         ),
         "area_shape": _mse(output["area_shape"], target["area_shape"], area),
     }
+    if "building_frame" in output:
+        losses["building_frame"] = _mse(output["building_frame"], target["building_frame"], building)
+        losses["area_frame"] = _mse(output["area_frame"], target["area_frame"], area)
     active = [
         value
         for name, value in losses.items()

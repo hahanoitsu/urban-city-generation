@@ -30,6 +30,7 @@ class StructuredCityConfig:
     area_layers: int = 4
     feedforward_dimensions: int = 1024
     dropout: float = 0.1
+    local_frames: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -198,9 +199,10 @@ class StructuredCityDenoiser(nn.Module):
         self.edge_to = nn.Linear(d, d)
         self.node_key = nn.Linear(d, d)
 
+        frame = 3 if config.local_frames else 0
         self.buildings = SlotDecoder(
             slots=config.building_slots,
-            continuous_dimensions=config.building_points * 2 + 2,
+            continuous_dimensions=config.building_points * 2 + 2 + frame,
             category_sizes=(config.building_classes,),
             config=config,
             layers=config.building_layers,
@@ -211,9 +213,13 @@ class StructuredCityDenoiser(nn.Module):
         self.building_base_z = nn.Linear(d, 1)
         self.building_base_z.requires_grad_(False)
 
+        if config.local_frames:
+            self.building_frame = nn.Linear(d, 3)
+            self.area_frame = nn.Linear(d, 3)
+
         self.areas = SlotDecoder(
             slots=config.area_slots,
-            continuous_dimensions=config.area_points * 2,
+            continuous_dimensions=config.area_points * 2 + frame,
             category_sizes=(config.area_classes,),
             config=config,
             layers=config.area_layers,
@@ -295,14 +301,16 @@ class StructuredCityDenoiser(nn.Module):
             node_keys,
         ) / math.sqrt(node_keys.shape[-1])
 
-        building_continuous = torch.cat(
-            [
-                scene["building_shape"].flatten(2),
-                scene["building_height"],
-                scene["building_base_z"],
-            ],
-            dim=-1,
-        )
+        building_parts = [
+            scene["building_shape"].flatten(2),
+            scene["building_height"],
+            scene["building_base_z"],
+        ]
+        area_parts = [scene["area_shape"].flatten(2)]
+        if self.config.local_frames:
+            building_parts.append(scene["building_frame"])
+            area_parts.append(scene["area_frame"])
+        building_continuous = torch.cat(building_parts, dim=-1)
         building_memory = torch.cat([context_memory, node_hidden, edge_hidden], dim=1)
         object_padding = torch.cat(
             [
@@ -325,14 +333,14 @@ class StructuredCityDenoiser(nn.Module):
 
         area_memory = torch.cat([context_memory, node_hidden, edge_hidden], dim=1)
         area_hidden = self.areas(
-            scene["area_shape"].flatten(2),
+            torch.cat(area_parts, dim=-1),
             (scene["area_kind"],),
             area_memory,
             object_padding,
             time,
         )
 
-        return {
+        result = {
             "node_count": self.node_count(count_hidden),
             "edge_count": self.edge_count(count_hidden),
             "building_count": self.building_count(count_hidden),
@@ -367,3 +375,7 @@ class StructuredCityDenoiser(nn.Module):
                 2,
             ),
         }
+        if self.config.local_frames:
+            result["building_frame"] = self.building_frame(building_hidden)
+            result["area_frame"] = self.area_frame(area_hidden)
+        return result

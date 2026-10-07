@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 
 from urban_model.structured_city import StructuredCityConfig, StructuredCityDenoiser
-from urban_model.structured_city_data import RELATIONS, SceneTensorConfig, StructuredCityDataset
+from urban_model.structured_city_data import FRAME_FIELDS, RELATIONS, SceneTensorConfig, StructuredCityDataset
 from urban_model.structured_city_diffusion import corrupt_scene, structured_city_loss
 
 
@@ -130,7 +130,7 @@ def run_epoch(
     with context:
         for batch in loader:
             batch = move_batch(batch, device)
-            target = {name: batch[name] for name in SCENE_FIELDS}
+            target = {name: batch[name] for name in SCENE_FIELDS + FRAME_FIELDS if name in batch}
             if fixed_time is not None:
                 time_values = torch.full(
                     (batch["context"].shape[0],),
@@ -207,6 +207,7 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--time-power", type=float, default=0.5)
     parser.add_argument("--overfit", action="store_true")
+    parser.add_argument("--local-frames", action="store_true")
     args = parser.parse_args()
 
     rank, local_rank, world_size = distributed_state()
@@ -221,6 +222,7 @@ def main():
         building_slots=args.buildings,
         area_slots=args.areas,
         maximum_ports=args.ports,
+        local_frames=args.local_frames,
     )
     dataset = StructuredCityDataset(
         args.data,
@@ -267,6 +269,7 @@ def main():
         building_points=scene_config.building_points,
         area_points=scene_config.area_points,
         dropout=0.0 if args.overfit else 0.1,
+        local_frames=args.local_frames,
     )
     model = StructuredCityDenoiser(model_config).to(device)
     trainable_parameters = [
