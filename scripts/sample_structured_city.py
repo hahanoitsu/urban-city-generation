@@ -14,9 +14,11 @@ from urban_model.structured_city_data import (
     AREA_KINDS,
     BUILDING_KINDS,
     CLASSES,
+    FRAME_FIELDS,
     SceneTensorConfig,
     StructuredCityDataset,
     VERTICAL,
+    from_local_frames,
 )
 from urban_model.structured_city_diffusion import CATEGORY_MASKS, CONTINUOUS_FIELDS, noise_coefficients
 
@@ -27,7 +29,7 @@ def region_bucket(value: str) -> int:
 
 
 def initial_scene(config: SceneTensorConfig, device: torch.device):
-    return {
+    scene = {
         "node_position": torch.randn(1, config.node_slots, 3, device=device),
         "node_presence": torch.full((1, config.node_slots), 2, dtype=torch.long, device=device),
         "edge_width": torch.randn(1, config.edge_slots, 1, device=device),
@@ -78,6 +80,10 @@ def initial_scene(config: SceneTensorConfig, device: torch.device):
             device=device,
         ),
     }
+    if config.local_frames:
+        scene["building_frame"] = torch.randn(1, config.building_slots, 3, device=device)
+        scene["area_frame"] = torch.randn(1, config.area_slots, 3, device=device)
+    return scene
 
 
 def update_categories(scene, output, next_fraction):
@@ -120,6 +126,8 @@ GROUPS = {
     "building_kind": "building",
     "area_shape": "area",
     "area_kind": "area",
+    "building_frame": "building",
+    "area_frame": "area",
 }
 
 
@@ -139,6 +147,8 @@ def hold_absent(scene, counts, next_time):
     # empty slots are all zeros in training, so keep them at noisy zeros here too
     _alpha, sigma = noise_coefficients(next_time)
     for name, group in GROUPS.items():
+        if name not in scene:
+            continue
         value = scene[name]
         absent = torch.arange(value.shape[1], device=value.device)[None] >= counts[group]
         while absent.ndim < value.ndim:
@@ -189,7 +199,8 @@ def generate(model, context, relations, context_padding, ports, padding, scene_c
         if counts is None:
             counts = decode_counts(output, scene_config)
         for name in CONTINUOUS_FIELDS:
-            scene[name] = update_continuous(scene[name], output[name], time, next_time)
+            if name in scene:
+                scene[name] = update_continuous(scene[name], output[name], time, next_time)
         update_categories(scene, output, next_value)
         if hold:
             hold_absent(scene, counts, next_time)
@@ -203,7 +214,8 @@ def generate(model, context, relations, context_padding, ports, padding, scene_c
         torch.zeros(1, device=device),
     )
     for name in CONTINUOUS_FIELDS:
-        scene[name] = output[name]
+        if name in scene:
+            scene[name] = output[name]
     for name in CATEGORY_MASKS:
         scene[name] = output[name].argmax(dim=-1)
 
@@ -267,7 +279,7 @@ def target_scene(sample):
         "area_presence",
         "area_kind",
     )
-    return {name: sample[name] for name in names}
+    return {name: sample[name] for name in names + FRAME_FIELDS if name in sample}
 
 
 def denormalise(points, size):
@@ -505,6 +517,9 @@ def main():
             hold=args.hold_absent,
         )
         target = target_scene(sample)
+        if scene_config.local_frames:
+            generated = from_local_frames(generated, scene_config)
+            target = from_local_frames(target, scene_config)
         target_image = render(target, scene_config)
         generated_image = render(generated, scene_config)
         panel = Image.new("RGB", (1536, 800), "white")

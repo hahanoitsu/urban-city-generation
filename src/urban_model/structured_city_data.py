@@ -74,6 +74,68 @@ class SceneTensorConfig:
     width_scale_m: float = 32.0
     height_scale_m: float = 100.0
     context_radius_regions: int = 1
+    local_frames: bool = False
+
+
+FRAME_FIELDS = ("building_frame", "area_frame")
+
+
+def _chord(start, end, minimum):
+    delta = end - start
+    length = delta.norm(dim=-1, keepdim=True)
+    flat = torch.zeros_like(delta)
+    flat[..., 0] = 1.0
+    along = torch.where(length > minimum, delta / length.clamp_min(1e-9), flat)
+    across = torch.stack([-along[..., 1], along[..., 0]], dim=-1)
+    return length.clamp_min(minimum), along, across
+
+
+def to_local_frames(scene, config):
+    # shapes go into their own unit frame so small errors stay small in metres
+    result = dict(scene)
+    half = config.target_size_m / 2.0
+    for name, frame_name, presence_name in (
+        ("building_shape", "building_frame", "building_presence"),
+        ("area_shape", "area_frame", "area_presence"),
+    ):
+        points = scene[name].float()
+        present = scene[presence_name].eq(1)
+        centre = points.mean(dim=-2)
+        offset = points - centre.unsqueeze(-2)
+        radius = offset.square().sum(-1).mean(-1).sqrt().clamp_min(0.5 / half)
+        local = offset / radius[..., None, None]
+        frame = torch.stack([centre[..., 0], centre[..., 1], torch.log(radius * half / 10.0)], dim=-1)
+        result[frame_name] = torch.where(present[..., None], frame, torch.zeros_like(frame))
+        result[name] = torch.where(present[..., None, None], local, torch.zeros_like(local))
+
+    start = scene["node_position"][scene["edge_from"], :2]
+    end = scene["node_position"][scene["edge_to"], :2]
+    length, along, across = _chord(start, end, 10.0 / half)
+    shape = scene["edge_shape"].clone()
+    offset = shape[..., :2].clone()
+    shape[..., 0] = (offset * along.unsqueeze(-2)).sum(-1) / length
+    shape[..., 1] = (offset * across.unsqueeze(-2)).sum(-1) / length
+    present = scene["edge_presence"].eq(1)
+    result["edge_shape"] = torch.where(present[..., None, None], shape, torch.zeros_like(shape))
+    return result
+
+
+def from_local_frames(scene, config):
+    result = dict(scene)
+    half = config.target_size_m / 2.0
+    for name, frame_name in (("building_shape", "building_frame"), ("area_shape", "area_frame")):
+        frame = scene[frame_name].float()
+        radius = torch.exp(frame[..., 2]) * 10.0 / half
+        result[name] = frame[..., None, :2] + scene[name] * radius[..., None, None]
+
+    start = scene["node_position"][scene["edge_from"], :2]
+    end = scene["node_position"][scene["edge_to"], :2]
+    length, along, across = _chord(start, end, 10.0 / half)
+    shape = scene["edge_shape"].clone()
+    local = scene["edge_shape"][..., :2] * length.unsqueeze(-1)
+    shape[..., :2] = local[..., :1] * along.unsqueeze(-2) + local[..., 1:2] * across.unsqueeze(-2)
+    result["edge_shape"] = shape
+    return result
 
 
 def _one_hot(value: str, values: tuple[str, ...]) -> list[float]:
@@ -795,6 +857,8 @@ class StructuredCityDataset(torch.utils.data.Dataset):
             ports[: len(vectors)] = np.asarray(vectors, dtype=np.float32)
             port_padding[: len(vectors)] = False
 
+        if self.config.local_frames:
+            scene = to_local_frames(scene, self.config)
         return {
             **scene,
             "context": torch.from_numpy(context),
