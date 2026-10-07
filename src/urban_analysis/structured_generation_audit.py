@@ -9,7 +9,7 @@ import numpy as np
 from shapely.geometry import Polygon
 
 
-def polygon_stats(points, size):
+def polygon_stats(points, size, tolerance=0.5):
     points = np.asarray(points, dtype=float).reshape(-1, 2)
     valid = False
     if len(points) >= 3:
@@ -17,7 +17,7 @@ def polygon_stats(points, size):
         valid = bool(shape.is_valid and shape.area > 1e-3)
     if len(points) == 0:
         return valid, False, 0.0
-    outside = ((points < 0) | (points > size)).any(axis=1)
+    outside = ((points < -tolerance) | (points > size + tolerance)).any(axis=1)
     return valid, bool(outside.any()), float(outside.mean())
 
 
