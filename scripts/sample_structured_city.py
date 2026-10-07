@@ -107,6 +107,54 @@ def prefix_presence(count, slots, device):
     return values
 
 
+GROUPS = {
+    "node_position": "node",
+    "edge_width": "edge",
+    "edge_shape": "edge",
+    "edge_mode": "edge",
+    "edge_class": "edge",
+    "edge_vertical": "edge",
+    "building_shape": "building",
+    "building_height": "building",
+    "building_base_z": "building",
+    "building_kind": "building",
+    "area_shape": "area",
+    "area_kind": "area",
+}
+
+
+def decode_counts(output, scene_config):
+    counts = {
+        "node": decode_count(output["node_count"], scene_config.node_slots),
+        "edge": decode_count(output["edge_count"], scene_config.edge_slots),
+        "building": decode_count(output["building_count"], scene_config.building_slots),
+        "area": decode_count(output["area_count"], scene_config.area_slots),
+    }
+    if counts["edge"] > 0:
+        counts["node"] = max(counts["node"], 2)
+    return counts
+
+
+def hold_absent(scene, counts, next_time):
+    # empty slots are all zeros in training, so keep them at noisy zeros here too
+    _alpha, sigma = noise_coefficients(next_time)
+    for name, group in GROUPS.items():
+        value = scene[name]
+        absent = torch.arange(value.shape[1], device=value.device)[None] >= counts[group]
+        while absent.ndim < value.ndim:
+            absent = absent.unsqueeze(-1)
+        if name in CATEGORY_MASKS:
+            masked = torch.rand(value.shape, device=value.device) < float(next_time)
+            fill = torch.where(
+                masked,
+                torch.full_like(value, CATEGORY_MASKS[name]),
+                torch.zeros_like(value),
+            )
+        else:
+            fill = float(sigma) * torch.randn_like(value)
+        scene[name] = torch.where(absent.expand_as(value), fill, value)
+
+
 def update_continuous(current, prediction, time, next_time):
     alpha, sigma = noise_coefficients(time)
     next_alpha, next_sigma = noise_coefficients(next_time)
@@ -120,9 +168,10 @@ def update_continuous(current, prediction, time, next_time):
 
 
 @torch.inference_mode()
-def generate(model, context, relations, context_padding, ports, padding, scene_config, steps):
+def generate(model, context, relations, context_padding, ports, padding, scene_config, steps, hold=False):
     device = context.device
     scene = initial_scene(scene_config, device)
+    counts = None
     for index in range(steps, 0, -1):
         value = index / steps
         next_value = (index - 1) / steps
@@ -137,9 +186,13 @@ def generate(model, context, relations, context_padding, ports, padding, scene_c
             padding,
             time,
         )
+        if counts is None:
+            counts = decode_counts(output, scene_config)
         for name in CONTINUOUS_FIELDS:
             scene[name] = update_continuous(scene[name], output[name], time, next_time)
         update_categories(scene, output, next_value)
+        if hold:
+            hold_absent(scene, counts, next_time)
     output = model(
         scene,
         context,
@@ -385,7 +438,12 @@ def main():
     parser.add_argument("--steps", type=int, default=40)
     parser.add_argument("--cache-dir", type=Path)
     parser.add_argument("--split", choices=["all", "train", "validation", "test"])
+    parser.add_argument("--hold-absent", action="store_true")
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     model_config = StructuredCityConfig.from_dict(checkpoint["model_config"])
@@ -421,7 +479,7 @@ def main():
     if not indexes:
         raise RuntimeError(f"No {split} samples available")
 
-    device = torch.device("cuda")
+    device = torch.device(args.device)
     model = StructuredCityDenoiser(model_config).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
@@ -444,6 +502,7 @@ def main():
             padding,
             scene_config,
             args.steps,
+            hold=args.hold_absent,
         )
         target = target_scene(sample)
         target_image = render(target, scene_config)
@@ -462,6 +521,8 @@ def main():
         target_payload = export_scene(target, scene_config)
         json_path = args.output / f"{output_index:02d}-{sample['sample_id']}.json"
         json_path.write_text(json.dumps(payload, indent=2) + "\n")
+        (args.output / "targets").mkdir(exist_ok=True)
+        (args.output / "targets" / json_path.name).write_text(json.dumps(target_payload, indent=2) + "\n")
         records.append(
             {
                 "sample_id": sample["sample_id"],
