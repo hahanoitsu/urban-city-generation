@@ -104,6 +104,7 @@ def main():
     parser.add_argument("--layers", type=int, default=8)
     parser.add_argument("--model-dimensions", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument("--position-bands", type=int, default=6)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -136,6 +137,7 @@ def main():
         model_dimensions=args.model_dimensions,
         layers=args.layers,
         dropout=args.dropout,
+        position_bands=args.position_bands,
     )
     grid = model_config.grid()
     train_set = GridCityDataset(base, splits["train"], grid, augment=not args.overfit and not args.no_augment)

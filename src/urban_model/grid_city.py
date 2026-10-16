@@ -36,6 +36,7 @@ class GridCityConfig:
     feedforward_dimensions: int = 1024
     key_dimensions: int = 64
     dropout: float = 0.0
+    position_bands: int = 0
 
     @property
     def candidates(self) -> int:
@@ -61,6 +62,19 @@ class GridCityConfig:
     @classmethod
     def from_dict(cls, value):
         return cls(**value)
+
+
+def fourier(xy, bands):
+    scales = math.pi * 2.0 ** torch.arange(bands, device=xy.device, dtype=xy.dtype)
+    angles = xy[..., None] * scales
+    return torch.cat([angles.sin(), angles.cos()], dim=-1).flatten(-2)
+
+
+def cell_centres(grid, slots):
+    cells = torch.arange(grid * grid).repeat_interleave(slots)
+    row = torch.div(cells, grid, rounding_mode="floor")
+    column = cells % grid
+    return torch.stack([(column + 0.5) / grid * 2.0 - 1.0, (row + 0.5) / grid * 2.0 - 1.0], dim=-1)
 
 
 def category_sizes(config: GridCityConfig):
@@ -155,6 +169,14 @@ class GridCityDenoiser(nn.Module):
         self.register_buffer("area_cells", torch.arange(config.area_grid**2).repeat_interleave(config.area_slots), persistent=False)
         self.register_buffer("area_slots", torch.arange(config.area_slots).repeat(config.area_grid**2), persistent=False)
 
+        # same sin cos position code for ports and every cell so they line up in space
+        if config.position_bands:
+            self.place = nn.Linear(4 * config.position_bands, d)
+            self.edge_geometry = nn.Sequential(nn.Linear(4, 32), nn.GELU(), nn.Linear(32, edges))
+            self.register_buffer("node_xy", cell_centres(config.node_grid, config.node_slots), persistent=False)
+            self.register_buffer("building_xy", cell_centres(config.building_grid, config.building_slots), persistent=False)
+            self.register_buffer("area_xy", cell_centres(config.area_grid, config.area_slots), persistent=False)
+
     def _offset(self, values, size):
         edges = values.shape[-1]
         return values + torch.arange(edges, device=values.device) * size
@@ -164,7 +186,11 @@ class GridCityDenoiser(nn.Module):
         batch = context_values.shape[0]
         time_hidden = self.time(time)
         context = self.context(context_values, relations, context_padding)
-        port_memory = self.port(ports).masked_fill(port_padding[:, :, None], 0.0)
+        bands = config.position_bands
+        port_memory = self.port(ports)
+        if bands:
+            port_memory = port_memory + self.place(fourier(ports[..., :2], bands))
+        port_memory = port_memory.masked_fill(port_padding[:, :, None], 0.0)
         memory = torch.cat([context, port_memory], dim=1)
         memory_padding = torch.cat([context_padding, port_padding], dim=1)
 
@@ -205,6 +231,10 @@ class GridCityDenoiser(nn.Module):
             + self.area_slot(self.area_slots)
             + self.kind.weight[2]
         )
+        if bands:
+            node_hidden = node_hidden + self.place(fourier(self.node_xy, bands))
+            building_hidden = building_hidden + self.place(fourier(self.building_xy, bands))
+            area_hidden = area_hidden + self.place(fourier(self.area_xy, bands))
         tokens = torch.cat([node_hidden, building_hidden, area_hidden], dim=1) + time_hidden[:, None]
         hidden = self.norm(self.backbone(tokens, memory, memory_key_padding_mask=memory_padding))
         node_count = node_hidden.shape[1]
@@ -219,6 +249,13 @@ class GridCityDenoiser(nn.Module):
         query = self.edge_query(node_hidden).reshape(batch, node_count, edges, keys)
         key = self.edge_key(node_hidden)[:, self.candidates]
         logits = torch.einsum("bnek,bnck->bnec", query, key) / math.sqrt(keys)
+        if bands:
+            # where each candidate is from this node right now, in cell widths
+            here = self.node_xy + scene["node_pos"].float() / config.node_grid
+            delta = (here[:, self.candidates] - here[:, :, None]) * (config.node_grid / 2.0)
+            when = time[:, None, None, None].float().expand(-1, delta.shape[1], delta.shape[2], 1)
+            geometry = self.edge_geometry(torch.cat([delta, delta.norm(dim=-1, keepdim=True), when], dim=-1))
+            logits = logits + geometry.permute(0, 1, 3, 2)
         logits = logits.masked_fill(~self.candidate_valid[None, :, None, :], -1e4)
         target = torch.cat([self.edge_none(node_hidden)[..., None], logits], dim=-1)
 

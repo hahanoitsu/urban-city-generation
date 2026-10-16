@@ -112,8 +112,9 @@ def test_all_rotations_encode():
         encode_grid(transform_plain(plain(), matrix, 512.0), config)
 
 
-def small():
+def small(position_bands=0):
     return GridCityConfig(
+        position_bands=position_bands,
         context_dimensions=18,
         relation_count=4,
         port_dimensions=23,
@@ -146,12 +147,8 @@ def inputs(batch):
     }
 
 
-def test_model_loss_and_generate():
-    torch.manual_seed(0)
-    config = small()
-    model = GridCityDenoiser(config)
-    grid = config.grid()
-    scene = {
+def empty_scene():
+    return {
         "node_pos": torch.zeros(2, 48, 2),
         "node_presence": torch.zeros(2, 48, dtype=torch.long),
         "edge_target": torch.zeros(2, 48, 2, dtype=torch.long),
@@ -174,18 +171,34 @@ def test_model_loss_and_generate():
         "area_presence": torch.zeros(2, 8, dtype=torch.long),
         "area_kind": torch.zeros(2, 8, dtype=torch.long),
     }
+
+
+def test_model_loss_and_generate():
+    for bands in (0, 3):
+        check_model(small(bands))
+
+
+def check_model(config):
+    torch.manual_seed(0)
+    model = GridCityDenoiser(config)
+    grid = config.grid()
+    scene = empty_scene()
     scene["node_presence"][:, [0, 1]] = 1
-    scene["edge_target"][:, 0, 0] = 2
+    # node 0 points at node 1, slot 1 of the same cell
+    scene["edge_target"][:, 0, 0] = 4 * 3 + 1 + 1
     scene["building_presence"][:, 3] = 1
     scene["area_presence"][:, 1] = 1
-    noisy = corrupt(scene, torch.rand(2), config)
+    time = torch.rand(2)
+    noisy = corrupt(scene, time, config)
     batch = inputs(2)
-    output = model(noisy, batch["context"], batch["relations"], batch["context_padding"], batch["ports"], batch["port_padding"], torch.rand(2))
+    output = model(noisy, batch["context"], batch["relations"], batch["context_padding"], batch["ports"], batch["port_padding"], time)
     assert output["edge_target"].shape == (2, 48, 2, config.candidates + 1)
     loss, parts = grid_city_loss(output, scene)
     loss.backward()
     assert torch.isfinite(loss)
     assert "edge_target" in parts
+    unused = [name for name, parameter in model.named_parameters() if parameter.grad is None]
+    assert not unused
 
     model.eval()
     generated = generate(model, inputs(1), steps=3, generator=torch.Generator().manual_seed(0))
