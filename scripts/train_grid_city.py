@@ -68,7 +68,7 @@ def run_epoch(model, loader, device, optimizer=None, fixed_time=None, time_power
                     batch["port_padding"],
                     time_values,
                 )
-                loss, current = grid_city_loss(output, batch)
+                loss, current = grid_city_loss(output, batch, noisy, model.config)
             if training:
                 loss.backward()
                 clip_grad_norm_(model.parameters(), 1.0)
