@@ -232,6 +232,18 @@ The plan looked like a real district layout, with dense blocks, a green core and
 
 The cause was the line order. Lines were sorted by class and then by where they start, so nothing in a sequence said "start on a road that is already there". To make a junction the model had to repeat an exact coordinate from earlier in the sequence, an undertrained model sampled at temperature 1 mostly missed, and every miss became a floating piece. That is what the growth order and the join tokens in the streets section fix.
 
+Checked on a test city built by growing roads off other roads, so it is full of T junctions and cul-de-sacs like the Singapore estates. The old and new street models were trained the same way on a CPU (d 128, 4 layers, 3,200 steps) and each made three 2 km cities from the same plans. Averages:
+
+| | real test city | old line order | growth order and joins |
+|---|---|---|---|
+| road pieces | 6 | 112 | 45 |
+| lone lines | 4 | 81 | 33 |
+| largest piece | 0.98 | 0.22 | 0.75 |
+| dead ends per km | 3.2 | 10.1 | 4.8 |
+| road km per km2 | 13.3 | 11.0 | 11.5 |
+
+The old order reproduces the Singapore failure on its own. The new one fixes most of it in the same training time, but it is not at the real numbers yet, and these are small models. Sampling at temperature 0.6 made both worse (shorter roads and about twice the pieces), so 1.0 stays the default.
+
 ## What is not done yet
 
 - Only checked here on two synthetic cities on a CPU (a straight grid city and a curvy organic one). Singapore and other real cities need the GPU runs above.
