@@ -69,9 +69,9 @@ After sampling, every channel is rescaled so its mean matches what the sliders a
 
 This is the layer that makes "from scratch" possible. Before, the context always came from real Singapore. Now the context itself is generated.
 
-### 2. Water and green
+### 2. Water, green and land use
 
-Thresholded from the plan channels and traced into polygons (`city.py: plan_polygons`).
+Traced from the plan (`city.py`). The plan is upsampled to 16 m with a cubic spline first, so the edges are smooth curves and not the 128 m grid. Water is traced at the level that keeps the planned amount of water (`plan_polygons`). Land use comes from `landuse_regions`: every spot takes the use (residential, commercial, industrial, civic or green) with the biggest share in the plan there, and whatever no use covers is none. These regions decide the land use of the blocks, so the land use sliders act on the city directly.
 
 ### 3. Streets
 
@@ -101,7 +101,7 @@ Rail and elevated roads go through the same model. Their class token carries the
 
 No learning, just geometry. Joined ends are snapped as above. When an end meets the end of another line, the two become one junction, and if that other end moves too, both move together, so chains of snaps do not leave gaps. The meeting point is added to the other line as a vertex so the junction is exact. Then `urban_dataset.city_state.build_transport_graph` nodes everything into the usual graph.
 
-Blocks are the polygons between surface roads and surface rail, shrunk by 3 m, minus water. Blocks over 384 m are split. This step does not invent structure. It reads off what the roads already decided.
+Blocks are the polygons between surface roads and surface rail, shrunk by 3 m, minus water, then cut along the land use regions (`landuse_blocks`). This step does not invent structure. It reads off what the roads and the plan already decided. Blocks bigger than 384 m are split into parts for the building model, but only inside the building step, so the output blocks keep their real shapes.
 
 ### 6. Buildings
 
@@ -113,7 +113,11 @@ The block is described by:
 - the plan values at the block
 - how much of its edge faces major, secondary and local roads
 
-Buildings that end up mostly outside the block, or overlapping an earlier one, are dropped (`place_buildings`).
+The land use token is not sampled. It is set to the block's land use from the plan, and the model draws buildings for that use.
+
+The model puts some boxes a few metres off. A box that is less than 70% inside its block is moved the shortest way back in (at most 15 m), and only dropped if that does not work or it overlaps an earlier box (`place_buildings`). Real boxes pass this almost always, so it only fixes the model's aim.
+
+Every block part gets 4 samples (`--building-samples`), and the one whose built area is closest to the planned coverage there is kept. One scale for the whole city is chosen so the total built area matches the plan, which is what makes the buildings slider work.
 
 ## Multiple cities
 
@@ -243,6 +247,25 @@ Checked on a test city built by growing roads off other roads, so it is full of 
 | road km per km2 | 13.3 | 11.0 | 11.5 |
 
 The old order reproduces the Singapore failure on its own. The new one fixes most of it in the same training time, but it is not at the real numbers yet, and these are small models. Sampling at temperature 0.6 made both worse (shorter roads and about twice the pieces), so 1.0 stays the default.
+
+## Second run on Singapore
+
+Streets were retrained with the growth order and joins for 120 epochs (95 minutes, validation still slowly falling at 1.97). Real numbers come from `audit_real_city.py` on six 4 km windows, generated ones from 4 km cities with the same plan model as before:
+
+| | real Singapore (median) | generated seed 1 | generated seed 2 | first run seed 1 |
+|---|---|---|---|---|
+| road pieces | 114 | 132 | 135 | 554 |
+| lone lines | 89 | 90 | 91 | 368 |
+| largest piece | 0.72 | 0.83 | 0.69 | 0.11 |
+| dead ends per km | 3.2 | 4.1 | 3.9 | 12.7 |
+| road km per km2 | 12.1 | 10.3 | 10.1 | 10.1 |
+| building coverage | 0.175 | 0.065 | 0.060 | 0.057 |
+
+Real Singapore has many pieces too. Bridges, tunnels and roads of unknown level are their own groups in `build_transport_graph`, and service roads get cut at the window edge. The roads now follow the plan closely (densities within about 10%, correlations 0.77 to 0.91), and the road slider works (1.4 x roads gave 1.37 x road density).
+
+Two things were still wrong. The city looked blocky, because big areas with few roads became huge blocks that were cut into 384 m squares, and every square sampled its own land use. And buildings covered about half of what the plan asked for. On test city blocks the building model draws the right amount (1,420 boxes and 240,000 m2 against 1,421 and 236,000 real), but 38% were thrown away for sticking out of the block, because the model's aim is a few metres off. Real boxes almost never stick out.
+
+The fixes are the land use regions, the nudging and the building samples described above. None of them needs retraining. On the test city the built area went from 41% of the plan to 99%.
 
 ## What is not done yet
 
