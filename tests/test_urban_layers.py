@@ -57,11 +57,16 @@ def test_build_city_layers(tmp_path):
 
 def test_street_tokens_round_trip_and_grammar():
     tokens = StreetTokens()
-    lines = [(line_class("road", "major", "surface"), np.array([[0, 10], [256, 10.4], [512, 40]])), (line_class("rail", "subway", "elevated"), np.array([[3, 3], [300, 400]]))]
+    lines = [
+        (line_class("road", "major", "surface"), np.array([[0, 10], [256, 10.4], [512, 40]])),
+        (line_class("rail", "subway", "elevated"), np.array([[3, 3], [300, 400]])),
+        (line_class("road", "local", "surface"), np.array([[100, 10], [100, 200]]), (True, True)),
+    ]
     back = tokens.decode(tokens.encode(lines))
     assert [item[0] for item in back] == [item[0] for item in lines]
     assert back[0][1].tolist() == [[0, 10], [256, 10], [512, 40]]
-    grammar = StreetGrammar(tokens, max_points=3, max_lines=2)
+    assert [item[2] for item in back] == [(False, False), (False, False), (True, True)]
+    grammar = StreetGrammar(tokens, max_points=3, max_lines=3)
     state = grammar.start(1, "cpu")
     sequence = tokens.encode(lines)[1:]
     for token in sequence:
@@ -117,12 +122,46 @@ def test_ports_start_lines_on_visible_sides():
     assert ordered[0][1][0].tolist() == [0.0, 200.0]
 
 
-def test_snap_joins_dead_end_onto_a_line():
+def test_lines_grow_from_what_is_drawn_and_mark_joins():
     local = line_class("road", "local", "surface")
-    lines = [(local, np.array([[0.0, 0.0], [100.0, 0.0]])), (local, np.array([[50.0, 3.0], [50.0, 80.0]]))]
+    major = line_class("road", "major", "surface")
+    lines = [
+        (local, np.array([[200.0, 300.0], [200.0, 100.0]])),
+        (major, np.array([[512.0, 100.0], [100.0, 100.0]])),
+        (local, np.array([[260.0, 250.0], [200.0, 250.0]])),
+        (local, np.array([[0.0, 400.0], [200.0, 300.0]])),
+    ]
+    ordered = order_lines(lines, {(-1, 0)})
+    # the port line, then the major road, then locals that start on something already drawn
+    assert [item[1][0].tolist() for item in ordered] == [[0.0, 400.0], [100.0, 100.0], [200.0, 300.0], [200.0, 250.0]]
+    assert [item[2] for item in ordered] == [(False, True), (False, False), (True, True), (True, False)]
+
+
+def test_snap_moves_joined_ends_and_keeps_chains_together():
+    local = line_class("road", "local", "surface")
+    lines = [
+        (local, np.array([[0.0, 0.0], [100.0, 0.0]])),
+        (local, np.array([[50.0, 20.0], [50.0, 80.0]]), (True, False)),
+        (local, np.array([[80.0, 10.0], [80.0, 60.0]])),
+        (local, np.array([[50.0, 81.0], [10.0, 81.0]])),
+    ]
     snapped = snap_lines(lines)
+    # joined end 20 m away lands on the road and the road gets the vertex
     assert snapped[1][1][0].tolist() == [50.0, 0.0]
     assert [50.0, 0.0] in snapped[0][1].tolist()
+    # a free end 10 m away is a real dead end and stays
+    assert snapped[2][1][0].tolist() == [80.0, 10.0]
+    # ends 1 m apart become one junction
+    assert snapped[1][1][-1].tolist() == snapped[3][1][0].tolist()
+    chained = snap_lines(
+        [
+            (local, np.array([[0.0, 0.0], [0.0, -50.0]])),
+            (local, np.array([[10.0, 0.0], [10.0, 50.0]]), (True, False)),
+            (local, np.array([[20.5, 0.0], [40.0, 30.0]]), (True, False)),
+        ]
+    )
+    # the third line goes to the second line's end, which itself goes to the first line's end, so all three meet
+    assert chained[1][1][0].tolist() == [0.0, 0.0] and chained[2][1][0].tolist() == [0.0, 0.0]
 
 
 def test_models_train_and_generate_a_city(tmp_path):
@@ -179,7 +218,7 @@ def test_every_port_gets_a_line_even_from_an_untrained_model(max_len):
     item = condition_arrays(np.zeros((len(CHANNELS), 8, 8), dtype=np.float32), [], sorted(ports, key=port_key), np.ones(1, dtype=np.float32))
     batch = collate([item, item])
     for lines in model.generate(batch, generator=torch.Generator().manual_seed(1), max_lines=8):
-        ends = np.asarray([points[index] for _class, points in lines for index in (0, -1)])
+        ends = np.asarray([points[index] for _class, points, _joins in lines for index in (0, -1)])
         for x, y, *_rest in ports:
             assert np.abs(ends - [x, y]).max(axis=1).min() <= 8
 
@@ -195,9 +234,9 @@ def test_free_lines_do_not_start_or_end_on_a_done_side():
     results = model.generate(batch, generator=torch.Generator().manual_seed(2), max_points=20, max_lines=6)
     assert sum(len(lines) for lines in results) > 0
     for lines, sides in zip(results, batch["sides"].tolist()):
-        for _class_id, points in lines:
-            # a line at the point limit is allowed to end anywhere
-            ends = [points[0]] + ([points[-1]] if len(points) < 20 else [])
+        for _class_id, points, joins in lines:
+            # a line at the point limit is allowed to end anywhere, and joined ends get snapped onto a line
+            ends = ([points[0]] if not joins[0] else []) + ([points[-1]] if len(points) < 20 and not joins[1] else [])
             for x, y in ends:
                 near = [x <= 4, y <= 4, x >= 508, y >= 508]
                 assert not any(side and close for side, close in zip(sides, near))
