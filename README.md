@@ -101,6 +101,17 @@ A typical local generation setup currently uses:
 
 The longer-term system should repeatedly generate or refine neighbouring regions while carrying forward a persistent city graph/state. That is what allows the model to scale from a local training unit to a much larger city.
 
+## Layered model
+
+The newest model is in `src/urban_layers` and is described in `docs/architecture/layered-model.md`. It generates a city in layers:
+
+1. a district plan (diffusion on a 128 m grid, steered by city style and sliders)
+2. streets and rail as polylines, one 512 m tile at a time, continuing whatever the neighbouring tiles already drew
+3. the road graph and blocks, by plain geometry
+4. buildings as oriented boxes, one block at a time
+
+It writes `city.json` for the Unreal side, plus an OBJ preview and an audit. The grid city results that led to it are in `docs/experiments/grid-city-v1.md`.
+
 ## Current model: context-plan graph
 
 The strongest current learned component is a context-conditioned hierarchical Transformer for transport generation.

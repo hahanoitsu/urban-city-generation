@@ -43,3 +43,22 @@ The gate is the held-out test split: road pieces per tile, isolated nodes, valid
 - Training keeps an averaged copy of the weights (ema). Validation, best.pt and sampling use it.
 
 The logged category losses are higher than in the first run because visible tokens no longer count, so compare runs with the audit, not the training log. `--position-bands 0` turns the position code and the geometry term off, and old checkpoints still load and sample.
+
+## Result of the first run
+
+Overfit, 16 training tiles sampled from pure noise. The grid model reproduces them almost exactly: 99.9% valid buildings, median building centroid error 0.57 m, median IoU 0.87, 1.6% isolated nodes, 9.1 road pieces per tile against 6.1 in the targets. So the representation and the sampler can hold a real city, which the structured denoiser never managed.
+
+Held-out test, 16 tiles. It falls apart:
+
+| | generated | real |
+|---|---|---|
+| buildings | 11,995 | 548 |
+| road pieces per tile | 29.6 | 9.0 |
+| isolated nodes | 12.5% | 0% |
+| building IoU over 0.5 | 2.6% | |
+
+Tiles with no buildings at all get 570 to 890. Every slot fills with the same average blob, and the roads become a zig-zag mesh. Meanwhile the held-out validation loss improved for all 80 epochs (0.148 to 0.089).
+
+Why: in training an empty slot's shape is always pure noise, so any signal in a slot means "present". On a new tile the model is unsure about every slot, so it predicts a weak average shape for each one. Sampling feeds that back in, the weak shape looks like presence, the model gets more sure, and after 40 steps every slot is a building. On training tiles it is never unsure, so this never happens. It is the variable-count problem the MapDreamer paper describes for fixed slots with an existence flag.
+
+This is why the layered model (`docs/architecture/layered-model.md`) generates roads and buildings as sequences that decide their own length, one tile or block at a time, instead of filling fixed slots.
