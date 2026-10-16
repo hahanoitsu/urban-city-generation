@@ -106,11 +106,11 @@ The longer-term system should repeatedly generate or refine neighbouring regions
 The newest model is in `src/urban_layers` and is described in `docs/architecture/layered-model.md`. It generates a city in layers:
 
 1. a district plan (diffusion on a 128 m grid, steered by city style and sliders)
-2. streets and rail as polylines, one 512 m tile at a time, continuing whatever the neighbouring tiles already drew
+2. streets and rail as polylines, one 512 m tile at a time, growing from the roads already drawn and continuing whatever the neighbouring tiles drew
 3. the road graph and blocks, by plain geometry
 4. buildings as oriented boxes, one block at a time
 
-It writes `city.json` for the Unreal side, plus an OBJ preview and an audit. The grid city results that led to it are in `docs/experiments/grid-city-v1.md`.
+It writes `city.json` for the Unreal side, plus an OBJ preview and an audit. `scripts/audit_real_city.py` runs the same audit on real windows of a training city to give the target numbers. The grid city results that led to it are in `docs/experiments/grid-city-v1.md`.
 
 ## Current model: context-plan graph
 

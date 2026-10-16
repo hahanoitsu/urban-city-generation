@@ -77,6 +77,10 @@ Thresholded from the plan channels and traced into polygons (`city.py: plan_poly
 
 `streets.py`. One 512 m tile at a time. Each tile is a token sequence: for every line, its class (road class or rail type, times surface, elevated, underground or unknown), then its points as x, y tokens on a 1 m grid, then an end token. A grammar mask during sampling makes every output well formed.
 
+The lines are written in the order a network grows. First the lines that continue a port, then the network spreads: the next line is always one that starts on a line already written if there is one, major roads first, then secondary, then local. A line with nothing to start from begins a new piece. Two extra tokens say where lines meet: JOIN right after the class means the line starts on another line, and END_JOIN before the last point means it ends on another line. At generation, a joined end is snapped onto the nearest line of the same mode and level within 40 m, and an end without a join is left alone (only moved if it is within 3 m of a line), because real cul-de-sacs exist.
+
+This matters because of how the first real run failed (see below). With lines in plain raster order, a junction only happens if the model copies an exact coordinate of an earlier line to the metre. It mostly missed, and the city fell apart into floating pieces. Now the model only has to say "this end meets a road" and get roughly close.
+
 The tile sees:
 
 - the plan cells around it (1 km window)
@@ -95,7 +99,7 @@ Rail and elevated roads go through the same model. Their class token carries the
 
 ### 4 and 5. Network and blocks
 
-No learning, just geometry. Dead ends within 6 m of another line of the same mode are snapped onto it, and the vertex is added to both lines so the junction is exact. Then `urban_dataset.city_state.build_transport_graph` nodes everything into the usual graph.
+No learning, just geometry. Joined ends are snapped as above. When an end meets the end of another line, the two become one junction, and if that other end moves too, both move together, so chains of snaps do not leave gaps. The meeting point is added to the other line as a vertex so the junction is exact. Then `urban_dataset.city_state.build_transport_graph` nodes everything into the usual graph.
 
 Blocks are the polygons between surface roads and surface rail, shrunk by 3 m, minus water. Blocks over 384 m are split. This step does not invent structure. It reads off what the roads already decided.
 
@@ -157,11 +161,15 @@ Each output folder has:
 
 `audit.py` measures the finished city:
 
-- network: components, largest component share, dead ends per km, junction share, broken tile seams, road km per km2
+- network: components, lone lines (a piece that is a single line with two loose ends), largest component share, dead ends per km, junction share, broken tile seams, road km per km2
 - buildings: count, validity, coverage, overlapping pairs, median height, land use counts
 - follows plan: the finished city is measured again with the same `plan_raster` code that made the training plans. Then for every channel it reports the planned mean, the realised mean and their correlation. This is how you test the sliders: ask for 1.3 x roads and see whether the realised road density moved by 1.3.
 
-Run the same audit on a real city crop to get the target numbers. Realism is judged against those, plus the pictures.
+`scripts/audit_real_city.py` cuts windows of the same size out of a real training city, mostly built up ones, and runs the same audit on them. Its `summary.json` gives the target numbers. Realism is judged against those, plus the pictures. Real data has some broken tile seams too, just from dead ends that happen to sit near a 512 m grid line.
+
+```bash
+python scripts/audit_real_city.py --city data/cities/singapore.gpkg --plan data/layers/singapore/plan.npz --output runs/layers-real --size 4096 --count 6
+```
 
 ## Where PCG fits
 
@@ -213,6 +221,16 @@ A broken tile seam is a dead end within 4 m of an inside tile edge. Over six cit
 Road slider 0.6, 1.0 and 1.5 gave 10.6, 12.8 and 21.2 road km per km2, so the street layer follows the plan density. Buildings undercount mostly because the undertrained model's boxes overlap and get filtered. On real blocks the model asks for the right number (943 against 876, and 922 against 946), and about a quarter are dropped.
 
 Two things these test cities cannot show. Both plans are almost the same everywhere, so the cell by cell correlation between plan and city is low (about 0.13 for roads) because there is little to follow. And in the mix, the plan asks for 30 m buildings but the building model makes 10 m ones, because in the test data the plan height and the city name always agree, so it never had to read height from the plan. Real cities vary inside themselves, so both should be checked in `audit.json` after the real runs.
+
+## First run on Singapore
+
+Data from `singapore-v2.gpkg`: a 50 by 34 km box, 129,140 road and rail lines, 12,664 street tiles, 22,059 blocks with 130,789 of the 158,117 buildings inside them. Street tiles are 222 tokens at the median and 860 at p99. More than half the blocks have no buildings at all (parks, road islands, interchanges).
+
+Training on the server took 51 minutes for the plan (validation 0.70 to 0.24), 28 minutes for streets (4.82 to 2.51, still falling at the end) and 38 minutes for buildings (best 2.02 around epoch 25, then it overfits, and `best.pt` keeps that epoch).
+
+The plan looked like a real district layout, with dense blocks, a green core and water. The streets did not. In a 4 km city, 2,117 of the 4,711 road nodes were dead ends and the largest connected piece held only 11% of the network. 368 of its 544 pieces were a single short line floating on its own with two loose ends, and the median line was 44 m long. Buildings were reasonable on their own, but blocks only form between connected roads, so large leftover areas got cut into 384 m squares.
+
+The cause was the line order. Lines were sorted by class and then by where they start, so nothing in a sequence said "start on a road that is already there". To make a junction the model had to repeat an exact coordinate from earlier in the sequence, an undertrained model sampled at temperature 1 mostly missed, and every miss became a floating piece. That is what the growth order and the join tokens in the streets section fix.
 
 ## What is not done yet
 
