@@ -10,6 +10,7 @@ import pandas as pd
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, mapping
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform, unary_union
+from shapely.strtree import STRtree
 
 from .classify import clean_tag, first_number
 from .tile import TileSpec
@@ -125,9 +126,13 @@ def _noded_lines(records: list[dict[str, Any]]) -> list[LineString]:
     return list(_iter_lines(union))
 
 
-def _nearest_source(segment: LineString, records: list[dict[str, Any]]) -> dict[str, Any]:
+def _nearest_source(
+    segment: LineString, records: list[dict[str, Any]], tree: STRtree | None = None
+) -> dict[str, Any]:
     midpoint = segment.interpolate(0.5, normalized=True)
-    return min(records, key=lambda record: record["geometry"].distance(midpoint))
+    if tree is None:
+        return min(records, key=lambda record: record["geometry"].distance(midpoint))
+    return records[int(tree.query_nearest(midpoint, all_matches=True).min())]
 
 
 def _node_key(
@@ -170,10 +175,11 @@ def build_transport_graph(
 
     for group_key in sorted(groups, key=str):
         group = groups[group_key]
+        tree = STRtree([record["geometry"] for record in group])
         for segment in _noded_lines(group):
             if segment.length <= 1e-6:
                 continue
-            source = _nearest_source(segment, group)
+            source = _nearest_source(segment, group, tree)
             source_line = source["geometry"]
             if not source_line.is_ring and source_line.project(
                 Point(segment.coords[0])
