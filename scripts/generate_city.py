@@ -33,6 +33,7 @@ def main():
     parser.add_argument("--guidance", type=float, default=1.5)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--building-samples", type=int, default=4, help="samples per block, the one closest to the planned coverage is kept")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--list", action="store_true", help="print the cities the models know and stop")
     args = parser.parse_args()
@@ -53,6 +54,7 @@ def main():
         guidance=args.guidance,
         temperature=args.temperature,
         top_p=args.top_p,
+        building_samples=args.building_samples,
         device=args.device,
     )
     save_city(city, plan, args.output)

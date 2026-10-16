@@ -378,7 +378,7 @@ def split_block(polygon, size=BLOCK_SPLIT):
     return pieces
 
 
-def make_blocks(lines, water=None, minimum_area=150.0, edge=None):
+def make_blocks(lines, water=None, minimum_area=150.0, edge=None, split=True):
     barriers = [geometry for class_id, geometry, _width in lines if blocks_ground(class_id)]
     if edge is not None:
         barriers.append(edge)
@@ -400,7 +400,7 @@ def make_blocks(lines, water=None, minimum_area=150.0, edge=None):
         for part in getattr(shrunk, "geoms", [shrunk]):
             if part.geom_type != "Polygon" or part.area < minimum_area:
                 continue
-            blocks.extend(split_block(part))
+            blocks.extend(split_block(part) if split else [part])
     return blocks
 
 

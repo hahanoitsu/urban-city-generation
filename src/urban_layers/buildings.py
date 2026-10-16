@@ -6,6 +6,7 @@ import random
 import numpy as np
 import torch
 from shapely.geometry import Polygon
+from shapely.ops import nearest_points
 
 from urban_layers.data import CHANNELS, box_polygon, from_frame
 from urban_layers.decoder import TokenDecoder, fourier
@@ -100,14 +101,14 @@ class BuildingModel(torch.nn.Module):
         return self.decoder(batch["tokens"], memory, padding)
 
     @torch.no_grad()
-    def generate(self, batch, temperature=1.0, top_p=0.95, generator=None, max_buildings=1000):
+    def generate(self, batch, temperature=1.0, top_p=0.95, generator=None, max_buildings=1000, landuse=None):
         memory, padding = self.condition(batch)
-        grammar = BuildingGrammar(self.tokens, max_buildings)
+        grammar = BuildingGrammar(self.tokens, max_buildings, landuse)
         tokens = self.decoder.generate(memory, padding, grammar, temperature=temperature, top_p=top_p, generator=generator)
         return [self.tokens.decode(row.tolist()) for row in tokens.cpu()]
 
 
-def place_buildings(block_polygon, centre, angle, items, inside=0.8, overlap=0.15):
+def place_buildings(block_polygon, centre, angle, items, inside=0.7, overlap=0.15, nudge=15.0):
     placed = []
     shapes = []
     for kind, x, y, width, depth, turn, height in items:
@@ -116,7 +117,19 @@ def place_buildings(block_polygon, centre, angle, items, inside=0.8, overlap=0.1
         if not shape.is_valid or shape.area < 4.0:
             continue
         if shape.intersection(block_polygon).area < inside * shape.area:
-            continue
+            # the model puts some boxes a few metres off the block, real ones almost never are,
+            # so move the box just inside instead of dropping it
+            room = block_polygon.buffer(-min(width, depth) / 2.0)
+            if room.is_empty:
+                continue
+            middle = shape.centroid
+            target = nearest_points(room, middle)[0]
+            if target.distance(middle) > nudge:
+                continue
+            corners = corners + (target.x - middle.x, target.y - middle.y)
+            shape = Polygon(corners)
+            if shape.intersection(block_polygon).area < inside * shape.area:
+                continue
         if any(shape.intersection(other).area > overlap * min(shape.area, other.area) for other in shapes if shape.distance(other) < 1.0):
             continue
         shapes.append(shape)

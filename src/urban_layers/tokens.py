@@ -352,9 +352,11 @@ class BuildingTokens:
 
 
 class BuildingGrammar:
-    def __init__(self, tokens, max_buildings=120):
+    # landuse: optional (batch,) long tensor, the land use each block has to start with
+    def __init__(self, tokens, max_buildings=120, landuse=None):
         self.tokens = tokens
         self.max_buildings = max_buildings
+        self.landuse = landuse
         self.kinds = torch.from_numpy(tokens.kinds)
 
     def start(self, batch, device):
@@ -373,6 +375,10 @@ class BuildingGrammar:
         pad = torch.zeros(self.tokens.vocab, dtype=torch.bool, device=phase.device)
         pad[PAD] = True
         result |= (phase == 8)[:, None] & pad[None]
+        if self.landuse is not None:
+            forced = torch.zeros_like(result)
+            forced[torch.arange(len(phase), device=phase.device), self.tokens.first_landuse + self.landuse.to(phase.device)] = True
+            result = torch.where((phase == 0)[:, None], forced, result)
         return result
 
     def advance(self, state, token):

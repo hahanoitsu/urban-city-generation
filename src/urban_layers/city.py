@@ -6,11 +6,12 @@ from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
+import shapely
 import torch
 from rasterio import features
 from rasterio.transform import Affine
 from scipy import ndimage
-from shapely.geometry import LineString, Point, box, shape
+from shapely.geometry import LineString, Point, Polygon, box, shape
 from shapely.ops import nearest_points, unary_union
 from shapely.strtree import STRtree
 
@@ -30,6 +31,7 @@ from urban_layers.data import (
     plan_raster,
     ring_box,
     road_index,
+    split_block,
 )
 from urban_layers.plan import PlanNet, sample_plan
 from urban_layers.streets import PORTS, SIDES, StreetModel, collate, condition_arrays, plan_crop, port_key, snap_to_ports
@@ -86,17 +88,60 @@ def requested_controls(checkpoint, weights, sliders):
     return controls
 
 
-def plan_polygons(plan, channel, threshold=0.5, upsample=8, minimum_area=1500.0):
-    field = ndimage.zoom(plan[CHANNELS.index(channel)], upsample, order=1)
-    mask = (field > threshold).astype(np.uint8)
-    size = CELL / upsample
+REGION_CLASSES = ("residential", "commercial", "industrial", "civic", "green")
+
+
+def plan_field(plan, channel, upsample=8):
+    # cubic upsampling so traced edges are smooth curves, not the 128 m grid
+    return np.clip(ndimage.zoom(plan[CHANNELS.index(channel)], upsample, order=3), 0.0, None)
+
+
+def trace(mask, size, minimum_area):
     polygons = []
-    for geometry, value in features.shapes(mask, mask=mask.astype(bool), transform=Affine(size, 0, 0, 0, size, 0)):
-        polygon = shape(geometry).buffer(size).buffer(-size).simplify(size)
+    for geometry, _value in features.shapes(mask.astype(np.uint8), mask=mask, transform=Affine(size, 0, 0, 0, size, 0)):
+        polygon = shape(geometry).buffer(size).buffer(-size).simplify(size / 2)
         for part in getattr(polygon, "geoms", [polygon]):
             if part.geom_type == "Polygon" and part.area >= minimum_area:
                 polygons.append(part)
     return polygons
+
+
+def plan_polygons(plan, channel, upsample=8, minimum_area=1500.0):
+    # trace at the level that keeps the planned amount of area, a fixed 0.5 lost most of the water
+    field = plan_field(plan, channel, upsample)
+    share = float(plan[CHANNELS.index(channel)].mean())
+    if share <= 0.0:
+        return []
+    threshold = max(float(np.quantile(field, 1.0 - min(share, 1.0))), 0.15)
+    return trace(field > threshold, CELL / upsample, minimum_area)
+
+
+def landuse_regions(plan, upsample=8, minimum_area=1500.0):
+    # every spot takes the land use with the biggest share in the plan there, whatever is left over is none
+    shares = np.stack([plan_field(plan, name, upsample) for name in REGION_CLASSES])
+    none = np.clip(1.0 - shares.sum(axis=0), 0.0, None)
+    labels = np.concatenate([none[None], shares]).argmax(axis=0)
+    regions = []
+    for name in REGION_CLASSES:
+        index = LANDUSE.index(name)
+        regions += [(polygon, index) for polygon in trace(labels == index, CELL / upsample, minimum_area)]
+    return regions
+
+
+def landuse_blocks(lines, water, regions, edge):
+    # road blocks cut along the land use regions, so land use follows the plan instead of a grid of squares
+    parcels = make_blocks(lines, water, edge=edge, split=False)
+    tree = STRtree([polygon for polygon, _use in regions]) if regions else None
+    pieces = []
+    for parcel in parcels:
+        hits = tree.query(parcel, predicate="intersects") if tree is not None else []
+        cut = [(parcel.intersection(regions[index][0]), regions[index][1]) for index in hits]
+        rest = parcel.difference(unary_union([regions[index][0] for index in hits])) if len(hits) else parcel
+        for geometry, use in cut + [(rest, 0)]:
+            for part in getattr(geometry, "geoms", [geometry]):
+                if part.geom_type == "Polygon" and part.area >= 150.0:
+                    pieces.append((part, use))
+    return pieces
 
 
 def neighbour_lines(done, row, column):
@@ -277,28 +322,73 @@ def lines_to_layers(lines, width_m, height_m):
     return roads_frame, rail_frame, build_transport_graph(roads_frame, rail_frame, tile)
 
 
-def generate_buildings(model, checkpoint, polygons, plan, size, lines, weights, generator=None, temperature=1.0, top_p=0.95, batch_size=64, device="cpu", log=print):
+def planned_cover(plan, polygon, step=32.0):
+    # mean planned building coverage over the polygon
+    minx, miny, maxx, maxy = polygon.bounds
+    xs, ys = np.meshgrid(np.arange(minx + step / 2, maxx, step), np.arange(miny + step / 2, maxy, step))
+    xs, ys = xs.ravel(), ys.ravel()
+    inside = shapely.contains_xy(polygon, xs, ys)
+    if not inside.any():
+        point = polygon.representative_point()
+        xs, ys, inside = np.array([point.x]), np.array([point.y]), np.array([True])
+    columns = np.clip((xs[inside] // CELL).astype(int), 0, plan.shape[2] - 1)
+    rows = np.clip((ys[inside] // CELL).astype(int), 0, plan.shape[1] - 1)
+    return float(plan[CHANNELS.index("coverage"), rows, columns].mean())
+
+
+def pick_samples(areas, targets, goal, rounds=40):
+    # one scale for the whole city so the chosen built area adds up to the plan, then every part
+    # takes its sample closest to its own share
+    def chosen(scale):
+        return [int(np.argmin(np.abs(values - scale * target))) for values, target in zip(areas, targets)]
+
+    def total(picks):
+        return float(sum(values[pick] for values, pick in zip(areas, picks)))
+
+    low, high = 0.0, 20.0
+    for _round in range(rounds):
+        middle = (low + high) / 2.0
+        if total(chosen(middle)) < goal:
+            low = middle
+        else:
+            high = middle
+    return chosen((low + high) / 2.0)
+
+
+def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, generator=None, temperature=1.0, top_p=0.95, samples=4, batch_size=64, device="cpu", log=print):
+    # pieces are (polygon, land use). big pieces are split into parts the model can take, the split
+    # stays inside here so the output blocks are the whole pieces
     scale = np.asarray(checkpoint["scale"], dtype=np.float32)
     road_tree, road_classes = road_index([(class_id, LineString(points), 0.0) for class_id, points in lines])
     bounds = (0.0, 0.0, size[0], size[1])
-    records = [block_record(polygon, plan, bounds, road_tree, road_classes) for polygon in polygons]
-    blocks = []
-    buildings = []
-    for start in range(0, len(records), batch_size):
-        chunk = records[start : start + batch_size]
-        items = [block_arrays(record, scale, weights) for record in chunk]
+    parts = [(block_id, part, use) for block_id, (polygon, use) in enumerate(pieces) for part in split_block(polygon)]
+    records = [block_record(part, plan, bounds, road_tree, road_classes) for _block_id, part, _use in parts]
+    options = [[] for _part in parts]
+    for start in range(0, len(parts), batch_size):
+        chunk = list(range(start, min(start + batch_size, len(parts))))
+        items = [block_arrays(records[index], scale, weights) for index in chunk]
         arrays = {name: torch.from_numpy(np.stack([item[name] for item in items])).to(device) for name in items[0]}
-        results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator)
-        for offset, (record, (landuse, items_out)) in enumerate(zip(chunk, results)):
-            block_id = start + offset
-            polygon = polygons[block_id]
-            blocks.append({"id": block_id, "landuse": LANDUSE[landuse] if landuse < len(LANDUSE) else "none", "polygon": np.asarray(polygon.exterior.coords).tolist()})
-            for item in place_buildings(polygon, record["centre"], record["angle"], items_out):
-                item["block"] = block_id
-                item["id"] = len(buildings)
-                item["kind"] = BUILDING_KINDS[item["kind"]] if item["kind"] < len(BUILDING_KINDS) else "generic"
-                buildings.append(item)
-        log(f"buildings: blocks {min(start + batch_size, len(records))}/{len(records)}, buildings {len(buildings)}")
+        uses = torch.tensor([parts[index][2] for index in chunk], dtype=torch.long, device=device)
+        for _sample in range(samples):
+            results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, landuse=uses)
+            for index, (_landuse, items_out) in zip(chunk, results):
+                placed = place_buildings(parts[index][1], records[index]["centre"], records[index]["angle"], items_out)
+                options[index].append(placed)
+        log(f"buildings: parts {chunk[-1] + 1}/{len(parts)}")
+
+    areas = [np.array([sum(Polygon(item["footprint"]).area for item in placed) for placed in option]) for option in options]
+    targets = np.array([planned_cover(plan, part) * part.area for _block_id, part, _use in parts])
+    goal = float(plan[CHANNELS.index("coverage")].mean()) * size[0] * size[1]
+    picks = pick_samples(areas, targets, goal)
+    blocks = [{"id": block_id, "landuse": LANDUSE[use], "polygon": np.asarray(polygon.exterior.coords).tolist()} for block_id, (polygon, use) in enumerate(pieces)]
+    buildings = []
+    for (block_id, _part, _use), option, pick in zip(parts, options, picks):
+        for item in option[pick]:
+            item["block"] = block_id
+            item["id"] = len(buildings)
+            item["kind"] = BUILDING_KINDS[item["kind"]] if item["kind"] < len(BUILDING_KINDS) else "generic"
+            buildings.append(item)
+    log(f"buildings: {len(buildings)} in {len(blocks)} blocks, built area {sum(values[pick] for values, pick in zip(areas, picks)) / max(goal, 1.0):.2f} of the plan")
     return blocks, buildings
 
 
@@ -316,6 +406,7 @@ def generate_city(
     known_plan=None,
     known_mask=None,
     match=True,
+    building_samples=4,
     log=print,
 ):
     plan_model, plan_checkpoint = models["plan"]
@@ -346,8 +437,8 @@ def generate_city(
     size = (width * CELL, height * CELL)
     log(f"plan: {height} x {width} cells")
     water = plan_polygons(plan, "water")
-    green = plan_polygons(plan, "green")
     water_union = unary_union(water) if water else None
+    regions = landuse_regions(plan)
 
     street_weights = style_weights(street_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in street_checkpoint["cities"]})
     lines = generate_streets(street_model, street_checkpoint, plan, street_weights, generator, temperature, top_p, device, log)
@@ -367,9 +458,12 @@ def generate_city(
     roads_frame, rail_frame, graph = lines_to_layers(lines, *size)
     log(f"network: {len(graph['nodes'])} nodes, {len(graph['edges'])} edges")
 
-    polygons = make_blocks([(class_id, LineString(points), 0.0) for class_id, points in lines], water_union, edge=area.exterior)
+    pieces = landuse_blocks([(class_id, LineString(points), 0.0) for class_id, points in lines], water_union, regions, area.exterior)
+    green = [polygon for polygon, use in pieces if LANDUSE[use] == "green"]
     building_weights = style_weights(building_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in building_checkpoint["cities"]})
-    blocks, buildings = generate_buildings(building_model, building_checkpoint, polygons, plan, size, lines, building_weights, generator, temperature, top_p, device=device, log=log)
+    blocks, buildings = generate_buildings(
+        building_model, building_checkpoint, pieces, plan, size, lines, building_weights, generator, temperature, top_p, samples=building_samples, device=device, log=log
+    )
 
     city = {
         "format": "urban-layers-city",
