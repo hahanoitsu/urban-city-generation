@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -40,7 +41,13 @@ def move(batch, device):
     return {key: value.to(device, non_blocking=True) if torch.is_tensor(value) else value for key, value in batch.items()}
 
 
-def run_epoch(model, loader, device, optimizer=None, fixed_time=None, time_power=1.0):
+def update_ema(ema, model, decay):
+    with torch.no_grad():
+        for average, parameter in zip(ema.parameters(), model.parameters()):
+            average.lerp_(parameter, 1.0 - decay)
+
+
+def run_epoch(model, loader, device, optimizer=None, fixed_time=None, time_power=1.0, ema=None, ema_decay=0.999):
     training = optimizer is not None
     model.train(training)
     total = 0.0
@@ -73,6 +80,9 @@ def run_epoch(model, loader, device, optimizer=None, fixed_time=None, time_power
                 loss.backward()
                 clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
+                if ema is not None:
+                    ema.steps += 1
+                    update_ema(ema, model, min(ema_decay, (1.0 + ema.steps) / (10.0 + ema.steps)))
             total += float(loss.detach()) * size
             examples += size
             for name, value in current.items():
@@ -105,6 +115,7 @@ def main():
     parser.add_argument("--model-dimensions", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--position-bands", type=int, default=6)
+    parser.add_argument("--ema", type=float, default=0.999)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -154,19 +165,26 @@ def main():
 
     model = GridCityDenoiser(model_config).to(device)
     optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
+    # averaged weights, these are the ones we validate and sample with
+    ema = copy.deepcopy(model).eval()
+    ema.requires_grad_(False)
+    ema.steps = 0
     start = 0
     best = math.inf
-    if args.resume:
-        checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
-        model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        start = int(checkpoint["epoch"])
-        best = float(checkpoint.get("best", math.inf))
-        print(f"resume={args.resume} epoch={start}", flush=True)
 
     options = {"batch_size": args.batch_size, "num_workers": args.workers, "pin_memory": device.type == "cuda", "persistent_workers": args.workers > 0}
     train_loader = DataLoader(train_set, shuffle=True, drop_last=len(train_set) > args.batch_size, **options)
     validation_loader = DataLoader(validation_set, shuffle=False, **options)
+
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
+        model.load_state_dict(checkpoint["model"])
+        ema.load_state_dict(checkpoint.get("ema", checkpoint["model"]))
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        start = int(checkpoint["epoch"])
+        best = float(checkpoint.get("best", math.inf))
+        ema.steps = start * len(train_loader)
+        print(f"resume={args.resume} epoch={start}", flush=True)
 
     args.output.mkdir(parents=True, exist_ok=True)
     experiment = {
@@ -181,9 +199,9 @@ def main():
     started = time.time()
     for epoch in range(start + 1, args.epochs + 1):
         epoch_started = time.time()
-        train = run_epoch(model, train_loader, device, optimizer, time_power=args.time_power)
-        middle = run_epoch(model, validation_loader, device, fixed_time=0.5)
-        high = run_epoch(model, validation_loader, device, fixed_time=0.9)
+        train = run_epoch(model, train_loader, device, optimizer, time_power=args.time_power, ema=ema, ema_decay=args.ema)
+        middle = run_epoch(ema, validation_loader, device, fixed_time=0.5)
+        high = run_epoch(ema, validation_loader, device, fixed_time=0.9)
         score = (middle["loss"] + high["loss"]) / 2.0
         record = {"epoch": epoch, "train": train, "validation": middle, "validation_high": high, "score": score}
         with (args.output / "metrics.jsonl").open("a") as handle:
@@ -191,6 +209,7 @@ def main():
         checkpoint = {
             "epoch": epoch,
             "model": model.state_dict(),
+            "ema": ema.state_dict(),
             "optimizer": optimizer.state_dict(),
             "model_config": model_config.to_dict(),
             "scene_config": scene_config.__dict__,

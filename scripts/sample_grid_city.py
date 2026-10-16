@@ -108,7 +108,7 @@ def main():
 
     device = torch.device(args.device)
     model = GridCityDenoiser(model_config).to(device)
-    model.load_state_dict(checkpoint["model"])
+    model.load_state_dict(checkpoint.get("ema", checkpoint["model"]))
     model.eval()
     generator = torch.Generator(device=device).manual_seed(args.seed)
 
