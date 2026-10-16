@@ -240,3 +240,48 @@ def test_free_lines_do_not_start_or_end_on_a_done_side():
             for x, y in ends:
                 near = [x <= 4, y <= 4, x >= 508, y >= 508]
                 assert not any(side and close for side, close in zip(sides, near))
+
+
+def test_land_use_follows_the_plan_not_a_grid():
+    from urban_layers.city import landuse_blocks, landuse_regions
+    from urban_layers.data import LANDUSE
+
+    plan = np.zeros((len(CHANNELS), 16, 16), dtype=np.float32)
+    plan[CHANNELS.index("residential"), :, :8] = 0.9
+    plan[CHANNELS.index("industrial"), :, 8:] = 0.9
+    regions = landuse_regions(plan)
+    assert {LANDUSE[use] for _polygon, use in regions} == {"residential", "industrial"}
+    local = line_class("road", "local", "surface")
+    # one big block with no roads inside crosses the land use edge at x = 1024
+    lines = [(local, LineString([(100, 100), (1900, 100)]), 0.0), (local, LineString([(100, 1900), (1900, 1900)]), 0.0)]
+    pieces = landuse_blocks(lines, None, regions, box(0, 0, 2048, 2048).exterior)
+    middle = box(100, 100, 1900, 1900)
+    big = [(polygon, LANDUSE[use]) for polygon, use in pieces if polygon.intersection(middle).area > 100000]
+    assert {use for _polygon, use in big} == {"residential", "industrial"}
+    for polygon, use in big:
+        x = polygon.centroid.x
+        assert (x < 1024) == (use == "residential")
+
+
+def test_building_land_use_can_be_forced():
+    torch.manual_seed(0)
+    model = BuildingModel(1, d=32, layers=1, heads=4, max_len=64).eval()
+    ring = np.stack([np.cos(np.linspace(0, 6.28, 48)), np.sin(np.linspace(0, 6.28, 48))], axis=1).astype(np.float32) * 50
+    from urban_layers.buildings import block_arrays
+
+    record = {"ring": ring, "plan": np.zeros(len(CHANNELS), dtype=np.float32), "frontage": np.zeros(3, dtype=np.float32), "area": 8000.0}
+    item = block_arrays(record, np.ones(len(CHANNELS), dtype=np.float32), np.ones(1, dtype=np.float32))
+    batch = {name: torch.from_numpy(np.stack([item[name]] * 3)) for name in item}
+    results = model.generate(batch, generator=torch.Generator().manual_seed(0), landuse=torch.tensor([1, 3, 5]))
+    assert [landuse for landuse, _items in results] == [1, 3, 5]
+
+
+def test_pick_samples_matches_the_planned_total():
+    from urban_layers.city import pick_samples
+
+    areas = [np.array([0.0, 100.0, 400.0]), np.array([50.0, 200.0, 900.0]), np.array([0.0, 10.0, 20.0])]
+    targets = np.array([300.0, 300.0, 10.0])
+    picks = pick_samples(areas, targets, goal=620.0)
+    assert sum(values[pick] for values, pick in zip(areas, picks)) == 620.0
+    assert pick_samples(areas, targets, goal=0.0) == [0, 0, 0]
+    assert pick_samples(areas, targets, goal=1e9) == [2, 2, 2]
