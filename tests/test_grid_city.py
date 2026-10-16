@@ -193,7 +193,7 @@ def check_model(config):
     batch = inputs(2)
     output = model(noisy, batch["context"], batch["relations"], batch["context_padding"], batch["ports"], batch["port_padding"], time)
     assert output["edge_target"].shape == (2, 48, 2, config.candidates + 1)
-    loss, parts = grid_city_loss(output, scene)
+    loss, parts = grid_city_loss(output, scene, noisy, config)
     loss.backward()
     assert torch.isfinite(loss)
     assert "edge_target" in parts
@@ -206,3 +206,25 @@ def check_model(config):
     assert not (generated["node_presence"] == 2).any()
     payload = json_from_plain(merge_chains(decode_grid(arrays, grid)))
     assert set(payload) == {"nodes", "edges", "buildings", "areas"}
+
+
+def test_loss_only_scores_masked_categories():
+    torch.manual_seed(0)
+    config = small()
+    model = GridCityDenoiser(config)
+    scene = empty_scene()
+    scene["node_presence"][:, [0, 1]] = 1
+    # node 0 points at node 1, slot 1 of the same cell
+    scene["edge_target"][:, 0, 0] = 4 * 3 + 1 + 1
+    batch = inputs(2)
+    clean = corrupt(scene, torch.zeros(2), config)
+    output = model(clean, batch["context"], batch["relations"], batch["context_padding"], batch["ports"], batch["port_padding"], torch.zeros(2))
+    _loss, parts = grid_city_loss(output, scene, clean, config)
+    assert parts["node_presence"] == 0.0
+    assert parts["edge_target"] == 0.0
+
+    masked = corrupt(scene, torch.ones(2), config)
+    output = model(masked, batch["context"], batch["relations"], batch["context_padding"], batch["ports"], batch["port_padding"], torch.ones(2))
+    _loss, parts = grid_city_loss(output, scene, masked, config)
+    assert parts["node_presence"] > 0.0
+    assert parts["edge_target"] > 0.0

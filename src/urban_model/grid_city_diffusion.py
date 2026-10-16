@@ -79,22 +79,34 @@ def _ce(logits, target, mask):
     return _mean(values.reshape(target.shape), mask)
 
 
-def grid_city_loss(output, target):
+def grid_city_loss(output, target, noisy=None, config=None):
     node = target["node_presence"].eq(1)
     edge = node[..., None] & target["edge_target"].gt(0)
     building = target["building_presence"].eq(1)
     area = target["area_presence"].eq(1)
     everything = torch.ones_like(node)
+
+    # only score categories that were masked, the sampler never uses the model output for visible ones
+    hidden = {}
+    if noisy is not None:
+        sizes = category_sizes(config)
+        hidden = {name: noisy[name].eq(sizes[name]) for name in CATEGORIES}
+
+    def ce(name, mask):
+        if name in hidden:
+            mask = mask & hidden[name]
+        return _ce(output[name], target[name], mask)
+
     parts = {
-        "node_presence": _ce(output["node_presence"], target["node_presence"], everything),
+        "node_presence": ce("node_presence", everything),
         "node_pos": _mse(output["node_pos"], target["node_pos"], node),
-        "edge_target": _ce(output["edge_target"], target["edge_target"], node[..., None].expand_as(target["edge_target"])),
-        "edge_mode": _ce(output["edge_mode"], target["edge_mode"], edge),
-        "edge_class": _ce(output["edge_class"], target["edge_class"], edge),
-        "edge_vertical": _ce(output["edge_vertical"], target["edge_vertical"], edge),
+        "edge_target": ce("edge_target", node[..., None].expand_as(target["edge_target"])),
+        "edge_mode": ce("edge_mode", edge),
+        "edge_class": ce("edge_class", edge),
+        "edge_vertical": ce("edge_vertical", edge),
         "edge_width": _mse(output["edge_width"], target["edge_width"], edge & target["edge_width_valid"], target["edge_width_weight"]),
         "edge_curve": _mse(output["edge_curve"], target["edge_curve"], edge),
-        "building_presence": _ce(output["building_presence"], target["building_presence"], torch.ones_like(building)),
+        "building_presence": ce("building_presence", torch.ones_like(building)),
         "building_frame": _mse(output["building_frame"], target["building_frame"], building),
         "building_shape": _mse(output["building_shape"], target["building_shape"], building),
         "building_height": _mse(
@@ -103,28 +115,28 @@ def grid_city_loss(output, target):
             building & target["building_height_valid"],
             target["building_height_weight"],
         ),
-        "building_kind": _ce(output["building_kind"], target["building_kind"], building),
-        "area_presence": _ce(output["area_presence"], target["area_presence"], torch.ones_like(area)),
+        "building_kind": ce("building_kind", building),
+        "area_presence": ce("area_presence", torch.ones_like(area)),
         "area_frame": _mse(output["area_frame"], target["area_frame"], area),
         "area_shape": _mse(output["area_shape"], target["area_shape"], area),
-        "area_kind": _ce(output["area_kind"], target["area_kind"], area),
+        "area_kind": ce("area_kind", area),
     }
     # empty slots are zeros in the data, train them too so sampling keeps them looking empty
     empty = [
         _mse(output["node_pos"], target["node_pos"], ~node),
-        _ce(output["edge_target"], target["edge_target"], ~node[..., None].expand_as(target["edge_target"])),
-        _ce(output["edge_mode"], target["edge_mode"], ~edge),
-        _ce(output["edge_class"], target["edge_class"], ~edge),
-        _ce(output["edge_vertical"], target["edge_vertical"], ~edge),
+        ce("edge_target", ~node[..., None].expand_as(target["edge_target"])),
+        ce("edge_mode", ~edge),
+        ce("edge_class", ~edge),
+        ce("edge_vertical", ~edge),
         _mse(output["edge_width"], target["edge_width"], ~edge),
         _mse(output["edge_curve"], target["edge_curve"], ~edge),
         _mse(output["building_frame"], target["building_frame"], ~building),
         _mse(output["building_shape"], target["building_shape"], ~building),
         _mse(output["building_height"], target["building_height"], ~building),
-        _ce(output["building_kind"], target["building_kind"], ~building),
+        ce("building_kind", ~building),
         _mse(output["area_frame"], target["area_frame"], ~area),
         _mse(output["area_shape"], target["area_shape"], ~area),
-        _ce(output["area_kind"], target["area_kind"], ~area),
+        ce("area_kind", ~area),
     ]
     values = [value for value, present in empty if present]
     if values:
