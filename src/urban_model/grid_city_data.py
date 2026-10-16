@@ -189,7 +189,7 @@ def encode_grid(plain, config: GridConfig):
     edge_width_valid = np.zeros((total, edge_count), dtype=bool)
     edge_width_weight = np.zeros((total, edge_count), dtype=np.float32)
     edge_curve = np.zeros((total, edge_count, curve, 2), dtype=np.float32)
-    used = np.zeros(total, dtype=np.int64)
+    stored = {}
     for edge in plain["edges"]:
         first = node_slot[edge["from"]]
         second = node_slot[edge["to"]]
@@ -205,19 +205,6 @@ def encode_grid(plain, config: GridConfig):
         dx = other_column - column
         if abs(dy) > 1 or abs(dx) > 1:
             raise ValueError("grid edge too long")
-        sub = used[low]
-        if sub >= edge_count:
-            raise ValueError("grid edges exceeded")
-        used[low] += 1
-        neighbour = OFFSETS.index((dy, dx))
-        edge_target[low, sub] = neighbour * slots + other_slot + 1
-        edge_mode[low, sub] = int(edge["mode"])
-        edge_class[low, sub] = int(edge["class"])
-        edge_vertical[low, sub] = int(edge["vertical"])
-        if edge.get("width") is not None:
-            edge_width[low, sub, 0] = float(edge["width"]) / config.width_scale_m
-            edge_width_valid[low, sub] = True
-            edge_width_weight[low, sub] = float(edge.get("width_weight", 1.0))
         start = np.asarray(plain["nodes"][edge["from"] if node_slot[edge["from"]][0] == low else edge["to"]])
         end = np.asarray(plain["nodes"][edge["to"] if node_slot[edge["to"]][0] == high else edge["from"]])
         points, cumulative = _arc(points)
@@ -225,8 +212,25 @@ def encode_grid(plain, config: GridConfig):
         straight = start + (end - start) * (np.arange(1, curve + 1)[:, None] / (curve + 1))
         length, along, across = _chord(start, end, 5.0)
         offset = inner - straight
-        edge_curve[low, sub, :, 0] = offset @ along / length
-        edge_curve[low, sub, :, 1] = offset @ across / length
+        value = OFFSETS.index((dy, dx)) * slots + other_slot + 1
+        stored.setdefault(low, []).append((value, edge, offset @ along / length, offset @ across / length))
+
+    # sort by target so the sub slot order only depends on the neighbours, not the source edge order
+    for low, items in stored.items():
+        if len(items) > edge_count:
+            raise ValueError("grid edges exceeded")
+        items.sort(key=lambda item: (item[0], int(item[1]["mode"]), int(item[1]["class"]), int(item[1]["vertical"])))
+        for sub, (value, edge, along_offset, across_offset) in enumerate(items):
+            edge_target[low, sub] = value
+            edge_mode[low, sub] = int(edge["mode"])
+            edge_class[low, sub] = int(edge["class"])
+            edge_vertical[low, sub] = int(edge["vertical"])
+            if edge.get("width") is not None:
+                edge_width[low, sub, 0] = float(edge["width"]) / config.width_scale_m
+                edge_width_valid[low, sub] = True
+                edge_width_weight[low, sub] = float(edge.get("width_weight", 1.0))
+            edge_curve[low, sub, :, 0] = along_offset
+            edge_curve[low, sub, :, 1] = across_offset
 
     result = {
         "node_pos": node_pos,

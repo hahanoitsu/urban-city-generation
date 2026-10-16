@@ -60,6 +60,29 @@ def test_round_trip_keeps_geometry():
     assert abs(heights[-1] - 30.0) < 1e-4
 
 
+def cross():
+    centre = np.array([272.0, 272.0])
+    ends = [centre + [0.0, 25.0], centre + [25.0, 0.0], centre + [0.0, -25.0], centre + [-25.0, 0.0]]
+    nodes = [centre, *ends]
+    edges = [
+        {"from": 0, "to": index, "points": np.stack([centre, nodes[index]]), "mode": 0, "class": 2, "vertical": 0, "width": None}
+        for index in range(1, 5)
+    ]
+    return {"nodes": nodes, "edges": edges, "buildings": [], "areas": []}
+
+
+def test_edge_slots_do_not_depend_on_edge_order():
+    config = GridConfig()
+    scene = cross()
+    first, _ = encode_grid(scene, config)
+    second, _ = encode_grid({**scene, "edges": scene["edges"][::-1]}, config)
+    for name in ("edge_target", "edge_mode", "edge_class", "edge_vertical", "edge_curve"):
+        assert np.array_equal(first[name], second[name])
+    centre = (8 * 16 + 8) * config.node_slots
+    # right neighbour (0, 1) comes before the one above (1, 0)
+    assert first["edge_target"][centre].tolist() == [5 * config.node_slots + 1, 7 * config.node_slots + 1, 0, 0]
+
+
 def test_candidate_table_edges():
     config = GridConfig(node_grid=3, node_slots=2)
     table = candidate_table(config)
