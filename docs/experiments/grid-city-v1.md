@@ -33,3 +33,13 @@ python -m urban_analysis.structured_generation_audit --generations RUN/gen-test 
 ```
 
 The gate is the held-out test split: road pieces per tile, isolated nodes, valid buildings and the pictures.
+
+## Changes after the first run
+
+- Edge sub slots are now sorted by their target. Before, the order came from the order of edges in the source data, which depends on where the far end of the whole road is. The model cannot see that, so at a junction it had to guess which sub slot held which edge, and at sampling two sub slots could pick the same neighbour and lose an edge.
+- Ports and every node, building and area cell share one sin cos position code, so the model does not have to learn where a port is relative to each cell from scratch.
+- The edge pointer gets a geometry term from the current distance and direction to each candidate, like the plan cell graph model.
+- Categories are only scored where they were masked. The sampler never uses the output for visible tokens, so before most of the edge loss was spent copying the input.
+- Training keeps an averaged copy of the weights (ema). Validation, best.pt and sampling use it.
+
+The logged category losses are higher than in the first run because visible tokens no longer count, so compare runs with the audit, not the training log. `--position-bands 0` turns the position code and the geometry term off, and old checkpoints still load and sample.
