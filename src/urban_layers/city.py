@@ -109,17 +109,18 @@ def neighbour_lines(done, row, column):
             if (dx or dy) and key in done:
                 visible.add((dx, dy))
                 ring = ring_box(dx, dy)
-                for class_id, points in done[key]:
+                for class_id, points, joins in done[key]:
                     moved = np.asarray(points, dtype=np.float64) + (dx * TILE, dy * TILE)
                     clipped = LineString(moved).intersection(ring)
                     for part in getattr(clipped, "geoms", [clipped]):
                         if part.geom_type == "LineString" and part.length > 2.0:
                             context.append((class_id, np.asarray(part.coords, dtype=np.float32)))
                     if dx == 0 or dy == 0:
-                        for end in (0, -1):
+                        for slot, end in ((0, 0), (1, -1)):
                             point = moved[end]
                             side = boundary_side(point)
-                            if side >= 0 and SIDES[side] == (dx, dy):
+                            # a joined end gets snapped onto a line later, it does not cross into this tile
+                            if side >= 0 and SIDES[side] == (dx, dy) and not joins[slot]:
                                 inner = moved[1] if end == 0 else moved[-2]
                                 step = point - inner
                                 step = step / max(np.linalg.norm(step), 1e-6)
@@ -128,11 +129,14 @@ def neighbour_lines(done, row, column):
     return context, ports[:PORTS], visible
 
 
-def to_edge(points, reach=4.0, visible=()):
+def to_edge(points, reach=4.0, visible=(), joins=(False, False)):
     # a line that stops just short of the tile edge is meant to leave the tile, so the next tile can pick it up.
-    # not towards a tile that is already done, there it would just be a dead end on the seam
+    # not towards a tile that is already done, there it would just be a dead end on the seam,
+    # and not for joined ends, those get snapped onto a line instead
     points = np.asarray(points, dtype=np.float32).copy()
-    for end in (0, -1):
+    for slot, end in ((0, 0), (1, -1)):
+        if joins[slot]:
+            continue
         for axis in (0, 1):
             low, high = ((-1, 0), (1, 0)) if axis == 0 else ((0, -1), (0, 1))
             if points[end, axis] < reach and low not in visible:
@@ -161,12 +165,12 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
         arrays["sides"] = torch.tensor([[SIDES[side] in visible for side in range(4)] for _ports, visible in meta], dtype=torch.bool, device=device)
         results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator)
         for (row, column), lines, (ports, visible) in zip(batch, results, meta):
-            done[(row, column)] = [(class_id, to_edge(points, visible=visible)) for class_id, points in snap_to_ports(lines, ports)]
+            done[(row, column)] = [(class_id, to_edge(points, visible=visible, joins=joins), joins) for class_id, points, joins in snap_to_ports(lines, ports)]
         log(f"streets: diagonal {diagonal + 1}/{rows + columns - 1}, tiles {len(done)}/{rows * columns}")
     lines = []
     for (row, column), items in done.items():
-        for class_id, points in items:
-            lines.append((class_id, np.asarray(points, dtype=np.float64) + (column * TILE, row * TILE)))
+        for class_id, points, joins in items:
+            lines.append((class_id, np.asarray(points, dtype=np.float64) + (column * TILE, row * TILE), joins))
     return lines
 
 
@@ -180,37 +184,76 @@ def insert_vertex(points, point):
     return np.insert(points, index, point, axis=0)
 
 
-def snap_lines(lines, reach=6.0):
-    # move dead ends onto a nearby line of the same mode and add the vertex there too so they really join
-    geometries = [LineString(points) for _class_id, points in lines]
+def snap_lines(lines, reach=3.0, join_reach=40.0, corner=2.0):
+    # lines are (class, points) or (class, points, joins). an end the model marked as a join moves onto
+    # the nearest line of the same mode and level within join_reach, any other end only if it nearly
+    # touches one. the meeting point is added to the other line too so the graph really joins them
+    items = [(item[0], np.asarray(item[1], dtype=np.float64).copy(), item[2] if len(item) > 2 else (False, False)) for item in lines]
+    geometries = [LineString(points) for _class_id, points, _joins in items]
     tree = STRtree(geometries)
-    moved = [np.asarray(points, dtype=np.float64).copy() for _class_id, points in lines]
+    groups = [(LINE_CLASSES[class_id][0], LINE_CLASSES[class_id][2]) for class_id, _points, _joins in items]
+    original = {(index, slot): points[0 if slot == 0 else -1].copy() for index, (_c, points, _j) in enumerate(items) for slot in (0, 1)}
+    moves = {}
+    links = {}
     inserts = {}
-    for index, (class_id, points) in enumerate(lines):
-        road = LINE_CLASSES[class_id][0]
-        for end in (0, -1):
-            point = Point(moved[index][end])
+    for index, (_class_id, points, joins) in enumerate(items):
+        for slot in (0, 1):
+            point = Point(original[(index, slot)])
+            limit = join_reach if joins[slot] else reach
             best = None
-            for other in tree.query(point.buffer(reach)):
-                if other == index or LINE_CLASSES[lines[other][0]][0] != road:
+            for other in tree.query(point, predicate="dwithin", distance=limit):
+                if other == index or groups[other] != groups[index]:
                     continue
-                target = geometries[other]
-                if target.distance(point) > reach:
-                    continue
-                corner = min((Point(c) for c in (target.coords[0], target.coords[-1])), key=point.distance)
-                if corner.distance(point) <= reach:
-                    candidate = (corner, None)
-                else:
-                    candidate = (nearest_points(target, point)[0], other)
-                if best is None or candidate[0].distance(point) < best[0].distance(point):
-                    best = candidate
-            if best is not None and best[0].distance(point) > 1e-6:
-                moved[index][end] = (best[0].x, best[0].y)
-                if best[1] is not None:
-                    inserts.setdefault(best[1], []).append((best[0].x, best[0].y))
+                distance = geometries[other].distance(point)
+                if best is None or distance < best[0]:
+                    best = (distance, int(other))
+            if best is None:
+                continue
+            target = geometries[best[1]]
+            spot = nearest_points(target, point)[0]
+            ends = [Point(target.coords[0]), Point(target.coords[-1])]
+            near = min((0, 1), key=lambda k: ends[k].distance(spot))
+            if ends[near].distance(spot) <= corner:
+                # meets the other line's end, these two ends become one junction
+                links[(index, slot)] = (best[1], near)
+            elif best[0] > 1e-6:
+                moves[(index, slot)] = np.array([spot.x, spot.y])
+                inserts.setdefault(best[1], []).append((spot.x, spot.y))
+            else:
+                inserts.setdefault(best[1], []).append(tuple(original[(index, slot)]))
+
+    # ends that meet at a corner are grouped, so a chain of snaps cannot leave a gap behind
+    parent = {}
+
+    def find(key):
+        while parent.get(key, key) != key:
+            key = parent[key]
+        return key
+
+    for key, other in links.items():
+        a, b = find(key), find(other)
+        if a != b:
+            parent[a] = b
+    groups_of = {}
+    for key in original:
+        groups_of.setdefault(find(key), []).append(key)
+    final = {}
+    for members in groups_of.values():
+        anchored = [key for key in members if key in moves]
+        still = [key for key in members if key not in moves and key not in links]
+        if anchored:
+            position = moves[anchored[0]]
+        elif still:
+            position = original[still[0]]
+        else:
+            position = original[min(members)]
+        for key in members:
+            final[key] = position
+
     result = []
-    for index, (class_id, _points) in enumerate(lines):
-        points = moved[index]
+    for index, (class_id, points, _joins) in enumerate(items):
+        points[0] = final[(index, 0)]
+        points[-1] = final[(index, 1)]
         for point in inserts.get(index, []):
             points = insert_vertex(points, np.asarray(point))
         if len(points) >= 2 and LineString(points).length > 1.0:
@@ -310,16 +353,16 @@ def generate_city(
     lines = generate_streets(street_model, street_checkpoint, plan, street_weights, generator, temperature, top_p, device, log)
     area = box(0.0, 0.0, *size)
     clipped = []
-    for class_id, points in lines:
+    for class_id, points, joins in lines:
         line = LineString(points)
         if area.covers(line):
             # intersection would also cut a line where it crosses itself, so only clip what sticks out
-            clipped.append((class_id, np.asarray(points, dtype=np.float64)))
+            clipped.append((class_id, np.asarray(points, dtype=np.float64), joins))
             continue
         piece = line.intersection(area)
         for part in getattr(piece, "geoms", [piece]):
             if part.geom_type == "LineString" and part.length > 2.0:
-                clipped.append((class_id, np.asarray(part.coords)))
+                clipped.append((class_id, np.asarray(part.coords), (False, False)))
     lines = snap_lines(clipped)
     roads_frame, rail_frame, graph = lines_to_layers(lines, *size)
     log(f"network: {len(graph['nodes'])} nodes, {len(graph['edges'])} edges")
