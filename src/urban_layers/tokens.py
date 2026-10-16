@@ -18,12 +18,15 @@ def fourier(values, bands=8):
 
 
 class StreetTokens:
-    # BOS, then per line: class, x, y, x, y, ..., END, then EOS
+    # BOS, then per line: class, [JOIN], x, y, x, y, ..., [END_JOIN], x, y, END, then EOS.
+    # JOIN means the line starts on another line, END_JOIN means its last point is on another line
     def __init__(self, size=int(TILE)):
         self.size = size
         self.coords = size + 1
         self.end = 3
-        self.first_class = 4
+        self.join = 4
+        self.end_join = 5
+        self.first_class = 6
         self.first_x = self.first_class + len(LINE_CLASSES)
         self.first_y = self.first_x + self.coords
         self.vocab = self.first_y + self.coords
@@ -32,16 +35,18 @@ class StreetTokens:
         kinds[self.first_class : self.first_x] = 4
         kinds[self.first_x : self.first_y] = 5
         kinds[self.first_y :] = 6
+        kinds[self.join] = 7
+        kinds[self.end_join] = 8
         kinds[EOS] = 2
         kinds[BOS] = 1
         self.kinds = kinds
 
     def features(self):
-        table = np.zeros((self.vocab, 7 + 16), dtype=np.float32)
+        table = np.zeros((self.vocab, 9 + 16), dtype=np.float32)
         table[np.arange(self.vocab), self.kinds] = 1.0
         values = np.arange(self.coords) / self.size
-        table[self.first_x : self.first_y, 7:] = fourier(values)
-        table[self.first_y :, 7:] = fourier(values)
+        table[self.first_x : self.first_y, 9:] = fourier(values)
+        table[self.first_y :, 9:] = fourier(values)
         return torch.from_numpy(table)
 
     def quantise(self, points):
@@ -52,12 +57,17 @@ class StreetTokens:
 
     def encode(self, lines, max_len=None):
         tokens = [BOS]
-        for class_id, points in lines:
-            points = self.quantise(points)
+        for line in lines:
+            class_id, points = line[0], self.quantise(line[1])
+            start_join, end_join = line[2] if len(line) > 2 else (False, False)
             if len(points) < 2:
                 continue
             piece = [self.first_class + int(class_id)]
-            for x, y in points:
+            if start_join:
+                piece.append(self.join)
+            for index, (x, y) in enumerate(points):
+                if end_join and index == len(points) - 1:
+                    piece.append(self.end_join)
                 piece += [self.first_x + int(x), self.first_y + int(y)]
             piece.append(self.end)
             if max_len is not None and len(tokens) + len(piece) + 1 > max_len:
@@ -67,15 +77,21 @@ class StreetTokens:
         return tokens
 
     def decode(self, tokens):
+        # gives (class, points, (start joins, end joins)) for every finished line
         lines = []
         class_id = None
         points = []
         pending_x = None
+        joins = [False, False]
         for token in list(tokens):
             token = int(token)
             kind = self.kinds[token]
             if kind == 4:
-                class_id, points, pending_x = token - self.first_class, [], None
+                class_id, points, pending_x, joins = token - self.first_class, [], None, [False, False]
+            elif kind == 7:
+                joins[0] = True
+            elif kind == 8:
+                joins[1] = True
             elif kind == 5:
                 pending_x = token - self.first_x
             elif kind == 6 and pending_x is not None:
@@ -83,7 +99,7 @@ class StreetTokens:
                 pending_x = None
             elif kind == 3:
                 if class_id is not None and len(points) >= 2:
-                    lines.append((class_id, np.asarray(points, dtype=np.float32)))
+                    lines.append((class_id, np.asarray(points, dtype=np.float32), tuple(joins)))
                 class_id, points = None, []
             elif token == EOS:
                 break
@@ -95,7 +111,8 @@ class StreetGrammar:
     # every port gets a line that starts exactly there before any free lines.
     # with max_len set, a line is ended early if the ports still waiting would not fit.
     # sides: optional (batch, 4) bool, left bottom right top neighbour already generated.
-    # like in training, a line can only start or end within margin of those sides where a line comes in
+    # like in training, a free line can only start or end within margin of those sides where a line comes in.
+    # phases: 0 new line or eos, 1 first x (or join), 2 y, 3 after a point, 4 done, 5 x of the joined last point
     def __init__(self, tokens, max_points=48, max_lines=160, ports=None, reach=8, max_len=None, sides=None, margin=4):
         self.tokens = tokens
         self.max_points = max_points
@@ -106,7 +123,8 @@ class StreetGrammar:
         self.sides = sides
         self.margin = margin
         kinds = torch.from_numpy(tokens.kinds)
-        self.masks = {name: kinds == value for name, value in (("eos", 2), ("end", 3), ("class", 4), ("x", 5), ("y", 6))}
+        names = (("eos", 2), ("end", 3), ("class", 4), ("x", 5), ("y", 6), ("join", 7), ("end_join", 8))
+        self.masks = {name: kinds == value for name, value in names}
         self.masks["pad"] = torch.zeros(tokens.vocab, dtype=torch.bool)
         self.masks["pad"][PAD] = True
 
@@ -124,6 +142,8 @@ class StreetGrammar:
             "last": torch.zeros(batch, 2, dtype=torch.long, device=device),
             "length": torch.ones(batch, dtype=torch.long, device=device),
             "sides": self.sides.to(device) if self.sides is not None else torch.zeros(batch, 4, dtype=torch.bool, device=device),
+            "joined": torch.zeros(batch, dtype=torch.bool, device=device),
+            "closing": torch.zeros(batch, dtype=torch.bool, device=device),
         }
 
     def pending(self, state):
@@ -138,7 +158,9 @@ class StreetGrammar:
         open_line = (phase == 0)[:, None]
         result |= open_line & masks["eos"]
         result |= (open_line & (lines < self.max_lines)[:, None]) & masks["class"]
-        result |= (phase == 1)[:, None] & masks["x"]
+        joined, closing = state["joined"], state["closing"]
+        result |= ((phase == 1) | (phase == 5))[:, None] & masks["x"]
+        result |= ((phase == 1) & ~joined & (state["current"] < 0))[:, None] & masks["join"]
         result |= (phase == 2)[:, None] & masks["y"]
         sides, size, margin = state["sides"], self.tokens.size, self.margin
         edges = torch.zeros_like(result)
@@ -147,10 +169,10 @@ class StreetGrammar:
         edges[:, first_y : first_y + margin + 1] = sides[:, 1:2]
         edges[:, first_x + size - margin : first_x + size + 1] = sides[:, 2:3]
         edges[:, first_y + size - margin : first_y + size + 1] = sides[:, 3:4]
-        first_point = (points == 0) & (state["current"] < 0) & ((phase == 1) | (phase == 2))
+        first_point = (points == 0) & (state["current"] < 0) & ~joined & ((phase == 1) | (phase == 2))
         result &= ~(edges & first_point[:, None])
 
-        after_point = phase == 3
+        after_point = (phase == 3) & ~closing
         room = points < self.max_points
         if self.max_len is not None:
             # a waiting port needs class, two points and end (6), this line needs a point and end, then eos
@@ -167,8 +189,9 @@ class StreetGrammar:
         spots = state["ports"]
         at_port = (((spots[..., 1:] - last[:, None, :]).abs().max(dim=-1).values <= self.reach) & (spots[..., 0] >= 0)).any(dim=1)
         stuck = on_side & ~at_port & room
-        result |= (after_point & room)[:, None] & masks["x"]
+        result |= (after_point & room)[:, None] & (masks["x"] | masks["end_join"])
         result |= (after_point & (points >= 2) & ~stuck)[:, None] & masks["end"]
+        result |= ((phase == 3) & closing)[:, None] & masks["end"]
         result |= (phase == 4)[:, None] & masks["pad"]
 
         rows = torch.arange(batch, device=phase.device)
@@ -209,8 +232,13 @@ class StreetGrammar:
             distance = (state["ports"][..., 1:] - last[:, None, :]).abs().max(dim=-1).values
             used |= ended[:, None] & (distance <= self.reach) & (state["ports"][..., 0] >= 0)
 
-        phase = torch.where(kinds == 4, torch.ones_like(phase), phase)
-        points = torch.where(kinds == 4, torch.zeros_like(points), points)
+        new_line = kinds == 4
+        joined = (state["joined"] | (kinds == 7)) & ~new_line
+        closing = (state["closing"] | (kinds == 8)) & ~new_line & ~ended
+
+        phase = torch.where(new_line, torch.ones_like(phase), phase)
+        points = torch.where(new_line, torch.zeros_like(points), points)
+        phase = torch.where(kinds == 8, torch.full_like(phase, 5), phase)
         phase = torch.where(kinds == 5, torch.full_like(phase, 2), phase)
         points = torch.where(new_point, points + 1, points)
         phase = torch.where(new_point, torch.full_like(phase, 3), phase)
@@ -218,7 +246,19 @@ class StreetGrammar:
         phase = torch.where(ended, torch.zeros_like(phase), phase)
         phase = torch.where((kinds == 2) | finished, torch.full_like(phase, 4), phase)
         length = state["length"] + 1
-        return {**state, "phase": phase, "points": points, "lines": lines, "used": used, "current": current, "last_x": last_x, "last": last, "length": length}
+        return {
+            **state,
+            "phase": phase,
+            "points": points,
+            "lines": lines,
+            "used": used,
+            "current": current,
+            "last_x": last_x,
+            "last": last,
+            "length": length,
+            "joined": joined,
+            "closing": closing,
+        }
 
     def done(self, state):
         return state["phase"] == 4

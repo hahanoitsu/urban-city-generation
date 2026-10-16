@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from urban_layers.data import CELL, CHANNELS, LINE_CLASSES, MARGIN, TILE, boundary_side
+from urban_layers.data import CELL, CHANNELS, LINE_CLASSES, MARGIN, TILE, boundary_side, touch_lists
 from urban_layers.decoder import TokenDecoder, fourier
 from urban_layers.tokens import StreetGrammar, StreetTokens
 
@@ -93,9 +93,17 @@ def find_ports(lines, visible):
     return ports
 
 
-def order_lines(lines, visible, ports=None):
-    # lines that continue a port come first, in port order, so generation can force their start
+def rank(class_id):
+    mode, name, _level = LINE_CLASSES[class_id]
+    return PRIORITY.get(name, 3) if mode == "road" else 3
+
+
+def order_lines(lines, visible, ports=None, touches=None):
+    # lines that continue a port come first, in port order, so generation can force their start.
+    # then the network grows: the next line starts on one already drawn if it can, bigger roads first.
+    # an end that touches another line inside the tile is marked as a join
     ports = find_ports(lines, visible) if ports is None else ports
+    touches = touch_lists(lines) if touches is None else touches
     spots = np.asarray([(port[0], port[1]) for port in ports], dtype=np.float64).reshape(-1, 2)
 
     def port_index(point):
@@ -105,24 +113,49 @@ def order_lines(lines, visible, ports=None):
         index = int(np.argmin(distance))
         return index if distance[index] < 0.5 else None
 
-    ordered = []
-    for class_id, points in lines:
-        points = np.asarray(points, dtype=np.float32)
+    order = []
+    placed = set()
+    starts = []
+    for index, (_class_id, points) in enumerate(lines):
         first, last = port_index(points[0]), port_index(points[-1])
-        if first is None and last is None:
-            if (round(float(points[-1][1])), round(float(points[-1][0]))) < (round(float(points[0][1])), round(float(points[0][0]))):
-                points = points[::-1]
-            mode, name, _level = LINE_CLASSES[class_id]
-            rank = PRIORITY.get(name, 3) if mode == "road" else 3
-            key = (1, rank, round(float(points[0][1])), round(float(points[0][0])))
-        else:
-            if first is None or (last is not None and last < first):
-                points = points[::-1]
-                first = last
-            key = (0, first, 0, 0)
-        ordered.append((key, class_id, points))
-    ordered.sort(key=lambda item: item[0])
-    return [(item[1], item[2]) for item in ordered]
+        if first is not None or last is not None:
+            flip = first is None or (last is not None and last < first)
+            starts.append((last if flip else first, index, flip))
+    for _port, index, flip in sorted(starts):
+        order.append((index, flip, True))
+        placed.add(index)
+
+    while len(placed) < len(lines):
+        best = None
+        for index, (class_id, points) in enumerate(lines):
+            if index in placed:
+                continue
+            start_on = any(other in placed for other in touches[index][0])
+            end_on = any(other in placed for other in touches[index][1])
+            if start_on or end_on:
+                flip = not start_on
+            else:
+                flip = (round(float(points[-1][1])), round(float(points[-1][0]))) < (round(float(points[0][1])), round(float(points[0][0])))
+            start = points[-1] if flip else points[0]
+            key = (rank(class_id), 0 if start_on or end_on else 1, round(float(start[1])), round(float(start[0])))
+            if best is None or key < best[0]:
+                best = (key, index, flip)
+        _key, index, flip = best
+        order.append((index, flip, False))
+        placed.add(index)
+
+    result = []
+    for index, flip, from_port in order:
+        class_id, points = lines[index]
+        points = np.asarray(points, dtype=np.float32)
+        start_touch, end_touch = touches[index]
+        if flip:
+            points = points[::-1]
+            start_touch, end_touch = end_touch, start_touch
+        start_join = bool(start_touch) and not from_port and boundary_side(points[0]) < 0
+        end_join = bool(end_touch) and boundary_side(points[-1]) < 0
+        result.append((class_id, points, (start_join, end_join)))
+    return result
 
 
 def resample(points, spacing=16.0):
@@ -219,6 +252,10 @@ class StreetDataset(torch.utils.data.Dataset):
         self.max_len = max_len
         self.city_dropout = city_dropout
         self.tokens = StreetTokens()
+        # older data has no touch lists, work them out once here
+        for _city_index, tile in tiles:
+            if "touches" not in tile:
+                tile["touches"] = touch_lists(tile["targets"])
 
     def __len__(self):
         return len(self.tiles)
@@ -239,7 +276,7 @@ class StreetDataset(torch.utils.data.Dataset):
         if not self.augment or random.random() > self.city_dropout:
             city[city_index] = 1.0
         item = condition_arrays(crop, context, ports, city)
-        item["tokens"] = np.asarray(self.tokens.encode(order_lines(targets, visible, ports), self.max_len), dtype=np.int64)
+        item["tokens"] = np.asarray(self.tokens.encode(order_lines(targets, visible, ports, tile["touches"]), self.max_len), dtype=np.int64)
         return item
 
 
@@ -291,16 +328,19 @@ class StreetModel(nn.Module):
 
 
 def snap_to_ports(lines, ports, reach=8.0):
+    # lines are (class, points, joins), an end moved onto a port is attached so it is not a join any more
     if not ports:
         return lines
     targets = np.asarray([(x, y) for x, y, *_rest in ports], dtype=np.float32)
     result = []
-    for class_id, points in lines:
+    for class_id, points, joins in lines:
         points = np.asarray(points, dtype=np.float32).copy()
-        for end in (0, -1):
+        joins = list(joins)
+        for slot, end in ((0, 0), (1, -1)):
             distance = np.linalg.norm(targets - points[end], axis=1)
             nearest = int(np.argmin(distance))
             if distance[nearest] <= reach:
                 points[end] = targets[nearest]
-        result.append((class_id, points))
+                joins[slot] = False
+        result.append((class_id, points, tuple(joins)))
     return result

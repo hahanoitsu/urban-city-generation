@@ -238,6 +238,21 @@ def ring_boxes():
 RING = ring_boxes()
 
 
+def touch_lists(lines, reach=2.5):
+    # for both ends of every line, the other lines of the same mode that end touches
+    geometries = [LineString(np.asarray(item[1], dtype=np.float64)) for item in lines]
+    tree = STRtree(geometries)
+    modes = [LINE_CLASSES[item[0]][0] for item in lines]
+    result = []
+    for index, item in enumerate(lines):
+        ends = []
+        for point in (item[1][0], item[1][-1]):
+            found = tree.query(shapely.Point(float(point[0]), float(point[1])), predicate="dwithin", distance=reach)
+            ends.append(sorted(int(other) for other in found if other != index and modes[other] == modes[index]))
+        result.append(ends)
+    return result
+
+
 def street_tiles(lines, bounds, stride=TILE, minimum_length=40.0):
     minx, miny, maxx, maxy = bounds
     geometries = [geometry for _class_id, geometry, _width in lines]
@@ -282,6 +297,7 @@ def street_tiles(lines, bounds, stride=TILE, minimum_length=40.0):
                     "cell": (int(round((y0 - miny) / CELL)), int(round((x0 - minx) / CELL))),
                     "targets": targets,
                     "context": context,
+                    "touches": touch_lists(targets),
                 }
             )
     return tiles
