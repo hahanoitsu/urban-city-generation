@@ -18,6 +18,9 @@ def network_stats(city, seam=4.0):
     degrees = np.asarray([degree for _node, degree in graph.degree()]) if graph.number_of_nodes() else np.zeros(0)
     components = list(nx.connected_components(graph))
     largest = max((len(item) for item in components), default=0)
+    degree_of = dict(graph.degree())
+    # a piece that is just one line with two loose ends, floating on its own
+    lone = sum(1 for item in components if all(degree_of[node] <= 2 for node in item) and sum(degree_of[node] == 1 for node in item) == 2)
     width, height = city["size_m"]
     seams = 0
     for node, degree in graph.degree():
@@ -33,6 +36,7 @@ def network_stats(city, seam=4.0):
         "nodes": graph.number_of_nodes(),
         "edges": graph.number_of_edges(),
         "components": len(components),
+        "lone_lines": int(lone),
         "largest_component_share": largest / max(graph.number_of_nodes(), 1),
         "dead_ends_per_km": float((degrees == 1).sum() / max(length / 1000.0, 1e-6)),
         "junction_share": float((degrees >= 3).mean()) if len(degrees) else 0.0,
