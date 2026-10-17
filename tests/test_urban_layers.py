@@ -305,3 +305,15 @@ def test_land_use_keeps_the_planned_proportions():
     assert 0.15 < share < 0.35
     # and it sits where the plan has most of it
     assert np.mean([polygon.centroid.x for polygon in residential]) > 1024
+
+
+def test_buildings_need_a_road_nearby():
+    from urban_layers.city import reachable
+    from urban_layers.data import road_index
+
+    local = line_class("road", "local", "surface")
+    tree, _classes = road_index([(local, LineString([(0, 0), (500, 0)]), 0.0)])
+    near = {"footprint": [[100, 20], [110, 20], [110, 30], [100, 30]]}
+    far = {"footprint": [[100, 300], [110, 300], [110, 310], [100, 310]]}
+    assert reachable([near, far], tree) == [near]
+    assert reachable([near, far], None) == [near, far]
