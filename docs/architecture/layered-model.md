@@ -71,7 +71,7 @@ This is the layer that makes "from scratch" possible. Before, the context always
 
 ### 2. Water, green and land use
 
-Traced from the plan (`city.py`). The plan is upsampled to 16 m with a cubic spline first, so the edges are smooth curves and not the 128 m grid. Water is traced at the level that keeps the planned amount of water (`plan_polygons`). Land use comes from `landuse_regions`: every spot takes the use (residential, commercial, industrial, civic or green) with the biggest share in the plan there, and whatever no use covers is none. These regions decide the land use of the blocks, so the land use sliders act on the city directly.
+Traced from the plan (`city.py`). The plan is upsampled to 16 m with a cubic spline first, and the traced edges are rounded off with Chaikin corner cutting, so the shapes are smooth and not the 128 m grid. Water is traced at the level that keeps the planned amount of water (`plan_polygons`). Land use comes from `landuse_regions`: every spot takes the use (residential, commercial, industrial, civic or green) with the biggest weighted share in the plan there, and whatever no use covers is none. The weights are tuned so every use covers as much of the city as the plan asks for. A plain biggest share lets one use swallow the others (2 x green took residential from 18% to 3%). These regions decide the land use of the blocks, so the land use sliders act on the city directly.
 
 ### 3. Streets
 
@@ -266,6 +266,20 @@ Real Singapore has many pieces too. Bridges, tunnels and roads of unknown level 
 Two things were still wrong. The city looked blocky, because big areas with few roads became huge blocks that were cut into 384 m squares, and every square sampled its own land use. And buildings covered about half of what the plan asked for. On test city blocks the building model draws the right amount (1,420 boxes and 240,000 m2 against 1,421 and 236,000 real), but 38% were thrown away for sticking out of the block, because the model's aim is a few metres off. Real boxes almost never stick out.
 
 The fixes are the land use regions, the nudging and the building samples described above. None of them needs retraining. On the test city the built area went from 41% of the plan to 99%.
+
+## Third run on Singapore
+
+Same models, new generation code. Seed 1, planned against finished city (mean, and correlation over 128 m cells):
+
+| | plan | second run | third run |
+|---|---|---|---|
+| building coverage | 0.120 | 0.065 | 0.118 (0.65) |
+| green | 0.216 | 0.55 | 0.219 (0.87) |
+| water | 0.048 | 0.013 | 0.051 (0.88) |
+| residential | 0.181 | 0.196 | 0.179 (0.93) |
+| industrial | 0.175 | 0.091 | 0.132 (0.94) |
+
+All five cities hit their planned built area, `buildings=1.5` included (17.8% coverage, real Singapore is 17.5%). Land use follows smooth regions with no squares. Two things were left, both fixed after this run: the plain biggest share made `green=2` shrink residential to 3%, which the tuned weights fix, and boxes from neighbouring parts of one big block could overlap (33 to 142 pairs a city, real windows have 4 to 33), so a last pass drops a box that overlaps an earlier one by more than 20%.
 
 ## What is not done yet
 
