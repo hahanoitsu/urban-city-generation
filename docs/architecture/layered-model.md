@@ -119,6 +119,8 @@ The model puts some boxes a few metres off. A box that is less than 70% inside i
 
 Every block part gets 4 samples (`--building-samples`), and the one whose built area is closest to the planned coverage there is kept. One scale for the whole city is chosen so the total built area matches the plan, which is what makes the buildings slider work.
 
+A building more than 120 m from any road is dropped before the samples are compared, because the plan can ask for buildings where the street layer drew no roads. The planned coverage then moves to blocks that have access. After the last overlap pass, if the built area came out short, the samples are picked once more with the loss added back.
+
 ## Multiple cities
 
 Prepare each city with the existing pipeline (`python -m urban_dataset prepare-city --config configs/cities/<city>.yaml`), then:
@@ -280,6 +282,10 @@ Same models, new generation code. Seed 1, planned against finished city (mean, a
 | industrial | 0.175 | 0.091 | 0.132 (0.94) |
 
 All five cities hit their planned built area, `buildings=1.5` included (17.8% coverage, real Singapore is 17.5%). Land use follows smooth regions with no squares. Two things were left, both fixed after this run: the plain biggest share made `green=2` shrink residential to 3%, which the tuned weights fix, and boxes from neighbouring parts of one big block could overlap (33 to 142 pairs a city, real windows have 4 to 33), so a last pass drops a box that overlaps an earlier one by more than 20%.
+
+## Fourth run on Singapore
+
+With the tuned land use weights, the smoothing and the overlap pass, every city has 0 overlapping building pairs and land use within about 10% of the plan for every use (seed 1: residential 0.172 against 0.181, commercial 0.021 against 0.024, industrial 0.164 against 0.175, civic 0.027 against 0.030), and `green=2` keeps its residential (0.176 against 0.179). Built area came out at 94 to 97% of the plan, because the overlap pass runs after the picking, which the top up now fixes. Some buildings had no road near them (5% of the built area more than 120 m from a road in seed 1, 15% with `green=2`), which the access rule now fixes. Isolated short road stubs are rare (about 20 lines under 60 m, 0.5 km of 170 km), so the street layer is left as it is.
 
 ## What is not done yet
 
