@@ -96,13 +96,31 @@ def plan_field(plan, channel, upsample=8):
     return np.clip(ndimage.zoom(plan[CHANNELS.index(channel)], upsample, order=3), 0.0, None)
 
 
+def smooth(polygon, rounds=2):
+    # chaikin corner cutting, takes the stair steps of the raster out of traced edges
+    def ring(coords):
+        points = np.asarray(coords, dtype=np.float64)[:-1]
+        if len(points) < 3:
+            return np.asarray(coords, dtype=np.float64)
+        for _round in range(rounds):
+            following = np.roll(points, -1, axis=0)
+            points = np.stack([0.75 * points + 0.25 * following, 0.25 * points + 0.75 * following], axis=1).reshape(-1, 2)
+        return np.vstack([points, points[:1]])
+
+    return Polygon(ring(polygon.exterior.coords), [ring(inner.coords) for inner in polygon.interiors]).buffer(0)
+
+
 def trace(mask, size, minimum_area):
     polygons = []
     for geometry, _value in features.shapes(mask.astype(np.uint8), mask=mask, transform=Affine(size, 0, 0, 0, size, 0)):
         polygon = shape(geometry).buffer(size).buffer(-size).simplify(size / 2)
         for part in getattr(polygon, "geoms", [polygon]):
-            if part.geom_type == "Polygon" and part.area >= minimum_area:
-                polygons.append(part)
+            if part.geom_type != "Polygon":
+                continue
+            part = smooth(part)
+            for piece in getattr(part, "geoms", [part]):
+                if piece.geom_type == "Polygon" and piece.area >= minimum_area:
+                    polygons.append(piece)
     return polygons
 
 
@@ -116,11 +134,25 @@ def plan_polygons(plan, channel, upsample=8, minimum_area=1500.0):
     return trace(field > threshold, CELL / upsample, minimum_area)
 
 
-def landuse_regions(plan, upsample=8, minimum_area=1500.0):
-    # every spot takes the land use with the biggest share in the plan there, whatever is left over is none
+def landuse_regions(plan, upsample=8, minimum_area=1500.0, rounds=60):
+    # every spot takes the land use with the biggest weighted share in the plan there, whatever is left
+    # over is none. the weights are tuned so each use covers as much of the city as the plan asks for,
+    # a plain biggest share lets one use swallow the others (2 x green wiped out residential)
     shares = np.stack([plan_field(plan, name, upsample) for name in REGION_CLASSES])
-    none = np.clip(1.0 - shares.sum(axis=0), 0.0, None)
-    labels = np.concatenate([none[None], shares]).argmax(axis=0)
+    scores = np.concatenate([np.clip(1.0 - shares.sum(axis=0), 0.0, None)[None], shares])
+    wanted = np.array([plan[CHANNELS.index(name)].mean() for name in REGION_CLASSES])
+    wanted = np.concatenate([[max(1.0 - wanted.sum(), 0.0)], wanted])
+    weights = np.ones(len(wanted))
+    best = (np.inf, weights)
+    for _round in range(rounds):
+        got = np.bincount((weights[:, None, None] * scores).argmax(axis=0).ravel(), minlength=len(wanted)) / scores[0].size
+        error = float(np.abs(got - wanted).sum())
+        if error < best[0]:
+            best = (error, weights.copy())
+        # only the ratios between the weights matter, so keep the biggest at 1
+        weights = weights * np.sqrt((wanted + 1e-4) / (got + 1e-4))
+        weights = np.maximum(weights / weights.max(), 1e-6)
+    labels = (best[1][:, None, None] * scores).argmax(axis=0)
     regions = []
     for name in REGION_CLASSES:
         index = LANDUSE.index(name)
@@ -134,9 +166,13 @@ def landuse_blocks(lines, water, regions, edge):
     tree = STRtree([polygon for polygon, _use in regions]) if regions else None
     pieces = []
     for parcel in parcels:
-        hits = tree.query(parcel, predicate="intersects") if tree is not None else []
-        cut = [(parcel.intersection(regions[index][0]), regions[index][1]) for index in hits]
-        rest = parcel.difference(unary_union([regions[index][0] for index in hits])) if len(hits) else parcel
+        hits = sorted(tree.query(parcel, predicate="intersects")) if tree is not None else []
+        # cut from what is left so smoothed regions that overlap a little cannot give the same ground twice
+        rest = parcel
+        cut = []
+        for index in hits:
+            cut.append((rest.intersection(regions[index][0]), regions[index][1]))
+            rest = rest.difference(regions[index][0])
         for geometry, use in cut + [(rest, 0)]:
             for part in getattr(geometry, "geoms", [geometry]):
                 if part.geom_type == "Polygon" and part.area >= 150.0:
@@ -381,14 +417,26 @@ def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, ge
     goal = float(plan[CHANNELS.index("coverage")].mean()) * size[0] * size[1]
     picks = pick_samples(areas, targets, goal)
     blocks = [{"id": block_id, "landuse": LANDUSE[use], "polygon": np.asarray(polygon.exterior.coords).tolist()} for block_id, (polygon, use) in enumerate(pieces)]
+    chosen = [(block_id, item) for (block_id, _part, _use), option, pick in zip(parts, options, picks) for item in option[pick]]
+    # parts of one block are placed apart, so drop boxes that overlap one from the next part
+    shapes = [Polygon(item["footprint"]) for _block_id, item in chosen]
+    tree = STRtree(shapes) if shapes else None
+    keep = np.ones(len(shapes), dtype=bool)
+    for index, building in enumerate(shapes):
+        for other in tree.query(building, predicate="intersects"):
+            if other < index and keep[other] and building.intersection(shapes[other]).area > 0.2 * min(building.area, shapes[other].area):
+                keep[index] = False
+                break
     buildings = []
-    for (block_id, _part, _use), option, pick in zip(parts, options, picks):
-        for item in option[pick]:
-            item["block"] = block_id
-            item["id"] = len(buildings)
-            item["kind"] = BUILDING_KINDS[item["kind"]] if item["kind"] < len(BUILDING_KINDS) else "generic"
-            buildings.append(item)
-    log(f"buildings: {len(buildings)} in {len(blocks)} blocks, built area {sum(values[pick] for values, pick in zip(areas, picks)) / max(goal, 1.0):.2f} of the plan")
+    for (block_id, item), kept in zip(chosen, keep):
+        if not kept:
+            continue
+        item["block"] = block_id
+        item["id"] = len(buildings)
+        item["kind"] = BUILDING_KINDS[item["kind"]] if item["kind"] < len(BUILDING_KINDS) else "generic"
+        buildings.append(item)
+    built = sum(shape.area for shape, kept in zip(shapes, keep) if kept)
+    log(f"buildings: {len(buildings)} in {len(blocks)} blocks, built area {built / max(goal, 1.0):.2f} of the plan")
     return blocks, buildings
 
 
