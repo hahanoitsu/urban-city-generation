@@ -391,6 +391,28 @@ def pick_samples(areas, targets, goal, rounds=40):
     return chosen((low + high) / 2.0)
 
 
+def reachable(placed, road_tree, reach=120.0):
+    # a building needs a road, the plan can ask for buildings where the street layer drew none
+    if road_tree is None or not placed:
+        return placed
+    centres = shapely.points(np.asarray([np.mean(item["footprint"], axis=0) for item in placed]))
+    near = set(road_tree.query_nearest(centres, max_distance=reach, all_matches=False)[0].tolist())
+    return [item for index, item in enumerate(placed) if index in near]
+
+
+def drop_overlaps(chosen):
+    # parts of one block are placed apart, so drop boxes that overlap one from the next part
+    shapes = [Polygon(item["footprint"]) for _block_id, item in chosen]
+    tree = STRtree(shapes) if shapes else None
+    keep = np.ones(len(shapes), dtype=bool)
+    for index, building in enumerate(shapes):
+        for other in tree.query(building, predicate="intersects"):
+            if other < index and keep[other] and building.intersection(shapes[other]).area > 0.2 * min(building.area, shapes[other].area):
+                keep[index] = False
+                break
+    return keep, sum(shape.area for shape, kept in zip(shapes, keep) if kept)
+
+
 def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, generator=None, temperature=1.0, top_p=0.95, samples=4, batch_size=64, device="cpu", log=print):
     # pieces are (polygon, land use). big pieces are split into parts the model can take, the split
     # stays inside here so the output blocks are the whole pieces
@@ -409,7 +431,7 @@ def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, ge
             results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, landuse=uses)
             for index, (_landuse, items_out) in zip(chunk, results):
                 placed = place_buildings(parts[index][1], records[index]["centre"], records[index]["angle"], items_out)
-                options[index].append(placed)
+                options[index].append(reachable(placed, road_tree))
         log(f"buildings: parts {chunk[-1] + 1}/{len(parts)}")
 
     areas = [np.array([sum(Polygon(item["footprint"]).area for item in placed) for placed in option]) for option in options]
@@ -418,15 +440,12 @@ def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, ge
     picks = pick_samples(areas, targets, goal)
     blocks = [{"id": block_id, "landuse": LANDUSE[use], "polygon": np.asarray(polygon.exterior.coords).tolist()} for block_id, (polygon, use) in enumerate(pieces)]
     chosen = [(block_id, item) for (block_id, _part, _use), option, pick in zip(parts, options, picks) for item in option[pick]]
-    # parts of one block are placed apart, so drop boxes that overlap one from the next part
-    shapes = [Polygon(item["footprint"]) for _block_id, item in chosen]
-    tree = STRtree(shapes) if shapes else None
-    keep = np.ones(len(shapes), dtype=bool)
-    for index, building in enumerate(shapes):
-        for other in tree.query(building, predicate="intersects"):
-            if other < index and keep[other] and building.intersection(shapes[other]).area > 0.2 * min(building.area, shapes[other].area):
-                keep[index] = False
-                break
+    keep, built = drop_overlaps(chosen)
+    if 0.0 < built < 0.98 * goal:
+        # the overlap pass took some area away, ask for that much more and pick again
+        picks = pick_samples(areas, targets, goal * goal / built)
+        chosen = [(block_id, item) for (block_id, _part, _use), option, pick in zip(parts, options, picks) for item in option[pick]]
+        keep, built = drop_overlaps(chosen)
     buildings = []
     for (block_id, item), kept in zip(chosen, keep):
         if not kept:
@@ -435,7 +454,6 @@ def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, ge
         item["id"] = len(buildings)
         item["kind"] = BUILDING_KINDS[item["kind"]] if item["kind"] < len(BUILDING_KINDS) else "generic"
         buildings.append(item)
-    built = sum(shape.area for shape, kept in zip(shapes, keep) if kept)
     log(f"buildings: {len(buildings)} in {len(blocks)} blocks, built area {built / max(goal, 1.0):.2f} of the plan")
     return blocks, buildings
 
