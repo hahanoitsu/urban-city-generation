@@ -257,10 +257,13 @@ def test_land_use_follows_the_plan_not_a_grid():
     pieces = landuse_blocks(lines, None, regions, box(0, 0, 2048, 2048).exterior)
     middle = box(100, 100, 1900, 1900)
     big = [(polygon, LANDUSE[use]) for polygon, use in pieces if polygon.intersection(middle).area > 100000]
-    assert {use for _polygon, use in big} == {"residential", "industrial"}
+    # the plan leaves 10% of every cell without a use, so a strip of none is right too
+    assert {"residential", "industrial"} <= {use for _polygon, use in big}
+    used = sum(polygon.intersection(middle).area for polygon, use in big if use != "none")
+    assert used > 0.8 * middle.area
     for polygon, use in big:
-        x = polygon.centroid.x
-        assert (x < 1024) == (use == "residential")
+        if use != "none":
+            assert (polygon.centroid.x < 1024) == (use == "residential")
 
 
 def test_building_land_use_can_be_forced():
@@ -285,3 +288,20 @@ def test_pick_samples_matches_the_planned_total():
     assert sum(values[pick] for values, pick in zip(areas, picks)) == 620.0
     assert pick_samples(areas, targets, goal=0.0) == [0, 0, 0]
     assert pick_samples(areas, targets, goal=1e9) == [2, 2, 2]
+
+
+def test_land_use_keeps_the_planned_proportions():
+    from urban_layers.city import landuse_regions
+    from urban_layers.data import LANDUSE
+
+    plan = np.zeros((len(CHANNELS), 16, 16), dtype=np.float32)
+    plan[CHANNELS.index("green")] = 0.5
+    # residential is always below green, a plain biggest share would never pick it
+    plan[CHANNELS.index("residential")] = np.linspace(0.1, 0.4, 16)[None, :]
+    regions = landuse_regions(plan)
+    total = 16 * 128.0 * 16 * 128.0
+    residential = [polygon for polygon, use in regions if LANDUSE[use] == "residential"]
+    share = sum(polygon.area for polygon in residential) / total
+    assert 0.15 < share < 0.35
+    # and it sits where the plan has most of it
+    assert np.mean([polygon.centroid.x for polygon in residential]) > 1024
