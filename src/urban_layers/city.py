@@ -227,11 +227,16 @@ def to_edge(points, reach=4.0, visible=(), joins=(False, False)):
     return points
 
 
-def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print):
+def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False):
     rows = math.ceil(plan.shape[1] * CELL / TILE)
     columns = math.ceil(plan.shape[2] * CELL / TILE)
     scale = np.asarray(checkpoint["scale"], dtype=np.float32)
     per_tile = int(round(TILE / CELL))
+    classes = None
+    if not rail:
+        plan = plan.copy()
+        plan[CHANNELS.index("rail")] = 0.0
+        classes = [mode == "road" for mode, _name, _level in LINE_CLASSES]
     done = {}
     for diagonal in range(rows + columns - 1):
         batch = [(row, diagonal - row) for row in range(rows) if 0 <= diagonal - row < columns]
@@ -244,7 +249,7 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
             meta.append((ports, visible))
         arrays = {name: value.to(device) for name, value in collate(items).items()}
         arrays["sides"] = torch.tensor([[SIDES[side] in visible for side in range(4)] for _ports, visible in meta], dtype=torch.bool, device=device)
-        results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator)
+        results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, classes=classes)
         for (row, column), lines, (ports, visible) in zip(batch, results, meta):
             done[(row, column)] = [(class_id, to_edge(points, visible=visible, joins=joins), joins) for class_id, points, joins in snap_to_ports(lines, ports)]
         log(f"streets: diagonal {diagonal + 1}/{rows + columns - 1}, tiles {len(done)}/{rows * columns}")
@@ -391,24 +396,69 @@ def reachable(placed, road_tree, reach=120.0):
     return [item for index, item in enumerate(placed) if index in near]
 
 
-def drop_overlaps(chosen):
+def drop_overlaps(chosen, tolerance=1.0):
     shapes = [Polygon(item["footprint"]) for _block_id, item in chosen]
     tree = STRtree(shapes) if shapes else None
     keep = np.ones(len(shapes), dtype=bool)
     for index, building in enumerate(shapes):
         for other in tree.query(building, predicate="intersects"):
-            if other < index and keep[other] and building.intersection(shapes[other]).area > 0.2 * min(building.area, shapes[other].area):
+            if other < index and keep[other] and building.intersection(shapes[other]).area > tolerance:
                 keep[index] = False
                 break
     return keep, sum(shape.area for shape, kept in zip(shapes, keep) if kept)
 
 
-def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, generator=None, temperature=1.0, top_p=0.95, samples=4, batch_size=64, device="cpu", log=print):
+def keep_out(lines, size, water=None, setback=True):
+    shapes = []
+    for class_id, points in lines:
+        mode, name, level = LINE_CLASSES[class_id]
+        if level == "underground":
+            continue
+        reach = WIDTHS.get(name, 6.0) / 2.0 if mode == "road" else RAIL_WIDTH / 2.0
+        if setback:
+            reach += SETBACKS.get(name, 3.0) if mode == "road" else 4.0
+        shapes.append(LineString(points).buffer(reach))
+    if water is not None and not water.is_empty:
+        shapes += list(getattr(water, "geoms", [water]))
+    shapes.append(box(-500.0, -500.0, size[0] + 500.0, size[1] + 500.0).difference(box(0.0, 0.0, size[0], size[1])))
+    return shapes
+
+
+def road_segments(lines):
+    pieces = []
+    for class_id, points in lines:
+        mode, _name, level = LINE_CLASSES[class_id]
+        points = np.asarray(points, dtype=np.float64)
+        if mode == "road" and level != "underground" and len(points) >= 2:
+            pieces.append(np.stack([points[:-1], points[1:]], axis=1))
+    return np.concatenate(pieces) if pieces else np.zeros((0, 2, 2))
+
+
+def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, generator=None, temperature=1.0, top_p=0.95, samples=4, batch_size=64, device="cpu", log=print, water=None):
     scale = np.asarray(checkpoint["scale"], dtype=np.float32)
     road_tree, road_classes = road_index([(class_id, LineString(points), 0.0) for class_id, points in lines])
     bounds = (0.0, 0.0, size[0], size[1])
     parts = [(block_id, part, use) for block_id, (polygon, use) in enumerate(pieces) for part in split_block(polygon)]
     records = [block_record(part, plan, bounds, road_tree, road_classes) for _block_id, part, _use in parts]
+    covers = [planned_cover(plan, part) for _block_id, part, _use in parts]
+    grounds = [keep_out(lines, size, water, setback) for setback in (True, False)]
+    trees = [STRtree(shapes) for shapes in grounds]
+    segments = road_segments(lines)
+    segment_tree = STRtree(shapely.linestrings(segments)) if len(segments) else None
+
+    def surroundings(part):
+        near_bounds = part.buffer(20.0).bounds
+        blocked = []
+        for shapes, tree in zip(grounds, trees):
+            near = tree.query(box(*near_bounds))
+            ground = unary_union([shapely.clip_by_rect(shapes[index], *near_bounds) for index in near]) if len(near) else None
+            if ground is not None and not ground.is_empty:
+                shapely.prepare(ground)
+                blocked.append(ground)
+        roads = segments[segment_tree.query(part.buffer(30.0))] if segment_tree is not None else None
+        return blocked, roads
+
+    around = [surroundings(part) for _block_id, part, _use in parts]
     options = [[] for _part in parts]
     for start in range(0, len(parts), batch_size):
         chunk = list(range(start, min(start + batch_size, len(parts))))
@@ -418,12 +468,13 @@ def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, ge
         for _sample in range(samples):
             results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, landuse=uses)
             for index, (_landuse, items_out) in zip(chunk, results):
-                placed = place_buildings(parts[index][1], records[index]["centre"], records[index]["angle"], items_out)
-                options[index].append(reachable(placed, road_tree))
+                blocked, roads = around[index]
+                placed = place_buildings(parts[index][1], records[index]["centre"], records[index]["angle"], items_out, blocked=blocked, roads=roads)
+                options[index].append(reachable(placed, road_tree, 120.0 if covers[index] >= 0.06 else 60.0))
         log(f"buildings: parts {chunk[-1] + 1}/{len(parts)}")
 
     areas = [np.array([sum(Polygon(item["footprint"]).area for item in placed) for placed in option]) for option in options]
-    targets = np.array([planned_cover(plan, part) * part.area for _block_id, part, _use in parts])
+    targets = np.array([cover * part.area for cover, (_block_id, part, _use) in zip(covers, parts)])
     goal = float(plan[CHANNELS.index("coverage")].mean()) * size[0] * size[1]
     picks = pick_samples(areas, targets, goal)
     blocks = [{"id": block_id, "landuse": LANDUSE[use], "polygon": np.asarray(polygon.exterior.coords).tolist()} for block_id, (polygon, use) in enumerate(pieces)]
@@ -491,7 +542,16 @@ def generate_city(
     log(f"plan: {height} x {width} cells")
     water = plan_polygons(plan, "water")
     water_union = unary_union(water) if water else None
-    regions = landuse_regions(plan)
+    labels = landuse_labels(plan)
+    regions = landuse_regions(plan, labels=labels)
+    natural = []
+    for polygon in natural_cover(plan, labels):
+        rest = polygon.difference(water_union) if water_union is not None else polygon
+        natural += [part for part in getattr(rest, "geoms", [rest]) if part.geom_type == "Polygon" and part.area >= 1500.0]
+    corridors = rail_corridors(plan, size)
+    runs = rail_runs(corridors, plan)
+    stations = rail_stations(corridors, plan)
+    log(f"rail: {len(corridors)} lines, {sum(LineString(points).length for points in corridors) / 1000.0:.1f} km, {len(stations)} stations")
 
     street_weights = style_weights(street_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in street_checkpoint["cities"]})
     lines = generate_streets(street_model, street_checkpoint, plan, street_weights, generator, temperature, top_p, device, log)
@@ -506,7 +566,8 @@ def generate_city(
         for part in getattr(piece, "geoms", [piece]):
             if part.geom_type == "LineString" and part.length > 2.0:
                 clipped.append((class_id, np.asarray(part.coords), (False, False)))
-    lines = snap_lines(clipped)
+    streets = snap_lines(clipped)
+    lines = streets + [(class_id, points) for class_id, points, _number in runs]
     roads_frame, rail_frame, graph = lines_to_layers(lines, *size)
     log(f"network: {len(graph['nodes'])} nodes, {len(graph['edges'])} edges")
 
@@ -514,7 +575,7 @@ def generate_city(
     green = [polygon for polygon, use in pieces if LANDUSE[use] == "green"]
     building_weights = style_weights(building_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in building_checkpoint["cities"]})
     blocks, buildings = generate_buildings(
-        building_model, building_checkpoint, pieces, plan, size, lines, building_weights, generator, temperature, top_p, samples=building_samples, device=device, log=log
+        building_model, building_checkpoint, pieces, plan, size, lines, building_weights, generator, temperature, top_p, samples=building_samples, device=device, log=log, water=water_union
     )
 
     city = {
@@ -541,9 +602,11 @@ def generate_city(
         "blocks": blocks,
         "buildings": buildings,
         "water": [{"polygon": np.asarray(polygon.exterior.coords).tolist()} for polygon in water],
-        "green": [{"polygon": np.asarray(polygon.exterior.coords).tolist()} for polygon in green],
+        "green": [{"polygon": np.asarray(polygon.exterior.coords).tolist(), "kind": "park"} for polygon in green]
+        + [{"polygon": np.asarray(polygon.exterior.coords).tolist(), "kind": "natural"} for polygon in natural],
+        "stations": stations,
     }
-    for index, (class_id, points) in enumerate(lines):
+    for index, (class_id, points) in enumerate(streets):
         mode, name, level = LINE_CLASSES[class_id]
         record = {"id": index, "class": name, "vertical": level, "points": np.asarray(points).tolist()}
         if mode == "road":
@@ -551,6 +614,10 @@ def generate_city(
             city["roads"].append(record)
         else:
             city["rail"].append(record)
+    for class_id, points, number in runs:
+        _mode, name, level = LINE_CLASSES[class_id]
+        record = {"id": len(city["roads"]) + len(city["rail"]), "class": name, "vertical": level, "points": np.asarray(points).tolist()}
+        city["rail"].append({**record, "line": number, "tracks": TRACKS, "width_m": RAIL_WIDTH})
     return city, plan
 
 
@@ -561,7 +628,7 @@ def city_layers(city):
         return gpd.GeoDataFrame(rows, geometry="geometry", crs=crs) if rows else gpd.GeoDataFrame({"geometry": []}, geometry="geometry", crs=crs)
 
     roads = frame([{"road_class": road["class"], "vertical_mode": road["vertical"], "estimated_width_m": road.get("width_m", 6.0), "geometry": LineString(road["points"])} for road in city["roads"]])
-    rail = frame([{"railway": item["class"], "vertical_mode": item["vertical"], "geometry": LineString(item["points"])} for item in city["rail"]])
+    rail = frame([{"railway": item["class"], "vertical_mode": item["vertical"], "geometry": LineString(item["points"])} for item in city["rail"] for _track in range(item.get("tracks", 1))])
     buildings = frame([{"estimated_height_m": item["height_m"], "building": item["kind"], "geometry": shape({"type": "Polygon", "coordinates": [item["footprint"]]})} for item in city["buildings"]])
     landuse_rows = []
     for block in city["blocks"]:
@@ -570,7 +637,7 @@ def city_layers(city):
             landuse_rows.append({"landuse_class": name, "geometry": shape({"type": "Polygon", "coordinates": [block["polygon"]]})})
     landuse = frame(landuse_rows)
     water = frame([{"geometry": shape({"type": "Polygon", "coordinates": [item["polygon"]]})} for item in city["water"]])
-    green = frame([{"geometry": shape({"type": "Polygon", "coordinates": [item["polygon"]]})} for item in city["green"]])
+    green = frame([{"geometry": shape({"type": "Polygon", "coordinates": [item["polygon"]]})} for item in city["green"] if item.get("kind") != "natural"])
     return CityLayers(roads=roads, buildings=buildings, landuse=landuse, landuse_known=landuse, water=water, green=green, rail=rail)
 
 
@@ -598,7 +665,7 @@ def export_obj(city, path):
         for item in items:
             points = np.asarray(item["points"], dtype=np.float64)
             width = float(item.get("width_m", 4.0))
-            level = 6.0 if item["vertical"] == "elevated" else 0.05
+            level = 6.0 if item["vertical"] == "elevated" else -12.0 if item["vertical"] == "underground" else 0.05
             for index in range(len(points) - 1):
                 a, b = points[index], points[index + 1]
                 step = b - a

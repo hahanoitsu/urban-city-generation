@@ -14,6 +14,7 @@ LANDUSE_COLOURS = {
     "green": (196, 224, 180),
 }
 ROAD_WIDTH = {"major": 4, "secondary": 3, "local": 2}
+NATURAL = (208, 226, 194)
 
 
 def plan_image(plan, scale=6):
@@ -39,7 +40,7 @@ def city_image(city, size=1024):
     for block in city.get("blocks", []):
         draw.polygon(points(block["polygon"]), fill=LANDUSE_COLOURS[block.get("landuse", "none")])
     for area in city.get("green", []):
-        draw.polygon(points(area["polygon"]), fill=LANDUSE_COLOURS["green"])
+        draw.polygon(points(area["polygon"]), fill=NATURAL if area.get("kind") == "natural" else LANDUSE_COLOURS["green"])
     for area in city.get("water", []):
         draw.polygon(points(area["polygon"]), fill=(160, 200, 230))
     for building in city.get("buildings", []):
@@ -50,7 +51,10 @@ def city_image(city, size=1024):
         draw.line(points(road["points"]), fill=colour, width=ROAD_WIDTH.get(road["class"], 2))
     for rail in city.get("rail", []):
         colour = (40, 120, 190) if rail["vertical"] != "underground" else (120, 160, 200)
-        draw.line(points(rail["points"]), fill=colour, width=3)
+        draw.line(points(rail["points"]), fill=colour, width=3 if rail.get("tracks", 1) == 1 else 4)
+    for station in city.get("stations", []):
+        (x, y), = points([station["xy"]])
+        draw.rectangle([x - 4, y - 4, x + 4, y + 4], fill=(255, 255, 255), outline=(30, 60, 120), width=2)
     return image
 
 

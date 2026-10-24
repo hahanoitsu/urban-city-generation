@@ -61,7 +61,7 @@ def main():
     report = audit_city(city, plan)
     report["seconds"] = time.time() - started
     (args.output / "audit.json").write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps({"network": report["network"], "buildings": {k: v for k, v in report["buildings"].items() if k != "landuse"}}, indent=2))
+    print(json.dumps({"network": report["network"], "buildings": {k: v for k, v in report["buildings"].items() if k != "landuse"}, "rail": report["rail"], "cover": report["cover"]}, indent=2))
 
 
 if __name__ == "__main__":

@@ -107,7 +107,7 @@ class BuildingModel(torch.nn.Module):
         return [self.tokens.decode(row.tolist()) for row in tokens.cpu()]
 
 
-def face_road(corners, roads, reach=30.0, limit=25.0):
+def face_road(corners, roads, reach=60.0, limit=45.0):
     if roads is None or not len(roads):
         return corners
     middle = corners.mean(axis=0)
@@ -147,21 +147,24 @@ def way_out(corners, block_polygon, blocked, shapes, boxes, inside, limit, toler
     found = hits(shape, blocked, shapes, boxes, tolerance)
     if not found:
         return corners
-    away = np.subtract(shape.centroid.coords[0], unary_union(found).centroid.coords[0])
-    if np.linalg.norm(away) < 1e-6:
-        return None
-    away = away / np.linalg.norm(away)
-    for step in np.arange(1.0, limit + 0.5):
-        moved = corners + away * step
-        shape = Polygon(moved)
-        if shape.intersection(block_polygon).area < inside * shape.area:
-            return None
-        if not hits(shape, blocked, shapes, boxes, tolerance):
-            return moved
+    along, across = corners[1] - corners[0], corners[3] - corners[0]
+    limit = max(limit, 0.4 * max(np.linalg.norm(along), np.linalg.norm(across)))
+    steps = np.linspace(limit / 12.0, limit, 12)
+    for direction in (np.subtract(shape.centroid.coords[0], unary_union(found).centroid.coords[0]), along, -along, across, -across):
+        if np.linalg.norm(direction) < 1e-6:
+            continue
+        direction = direction / np.linalg.norm(direction)
+        for step in steps:
+            moved = corners + direction * step
+            shape = Polygon(moved)
+            if shape.intersection(block_polygon).area < inside * shape.area:
+                break
+            if not hits(shape, blocked, shapes, boxes, tolerance):
+                return moved
     return None
 
 
-def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0, blocked=None, roads=None, push=12.0, tolerance=1.0):
+def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0, blocked=(), roads=None, push=12.0, tolerance=1.0):
     placed = []
     shapes = []
     boxes = np.zeros((0, 4))
@@ -183,9 +186,13 @@ def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0,
             if shape.intersection(block_polygon).area < inside * shape.area:
                 continue
         corners = face_road(corners, roads)
-        for size in (1.0, 0.8):
-            middle = corners.mean(axis=0)
-            moved = way_out(middle + (corners - middle) * size, block_polygon, blocked, shapes, boxes, inside, push, tolerance)
+        moved = None
+        middle = corners.mean(axis=0)
+        for ground in blocked or (None,):
+            for size in (1.0, 0.8, 0.6):
+                moved = way_out(middle + (corners - middle) * size, block_polygon, ground, shapes, boxes, inside, push, tolerance)
+                if moved is not None:
+                    break
             if moved is not None:
                 break
         if moved is None:

@@ -162,8 +162,9 @@ def main():
     keys = ["components", "lone_lines", "largest_component_share", "dead_ends_per_km", "junction_share", "broken_tile_seams", "road_km_per_km2"]
     summary = {"windows": len(reports), "size_m": args.size}
     summary["network_median"] = {key: float(np.median([report["network"][key] for report in reports])) for key in keys}
-    building_keys = ["buildings", "coverage", "median_height_m", "blocks"]
+    building_keys = ["buildings", "coverage", "median_height_m", "blocks", "any_overlap_pairs", "on_road_share", "facing_road_share"]
     summary["buildings_median"] = {key: float(np.median([report["buildings"][key] for report in reports])) for key in building_keys}
+    summary["rail_median"] = {key: float(np.median([report["rail"][key] for report in reports])) for key in ("track_km", "pieces", "loose_ends")}
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
 
