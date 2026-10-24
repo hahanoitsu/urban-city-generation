@@ -1,8 +1,10 @@
+import math
+
 import numpy as np
 import pytest
 import torch
 import geopandas as gpd
-from shapely.geometry import LineString, box
+from shapely.geometry import LineString, Polygon, box
 
 from urban_dataset.extract import CityLayers
 from urban_dataset.prepared import save_city_gpkg
@@ -198,8 +200,9 @@ def test_models_train_and_generate_a_city(tmp_path):
     assert city["format"] == "urban-layers-city"
     assert plan.shape[0] == len(CHANNELS)
     assert all(LINE_CLASSES[line_class("road", road["class"], road["vertical"])][0] == "road" for road in city["roads"])
+    assert all(item["tracks"] == 2 for item in city["rail"])
     report = audit_city(city, plan)
-    assert "network" in report and "follows_plan" in report
+    assert {"network", "follows_plan", "rail", "cover"} <= set(report)
 
 
 @pytest.mark.parametrize("max_len", [40, 512])
@@ -307,3 +310,80 @@ def test_buildings_need_a_road_nearby():
     far = {"footprint": [[100, 300], [110, 300], [110, 310], [100, 310]]}
     assert reachable([near, far], tree) == [near]
     assert reachable([near, far], None) == [near, far]
+
+
+def test_rail_runs_right_across_the_map():
+    from urban_layers.rail import rail_corridors, rail_runs, rail_stations
+
+    plan = np.zeros((len(CHANNELS), 32, 32), dtype=np.float32)
+    plan[CHANNELS.index("rail"), 15:17, 12:20] = 1.0
+    lines = rail_corridors(plan, (4096.0, 4096.0))
+    assert len(lines) == 1
+    assert LineString(lines[0]).length > 3500.0
+    for x, y in (lines[0][0], lines[0][-1]):
+        assert min(x, y, 4096.0 - x, 4096.0 - y) < 1.0
+    runs = rail_runs(lines, plan)
+    assert {LINE_CLASSES[class_id][:2] for class_id, _points, _number in runs} == {("rail", "subway")}
+    stations = np.asarray([station["xy"] for station in rail_stations(lines, plan)])
+    assert len(stations) >= 2
+    assert np.linalg.norm(np.diff(stations, axis=0), axis=1).min() > 700.0
+    assert rail_corridors(np.zeros_like(plan), (4096.0, 4096.0)) == []
+
+
+def test_street_grammar_can_leave_out_rail():
+    tokens = StreetTokens()
+    grammar = StreetGrammar(tokens, classes=[mode == "road" for mode, _name, _level in LINE_CLASSES])
+    allowed = grammar.allowed(grammar.start(1, "cpu"))[0]
+    for index, (mode, _name, _level) in enumerate(LINE_CLASSES):
+        assert bool(allowed[tokens.first_class + index]) == (mode == "road")
+
+
+def test_buildings_keep_off_roads_and_each_other():
+    from urban_layers.buildings import place_buildings
+
+    block = box(0, 0, 200, 200)
+    road = LineString([(100, 0), (100, 120)]).buffer(6.0)
+    items = [
+        (0, -15.0, -40.0, 30.0, 20.0, 0.0, 9.0),
+        (0, 15.0, -40.0, 30.0, 20.0, 0.0, 9.0),
+        (0, -40.0, -40.0, 20.0, 20.0, 0.0, 9.0),
+    ]
+    placed = place_buildings(block, np.array([100.0, 100.0]), 0.0, items, blocked=[road])
+    shapes = [Polygon(item["footprint"]) for item in placed]
+    assert len(shapes) == 3
+    assert all(shape.intersection(road).area <= 1.0 for shape in shapes)
+    assert all(one.intersection(other).area <= 1.0 for index, one in enumerate(shapes) for other in shapes[index + 1 :])
+    assert [round(shape.area) for shape in shapes] == [600, 600, 400]
+
+
+def test_boxes_turn_to_face_the_road():
+    from urban_layers.buildings import face_road
+    from urban_layers.data import box_polygon
+
+    roads = np.array([[[0.0, 0.0], [100.0, 0.0]]])
+    corners = box_polygon(50.0, 20.0, 20.0, 10.0, math.radians(15.0))
+    turned = face_road(corners, roads)
+    edge = turned[1] - turned[0]
+    assert abs(math.degrees(math.atan2(edge[1], edge[0]))) < 0.5
+    assert np.allclose(turned.mean(axis=0), corners.mean(axis=0))
+    far = box_polygon(50.0, 200.0, 20.0, 10.0, math.radians(15.0))
+    assert np.allclose(face_road(far, roads), far)
+
+
+def test_thin_unused_ground_becomes_natural_cover():
+    from urban_layers.city import landuse_labels, natural_cover
+
+    plan = np.zeros((len(CHANNELS), 16, 16), dtype=np.float32)
+    plan[CHANNELS.index("coverage"), :, :8] = 0.2
+    plan[CHANNELS.index("local"), :, :8] = 0.8
+    plan[CHANNELS.index("residential"), :, :8] = 0.9
+    natural = natural_cover(plan, landuse_labels(plan))
+    assert sum(polygon.area for polygon in natural) > 0.3 * (16 * 128.0) ** 2
+    assert all(polygon.centroid.x > 1024 for polygon in natural)
+
+
+def test_rail_audit_takes_a_single_line():
+    from urban_layers.audit import rail_stats
+
+    city = {"size_m": [1000.0, 1000.0], "rail": [{"points": [[0.0, 500.0], [1000.0, 500.0]], "tracks": 2}], "stations": []}
+    assert rail_stats(city) == {"track_km": 2.0, "pieces": 1, "loose_ends": 0, "stations": 0}
