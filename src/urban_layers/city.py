@@ -34,6 +34,7 @@ from urban_layers.data import (
     split_block,
 )
 from urban_layers.plan import PlanNet, sample_plan
+from urban_layers.rail import RAIL_WIDTH, TRACKS, rail_corridors, rail_runs, rail_stations
 from urban_layers.streets import PORTS, SIDES, StreetModel, collate, condition_arrays, plan_crop, port_key, snap_to_ports
 from urban_model.structured_city_data import BUILDING_KINDS
 
@@ -52,6 +53,7 @@ SLIDERS = {
     "civic": ("civic",),
 }
 WIDTHS = {"major": 14.0, "secondary": 9.0, "local": 6.0}
+SETBACKS = {"major": 6.0, "secondary": 4.0, "local": 3.0}
 
 
 def load_layer(path, device="cpu"):
@@ -131,7 +133,7 @@ def plan_polygons(plan, channel, upsample=8, minimum_area=1500.0):
     return trace(field > threshold, CELL / upsample, minimum_area)
 
 
-def landuse_regions(plan, upsample=8, minimum_area=1500.0, rounds=60):
+def landuse_labels(plan, upsample=8, rounds=60):
     shares = np.stack([plan_field(plan, name, upsample) for name in REGION_CLASSES])
     scores = np.concatenate([np.clip(1.0 - shares.sum(axis=0), 0.0, None)[None], shares])
     wanted = np.array([plan[CHANNELS.index(name)].mean() for name in REGION_CLASSES])
@@ -145,12 +147,23 @@ def landuse_regions(plan, upsample=8, minimum_area=1500.0, rounds=60):
             best = (error, weights.copy())
         weights = weights * np.sqrt((wanted + 1e-4) / (got + 1e-4))
         weights = np.maximum(weights / weights.max(), 1e-6)
-    labels = (best[1][:, None, None] * scores).argmax(axis=0)
+    return (best[1][:, None, None] * scores).argmax(axis=0)
+
+
+def landuse_regions(plan, upsample=8, minimum_area=1500.0, rounds=60, labels=None):
+    labels = landuse_labels(plan, upsample, rounds) if labels is None else labels
     regions = []
     for name in REGION_CLASSES:
         index = LANDUSE.index(name)
         regions += [(polygon, index) for polygon in trace(labels == index, CELL / upsample, minimum_area)]
     return regions
+
+
+def natural_cover(plan, labels, upsample=8, minimum_area=10000.0, cover=0.03, roads=0.3):
+    thin = plan_field(plan, "coverage", upsample) < cover
+    thin &= sum(plan_field(plan, name, upsample) for name in ("major", "secondary", "local")) < roads
+    thin &= plan_field(plan, "water", upsample) < 0.5
+    return trace((labels == 0) & thin, CELL / upsample, minimum_area)
 
 
 def landuse_blocks(lines, water, regions, edge):

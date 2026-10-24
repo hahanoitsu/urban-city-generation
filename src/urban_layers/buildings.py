@@ -6,7 +6,7 @@ import random
 import numpy as np
 import torch
 from shapely.geometry import Polygon
-from shapely.ops import nearest_points
+from shapely.ops import nearest_points, unary_union
 
 from urban_layers.data import CHANNELS, box_polygon, from_frame
 from urban_layers.decoder import TokenDecoder, fourier
@@ -107,9 +107,64 @@ class BuildingModel(torch.nn.Module):
         return [self.tokens.decode(row.tolist()) for row in tokens.cpu()]
 
 
-def place_buildings(block_polygon, centre, angle, items, inside=0.7, overlap=0.15, nudge=15.0):
+def face_road(corners, roads, reach=30.0, limit=25.0):
+    if roads is None or not len(roads):
+        return corners
+    middle = corners.mean(axis=0)
+    start, step = roads[:, 0], roads[:, 1] - roads[:, 0]
+    along = np.clip(((middle - start) * step).sum(axis=1) / np.maximum((step * step).sum(axis=1), 1e-9), 0.0, 1.0)
+    distance = np.linalg.norm(start + step * along[:, None] - middle, axis=1)
+    nearest = int(np.argmin(distance))
+    if distance[nearest] > reach:
+        return corners
+    edge = corners[1] - corners[0]
+    turn = (math.atan2(step[nearest, 1], step[nearest, 0]) - math.atan2(edge[1], edge[0])) % (math.pi / 2)
+    if turn > math.pi / 4:
+        turn -= math.pi / 2
+    if abs(math.degrees(turn)) > limit:
+        return corners
+    cos, sin = math.cos(turn), math.sin(turn)
+    return (corners - middle) @ np.array([[cos, sin], [-sin, cos]]) + middle
+
+
+def hits(shape, blocked, shapes, boxes, tolerance):
+    found = []
+    if blocked is not None and blocked.intersects(shape):
+        part = shape.intersection(blocked)
+        if part.area > tolerance:
+            found.append(part)
+    if len(boxes):
+        minx, miny, maxx, maxy = shape.bounds
+        for index in np.nonzero((boxes[:, 0] < maxx) & (boxes[:, 2] > minx) & (boxes[:, 1] < maxy) & (boxes[:, 3] > miny))[0]:
+            part = shape.intersection(shapes[index])
+            if part.area > tolerance:
+                found.append(part)
+    return found
+
+
+def way_out(corners, block_polygon, blocked, shapes, boxes, inside, limit, tolerance):
+    shape = Polygon(corners)
+    found = hits(shape, blocked, shapes, boxes, tolerance)
+    if not found:
+        return corners
+    away = np.subtract(shape.centroid.coords[0], unary_union(found).centroid.coords[0])
+    if np.linalg.norm(away) < 1e-6:
+        return None
+    away = away / np.linalg.norm(away)
+    for step in np.arange(1.0, limit + 0.5):
+        moved = corners + away * step
+        shape = Polygon(moved)
+        if shape.intersection(block_polygon).area < inside * shape.area:
+            return None
+        if not hits(shape, blocked, shapes, boxes, tolerance):
+            return moved
+    return None
+
+
+def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0, blocked=None, roads=None, push=12.0, tolerance=1.0):
     placed = []
     shapes = []
+    boxes = np.zeros((0, 4))
     for kind, x, y, width, depth, turn, height in items:
         corners = from_frame(box_polygon(x, y, width, depth, turn), centre, angle)
         shape = Polygon(corners)
@@ -127,8 +182,16 @@ def place_buildings(block_polygon, centre, angle, items, inside=0.7, overlap=0.1
             shape = Polygon(corners)
             if shape.intersection(block_polygon).area < inside * shape.area:
                 continue
-        if any(shape.intersection(other).area > overlap * min(shape.area, other.area) for other in shapes if shape.distance(other) < 1.0):
+        corners = face_road(corners, roads)
+        for size in (1.0, 0.8):
+            middle = corners.mean(axis=0)
+            moved = way_out(middle + (corners - middle) * size, block_polygon, blocked, shapes, boxes, inside, push, tolerance)
+            if moved is not None:
+                break
+        if moved is None:
             continue
+        shape = Polygon(moved)
         shapes.append(shape)
-        placed.append({"kind": int(kind), "height_m": float(height), "footprint": corners.tolist()})
+        boxes = np.vstack([boxes, shape.bounds])
+        placed.append({"kind": int(kind), "height_m": float(height), "footprint": moved.tolist()})
     return placed
