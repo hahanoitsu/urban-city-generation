@@ -41,7 +41,7 @@ def line_density(points, shape, tracks=TRACKS):
 def best_heading(centre, pull, reach=1024.0):
     # the straight line through the centre that collects the most pull
     distances = np.concatenate([-np.arange(64.0, reach + 1, 64.0), np.arange(64.0, reach + 1, 64.0)])[:, None]
-    options = np.arange(0.0, math.pi, math.pi / 24)
+    options = np.arange(0.0, math.pi, math.pi / 36)
     scores = [lookup(pull, centre + distances * np.array([math.cos(option), math.sin(option)])).sum() for option in options]
     return float(options[int(np.argmax(scores))])
 
@@ -59,7 +59,7 @@ def walk(start, heading, pull, water, size, step=64.0, turn=0.08, limit=200):
             if abs((option - first + math.pi) % (2 * math.pi) - math.pi) > math.pi / 2:
                 continue
             spots = points[-1] + ahead * np.array([math.cos(option), math.sin(option)])
-            score = lookup(pull, spots).sum() - 3.0 * lookup(water, spots).sum() - 2.0 * abs(option - heading)
+            score = lookup(pull, spots).sum() - 3.0 * lookup(water, spots).sum() - 0.5 * abs(option - heading)
             if best is None or score > best[0]:
                 best = (score, option)
         heading = best[1]
@@ -94,7 +94,7 @@ def rail_corridors(plan, size, threshold=0.08, smallest=400.0, most=4):
     # crossing leaves a blob after the first line, so it gets a second one
     residual = plan_grid(plan, "rail", 0.7)
     # away from the blobs a line leans towards big roads and busy ground, that is where stations go
-    leaning = 0.3 * plan_grid(plan, "major", 1.0) + 0.3 * (plan_grid(plan, "coverage", 2.0) + plan_grid(plan, "commercial", 2.0))
+    leaning = 0.5 * plan_grid(plan, "major", 1.0) + 0.5 * (plan_grid(plan, "coverage", 2.0) + plan_grid(plan, "commercial", 2.0))
     water = plan_grid(plan, "water", 1.0)
     wanted = float(plan[CHANNELS.index("rail")].sum()) * 2.0 * CELL / TRACKS
     lines = []
