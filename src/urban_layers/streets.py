@@ -316,13 +316,13 @@ class StreetModel(nn.Module):
         return self.decoder(batch["tokens"], memory, padding)
 
     @torch.no_grad()
-    def generate(self, batch, temperature=1.0, top_p=0.95, generator=None, max_points=128, max_lines=400, force_ports=True):
+    def generate(self, batch, temperature=1.0, top_p=0.95, generator=None, max_points=128, max_lines=400, force_ports=True, classes=None):
         memory, padding = self.condition(batch)
         ports = None
         if force_ports:
             spots = torch.round(batch["port_xy"] * TILE).clamp(0, TILE).long()
             ports = torch.cat([batch["port_class"][..., None], spots], dim=-1).masked_fill(~batch["port_mask"][..., None], -1)
-        grammar = StreetGrammar(self.tokens, max_points, max_lines, ports, max_len=self.decoder.max_len, sides=batch.get("sides"))
+        grammar = StreetGrammar(self.tokens, max_points, max_lines, ports, max_len=self.decoder.max_len, sides=batch.get("sides"), classes=classes)
         tokens = self.decoder.generate(memory, padding, grammar, temperature=temperature, top_p=top_p, generator=generator)
         return [self.tokens.decode(row.tolist()) for row in tokens.cpu()]
 

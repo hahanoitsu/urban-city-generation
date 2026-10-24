@@ -113,7 +113,8 @@ class StreetGrammar:
     # sides: optional (batch, 4) bool, left bottom right top neighbour already generated.
     # like in training, a free line can only start or end within margin of those sides where a line comes in.
     # phases: 0 new line or eos, 1 first x (or join), 2 y, 3 after a point, 4 done, 5 x of the joined last point
-    def __init__(self, tokens, max_points=48, max_lines=160, ports=None, reach=8, max_len=None, sides=None, margin=4):
+    # classes: optional bool per line class, the classes a free line may take (rail is drawn for the whole city)
+    def __init__(self, tokens, max_points=48, max_lines=160, ports=None, reach=8, max_len=None, sides=None, margin=4, classes=None):
         self.tokens = tokens
         self.max_points = max_points
         self.max_lines = max_lines
@@ -125,6 +126,8 @@ class StreetGrammar:
         kinds = torch.from_numpy(tokens.kinds)
         names = (("eos", 2), ("end", 3), ("class", 4), ("x", 5), ("y", 6), ("join", 7), ("end_join", 8))
         self.masks = {name: kinds == value for name, value in names}
+        if classes is not None:
+            self.masks["class"][tokens.first_class : tokens.first_x] &= torch.as_tensor(classes, dtype=torch.bool)
         self.masks["pad"] = torch.zeros(tokens.vocab, dtype=torch.bool)
         self.masks["pad"][PAD] = True
 
