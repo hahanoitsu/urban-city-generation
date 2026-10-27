@@ -132,21 +132,38 @@ def rail_runs(lines, plan, dense=0.35, step=64.0, hold=9):
     return runs
 
 
-def rail_stations(lines, plan, spacing=1100.0, search=300.0):
+def heading_at(line, position):
+    here = np.asarray(line.interpolate(position).coords[0])
+    ahead = np.asarray(line.interpolate(min(position + 10.0, line.length)).coords[0])
+    if np.linalg.norm(ahead - here) < 1e-6:
+        here = np.asarray(line.interpolate(max(position - 10.0, 0.0)).coords[0])
+        ahead = np.asarray(line.interpolate(position).coords[0])
+    return math.degrees(math.atan2(ahead[1] - here[1], ahead[0] - here[0]))
+
+
+def rail_stations(lines, plan, spacing=1100.0, search=300.0, gap=600.0):
     density = plan_grid(plan, "coverage", 1.0) + plan_grid(plan, "commercial", 1.0) + 0.5 * plan_grid(plan, "residential", 1.0)
+    shapes = [LineString(points) for points in lines]
     stations = []
-    for number, points in enumerate(lines):
-        line = LineString(points)
+    for first in range(len(shapes)):
+        for second in range(first + 1, len(shapes)):
+            crossing = shapes[first].intersection(shapes[second])
+            for point in getattr(crossing, "geoms", [crossing]):
+                if point.geom_type == "Point":
+                    stations.append({"xy": [point.x, point.y], "lines": [first, second], "heading_deg": heading_at(shapes[first], shapes[first].project(point))})
+    for number, line in enumerate(shapes):
         position = spacing / 2.0
         while position < line.length - 200.0:
             options = np.arange(max(position - search, 150.0), min(position + search, line.length - 150.0) + 1.0, 25.0)
+            xy = shapely.get_coordinates(shapely.line_interpolate_point(line, options)) if len(options) else np.zeros((0, 2))
+            if stations and len(xy):
+                placed = np.asarray([station["xy"] for station in stations])
+                free = np.linalg.norm(xy[:, None] - placed[None], axis=2).min(axis=1) >= gap
+                options, xy = options[free], xy[free]
             if not len(options):
-                break
-            xy = shapely.get_coordinates(shapely.line_interpolate_point(line, options))
-            best = float(options[int(np.argmax(lookup(density, xy)))])
-            here = np.asarray(line.interpolate(best).coords[0])
-            ahead = np.asarray(line.interpolate(min(best + 10.0, line.length)).coords[0])
-            heading = math.degrees(math.atan2(ahead[1] - here[1], ahead[0] - here[0]))
-            stations.append({"xy": here.tolist(), "line": number, "heading_deg": heading})
-            position = best + spacing
+                position += search
+                continue
+            best = int(np.argmax(lookup(density, xy)))
+            stations.append({"xy": xy[best].tolist(), "lines": [number], "heading_deg": heading_at(line, float(options[best]))})
+            position = float(options[best]) + spacing
     return stations

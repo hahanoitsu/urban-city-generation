@@ -330,6 +330,20 @@ def test_rail_runs_right_across_the_map():
     assert rail_corridors(np.zeros_like(plan), (4096.0, 4096.0)) == []
 
 
+def test_crossing_lines_share_one_interchange():
+    from urban_layers.rail import rail_stations
+
+    plan = np.zeros((len(CHANNELS), 32, 32), dtype=np.float32)
+    lines = [np.array([[0.0, 2000.0], [4096.0, 2000.0]]), np.array([[2100.0, 0.0], [2100.0, 4096.0]])]
+    stations = rail_stations(lines, plan)
+    shared = [station for station in stations if len(station["lines"]) == 2]
+    assert len(shared) == 1 and np.allclose(shared[0]["xy"], [2100.0, 2000.0])
+    others = np.asarray([station["xy"] for station in stations if len(station["lines"]) == 1])
+    assert np.linalg.norm(others - [2100.0, 2000.0], axis=1).min() >= 599.0
+    for number in (0, 1):
+        assert sum(number in station["lines"] for station in stations) >= 3
+
+
 def test_street_grammar_can_leave_out_rail():
     tokens = StreetTokens()
     grammar = StreetGrammar(tokens, classes=[mode == "road" for mode, _name, _level in LINE_CLASSES])
