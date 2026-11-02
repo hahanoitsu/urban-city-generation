@@ -28,6 +28,20 @@ def plan_image(plan, scale=6):
     return Image.fromarray(image).resize((plan.shape[2] * scale, plan.shape[1] * scale), Image.NEAREST)
 
 
+def fill(image, outer, holes, colour):
+    if not holes:
+        ImageDraw.Draw(image).polygon(outer, fill=colour)
+        return
+    left, top = int(min(x for x, _y in outer)), int(min(y for _x, y in outer))
+    right, bottom = int(max(x for x, _y in outer)) + 2, int(max(y for _x, y in outer)) + 2
+    mask = Image.new("L", (right - left, bottom - top), 0)
+    pen = ImageDraw.Draw(mask)
+    pen.polygon([(x - left, y - top) for x, y in outer], fill=255)
+    for hole in holes:
+        pen.polygon([(x - left, y - top) for x, y in hole], fill=0)
+    image.paste(colour, (left, top, right, bottom), mask)
+
+
 def city_image(city, size=1024):
     width_m, height_m = city["size_m"]
     scale = size / max(width_m, height_m)
@@ -38,11 +52,11 @@ def city_image(city, size=1024):
         return [(float(x) * scale, (height_m - float(y)) * scale) for x, y in values]
 
     for block in city.get("blocks", []):
-        draw.polygon(points(block["polygon"]), fill=LANDUSE_COLOURS[block.get("landuse", "none")])
+        fill(image, points(block["polygon"]), [points(hole) for hole in block.get("holes", [])], LANDUSE_COLOURS[block.get("landuse", "none")])
     for area in city.get("green", []):
-        draw.polygon(points(area["polygon"]), fill=NATURAL if area.get("kind") == "natural" else LANDUSE_COLOURS["green"])
+        fill(image, points(area["polygon"]), [points(hole) for hole in area.get("holes", [])], NATURAL if area.get("kind") == "natural" else LANDUSE_COLOURS["green"])
     for area in city.get("water", []):
-        draw.polygon(points(area["polygon"]), fill=(160, 200, 230))
+        fill(image, points(area["polygon"]), [points(hole) for hole in area.get("holes", [])], (160, 200, 230))
     for building in city.get("buildings", []):
         shade = int(np.clip(170 - building["height_m"] * 0.8, 70, 170))
         draw.polygon(points(building["footprint"]), fill=(shade, shade, shade + 8), outline=(80, 80, 90))

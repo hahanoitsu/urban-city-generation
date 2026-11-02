@@ -9,7 +9,7 @@ from shapely.geometry import LineString, Polygon
 from shapely.ops import linemerge, unary_union
 from shapely.strtree import STRtree
 
-from urban_layers.data import CELL, CHANNELS, TILE, city_lines, plan_raster
+from urban_layers.data import CELL, CHANNELS, TILE, city_lines, corridor, plan_raster, polygon_of
 
 
 def network_stats(city, seam=4.0):
@@ -52,7 +52,7 @@ def street_relations(city, shapes, reach=30.0, within=5.0):
     roads = [road for road in city["roads"] if road["vertical"] != "underground" and len(road["points"]) >= 2]
     if not shapes or not roads:
         return 0.0, 0.0
-    corridors = [LineString(road["points"]).buffer(road.get("width_m", 6.0) / 2.0) for road in roads]
+    corridors = [corridor(road["points"], road.get("width_m", 6.0) / 2.0) for road in roads]
     tree = STRtree(corridors)
     on_road = sum(any(shape.intersection(corridors[index]).area > 1.0 for index in tree.query(shape, predicate="intersects")) for shape in shapes)
     segments = np.concatenate([np.stack([np.asarray(road["points"])[:-1], np.asarray(road["points"])[1:]], axis=1) for road in roads])
@@ -142,7 +142,7 @@ def cover_stats(city):
     width, height = city["size_m"]
     areas = {"park": 0.0, "natural": 0.0}
     for item in city.get("green", []):
-        areas["natural" if item.get("kind") == "natural" else "park"] += Polygon(item["polygon"]).area
+        areas["natural" if item.get("kind") == "natural" else "park"] += polygon_of(item).area
     return {f"{name}_share": area / (width * height) for name, area in areas.items()}
 
 

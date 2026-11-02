@@ -56,6 +56,17 @@ def line_class(mode, name, level):
     return LINE_CLASSES.index((mode, name, level))
 
 
+def corridor(points, reach):
+    line = LineString(points)
+    if not line.is_simple:
+        line = unary_union(line)
+    return line.buffer(reach)
+
+
+def polygon_of(item):
+    return Polygon(item["polygon"], item.get("holes", []))
+
+
 def is_road(class_id):
     return LINE_CLASSES[class_id][0] == "road"
 
