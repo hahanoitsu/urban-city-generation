@@ -162,6 +162,26 @@ def way_out(corners, block_polygon, blocked, shapes, boxes, inside, limit, toler
     return None
 
 
+def trim(corners, block_polygon, blocked, shapes, boxes, inside, tolerance, most=0.75, least=4.0, steps=7):
+    best, loss = None, most
+    for side in range(4):
+        inward = corners[(side + 3) % 4] - corners[side]
+        moving = np.zeros((4, 1))
+        moving[[side, (side + 1) % 4]] = 1.0
+        cut = lambda share: corners + moving * inward * share
+        deepest = min(loss, 1.0 - least / max(np.linalg.norm(inward), 1e-9))
+        if deepest <= 0.0 or clashes(Polygon(cut(deepest)), blocked, shapes, boxes, tolerance):
+            continue
+        low, high = 0.0, deepest
+        for _step in range(steps):
+            middle = (low + high) / 2.0
+            low, high = (middle, high) if clashes(Polygon(cut(middle)), blocked, shapes, boxes, tolerance) else (low, middle)
+        shape = Polygon(cut(high))
+        if shape.intersection(block_polygon).area >= inside * shape.area:
+            best, loss = cut(high), high
+    return best
+
+
 def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0, blocked=(), roads=None, push=12.0, tolerance=1.0):
     placed = []
     shapes = []
@@ -188,10 +208,25 @@ def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0,
             corners = turned
         moved = None
         middle = corners.mean(axis=0)
+        offset = corners - middle
+        sides = [corners[1] - corners[0], corners[3] - corners[0]]
+        sides = [side / max(np.linalg.norm(side), 1e-9) for side in sides]
+        lengths = [np.linalg.norm(corners[1] - corners[0]), np.linalg.norm(corners[3] - corners[0])]
         for ground in blocked or (None,):
-            for size in (1.0, 0.8, 0.6):
-                moved = way_out(middle + (corners - middle) * size, block_polygon, ground, shapes, boxes, inside, push, tolerance)
-                if moved is not None:
+            moved = way_out(corners, block_polygon, ground, shapes, boxes, inside, push, tolerance)
+            if moved is not None:
+                break
+            moved = trim(corners, block_polygon, ground, shapes, boxes, inside, tolerance)
+            kept = Polygon(moved).area / Polygon(corners).area if moved is not None else 0.0
+            for first, second in ((1.0, 0.8), (0.8, 1.0), (0.8, 0.8), (1.0, 0.6), (0.6, 1.0)):
+                if first * second <= kept:
+                    break
+                if min(lengths[0] * first, lengths[1] * second) < min(4.0, *lengths):
+                    continue
+                scaled = middle + np.outer(offset @ sides[0], sides[0]) * first + np.outer(offset @ sides[1], sides[1]) * second
+                shrunk = way_out(scaled, block_polygon, ground, shapes, boxes, inside, push, tolerance)
+                if shrunk is not None:
+                    moved = shrunk
                     break
             if moved is not None:
                 break

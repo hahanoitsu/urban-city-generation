@@ -373,6 +373,20 @@ def test_buildings_keep_off_roads_and_each_other():
     assert [round(shape.area) for shape in shapes] == [600, 600, 400]
 
 
+def test_a_box_too_deep_for_its_strip_loses_depth_not_length():
+    from urban_layers.buildings import place_buildings
+
+    block = box(0, 0, 100, 18)
+    roads = box(-50, 18, 150, 40).union(box(-50, -20, 150, 0))
+    placed = place_buildings(block, np.array([0.0, 0.0]), 0.0, [(0, 50.0, 10.5, 80.0, 17.0, 0.0, 30.0)], blocked=[roads])
+    shape = Polygon(placed[0]["footprint"])
+    assert shape.intersection(roads).area <= 1.0
+    assert shape.area > 0.9 * 80.0 * 17.0
+    corners = np.asarray(placed[0]["footprint"])
+    short, long = sorted([np.linalg.norm(corners[1] - corners[0]), np.linalg.norm(corners[2] - corners[1])])
+    assert np.isclose(long, 80.0) and 15.0 < short < 17.0
+
+
 def test_boxes_turn_to_face_the_road():
     from urban_layers.buildings import face_road
     from urban_layers.data import box_polygon
@@ -406,6 +420,36 @@ def test_rail_audit_takes_a_single_line():
     assert rail_stats(city) == {"track_km": 2.0, "pieces": 1, "loose_ends": 0, "stations": 0}
 
 
+def test_function_audit_finds_a_town_you_cannot_drive_to():
+    from urban_layers.audit import function_stats
+
+    def town(left):
+        roads = [{"class": "major", "vertical": "surface", "points": [[left, 500.0], [left + 1000.0, 500.0]]}]
+        roads += [{"class": "local", "vertical": "surface", "points": [[left + x, 200.0], [left + x, 800.0]]} for x in (200.0, 500.0, 800.0)]
+        house = {"height_m": 9.0, "footprint": [[left + 300.0, 600.0], [left + 340.0, 600.0], [left + 340.0, 630.0], [left + 300.0, 630.0]]}
+        return roads, house
+
+    west, west_house = town(0.0)
+    east, east_house = town(2000.0)
+    flyover = {"class": "major", "vertical": "elevated", "points": [[100.0, 300.0], [900.0, 300.0]]}
+    city = {
+        "size_m": [3000.0, 1000.0],
+        "roads": west + east + [flyover],
+        "nodes": [],
+        "edges": [],
+        "buildings": [west_house, east_house],
+        "blocks": [],
+        "stations": [{"xy": [320.0, 450.0]}],
+    }
+    found = function_stats(city)
+    assert found["largest_piece_road_share"] < 0.55
+    assert found["floor_on_largest_piece"] == 0.5
+    assert found["floor_within_800m_of_a_station"] == 0.5
+    city["roads"] = west + east + [{"class": "major", "vertical": "elevated", "points": [[1000.0, 500.0], [2000.0, 500.0]]}]
+    found = function_stats(city)
+    assert found["largest_piece_road_share"] == 1.0 and found["major_largest_piece_share"] == 1.0
+
+
 def test_buffer_of_a_road_that_crosses_itself():
     from urban_layers.data import corridor
 
@@ -433,3 +477,6 @@ def test_roads_over_water_are_marked_as_bridges():
     spans = bridge_spans([[0.0, 0.0], [300.0, 0.0]], water)
     assert len(spans) == 1 and np.allclose(spans[0], [100.0, 160.0])
     assert bridge_spans([[0.0, 0.0], [300.0, 0.0]], None) == []
+    loop = [[110.0, 0.0], [150.0, 0.0], [150.0, 30.0], [110.0, 0.0]]
+    spans = bridge_spans(loop, water)
+    assert len(spans) == 1 and np.isclose(spans[0][0], 0.0) and np.isclose(spans[0][1], LineString(loop).length)

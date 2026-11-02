@@ -57,12 +57,13 @@ def city_image(city, size=1024):
         fill(image, points(area["polygon"]), [points(hole) for hole in area.get("holes", [])], NATURAL if area.get("kind") == "natural" else LANDUSE_COLOURS["green"])
     for area in city.get("water", []):
         fill(image, points(area["polygon"]), [points(hole) for hole in area.get("holes", [])], (160, 200, 230))
+    outline = (80, 80, 90) if scale >= 0.5 else None
     for building in city.get("buildings", []):
         shade = int(np.clip(170 - building["height_m"] * 0.8, 70, 170))
-        draw.polygon(points(building["footprint"]), fill=(shade, shade, shade + 8), outline=(80, 80, 90))
+        draw.polygon(points(building["footprint"]), fill=(shade, shade, shade + 8), outline=outline)
     for road in city.get("roads", []):
         colour = (210, 90, 60) if road["vertical"] == "surface" else (150, 70, 160)
-        draw.line(points(road["points"]), fill=colour, width=ROAD_WIDTH.get(road["class"], 2))
+        draw.line(points(road["points"]), fill=colour, width=max(1, int(round(road.get("width_m", 6.0) * scale))))
     for rail in city.get("rail", []):
         colour = (40, 120, 190) if rail["vertical"] != "underground" else (120, 160, 200)
         draw.line(points(rail["points"]), fill=colour, width=3 if rail.get("tracks", 1) == 1 else 4)

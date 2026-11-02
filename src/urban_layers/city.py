@@ -450,16 +450,25 @@ def cut_off_roads(pieces, lines):
 
 
 def bridge_spans(points, water):
-    if water is None or water.is_empty:
+    if water is None or water.is_empty or not LineString(points).intersects(water):
         return []
-    line = LineString(points)
-    wet = line.intersection(water)
     spans = []
-    for piece in getattr(wet, "geoms", [wet]):
-        if piece.geom_type == "LineString" and piece.length > 1.0:
-            ends = sorted((line.project(Point(piece.coords[0])), line.project(Point(piece.coords[-1]))))
-            spans.append([round(ends[0], 2), round(ends[1], 2)])
-    return sorted(spans)
+    start = 0.0
+    for first, second in zip(points[:-1], points[1:]):
+        segment = LineString([first, second])
+        wet = segment.intersection(water)
+        for piece in getattr(wet, "geoms", [wet]):
+            if piece.geom_type == "LineString" and piece.length > 0.0:
+                ends = sorted((segment.project(Point(piece.coords[0])), segment.project(Point(piece.coords[-1]))))
+                spans.append([start + ends[0], start + ends[1]])
+        start += segment.length
+    joined = []
+    for low, high in sorted(spans):
+        if joined and low <= joined[-1][1] + 1e-6:
+            joined[-1][1] = max(joined[-1][1], high)
+        else:
+            joined.append([low, high])
+    return [[round(low, 2), round(high, 2)] for low, high in joined if high - low > 1.0]
 
 
 def road_segments(lines):
