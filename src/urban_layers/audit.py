@@ -5,6 +5,8 @@ import math
 import networkx as nx
 import numpy as np
 import shapely
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components, dijkstra
 from shapely.geometry import LineString, Polygon
 from shapely.ops import linemerge, unary_union
 from shapely.strtree import STRtree
@@ -146,8 +148,124 @@ def cover_stats(city):
     return {f"{name}_share": area / (width * height) for name, area in areas.items()}
 
 
+def road_pieces(roads, touch=1.0):
+    lines = np.asarray([LineString(road["points"]) for road in roads], dtype=object)
+    levels = np.asarray(["surface" if road["vertical"] == "unknown" else road["vertical"] for road in roads])
+    first, second = STRtree(lines).query(lines, predicate="dwithin", distance=touch)
+    keep = first < second
+    first, second = first[keep], second[keep]
+    starts = shapely.points([line.coords[0] for line in lines])
+    ends = shapely.points([line.coords[-1] for line in lines])
+    ramp = np.zeros(len(first), dtype=bool)
+    for a, b in ((first, second), (second, first)):
+        ramp |= (shapely.distance(starts[a], lines[b]) <= touch) | (shapely.distance(ends[a], lines[b]) <= touch)
+    joined = (levels[first] == levels[second]) | ramp
+    graph = coo_matrix((np.ones(int(joined.sum())), (first[joined], second[joined])), shape=(len(lines), len(lines)))
+    _count, label = connected_components(graph, directed=False)
+    return lines, label
+
+
+def detour(city, low=1000.0, high=3000.0, sources=40, targets=50, seed=0):
+    edges = [edge for edge in city["edges"] if edge.get("mode") == "road" and "points" in edge]
+    if not edges:
+        return None
+    where = {node["id"]: node["xy"] for node in city["nodes"]}
+    spot = {}
+    for edge in edges:
+        for name in (edge["from"], edge["to"]):
+            x, y = where[name]
+            spot.setdefault((round(x), round(y)), len(spot))
+    index = lambda name: spot[(round(where[name][0]), round(where[name][1]))]
+    rows = [index(edge["from"]) for edge in edges]
+    columns = [index(edge["to"]) for edge in edges]
+    lengths = [max(LineString(edge["points"]).length, 0.01) for edge in edges]
+    graph = coo_matrix((lengths, (rows, columns)), shape=(len(spot), len(spot))).tocsr()
+    graph = graph.maximum(graph.T)
+    _count, label = connected_components(graph, directed=False)
+    positions = np.zeros((len(spot), 2))
+    for (x, y), number in spot.items():
+        positions[number] = (x, y)
+    biggest = np.nonzero(label == np.bincount(label).argmax())[0]
+    rng = np.random.default_rng(seed)
+    starts = rng.choice(biggest, min(sources, len(biggest)), replace=False)
+    ratios = []
+    for start, distances in zip(starts, dijkstra(graph, directed=False, indices=starts)):
+        straight = np.linalg.norm(positions[biggest] - positions[start], axis=1)
+        options = np.nonzero((straight >= low) & (straight <= high))[0]
+        for option in rng.choice(options, min(targets, len(options)), replace=False) if len(options) else []:
+            ratios.append(distances[biggest[option]] / straight[option])
+    return float(np.median(ratios)) if ratios else None
+
+
+def function_stats(city):
+    width, height = city["size_m"]
+    area = width * height / 1e6
+    roads = [road for road in city["roads"] if len(road["points"]) >= 2]
+    shapes = [Polygon(item["footprint"]) for item in city["buildings"]]
+    if not roads or not shapes:
+        return {}
+    lines, label = road_pieces(roads)
+    lengths = shapely.length(lines)
+    piece_length = np.bincount(label, weights=lengths)
+    order = np.argsort(piece_length)[::-1]
+    major = [road for road in roads if road["class"] == "major"]
+    major_share = 0.0
+    if major:
+        major_lines, major_label = road_pieces(major)
+        major_length = np.bincount(major_label, weights=shapely.length(major_lines))
+        major_share = float(major_length.max() / major_length.sum())
+
+    middles = shapely.points([shape.centroid.coords[0] for shape in shapes])
+    xy = shapely.get_coordinates(middles)
+    floor = np.asarray([shape.area * max(item["height_m"] / 3.0, 1.0) for shape, item in zip(shapes, city["buildings"])])
+    nearest = STRtree(lines).nearest(middles)
+    result = {
+        "largest_piece_road_share": float(piece_length[order[0]] / piece_length.sum()),
+        "second_piece_road_share": float(piece_length[order[1]] / piece_length.sum()) if len(order) > 1 else 0.0,
+        "major_largest_piece_share": major_share,
+        "pieces_under_200m_per_km2": float((piece_length < 200.0).sum() / area),
+        "floor_on_largest_piece": float(floor[label[nearest] == order[0]].sum() / floor.sum()),
+        "detour_1_to_3km": detour(city),
+    }
+
+    stations = np.asarray([item["xy"] for item in city.get("stations", [])])
+    if len(stations):
+        gap = np.linalg.norm(xy[:, None] - stations[None], axis=2)
+        around = np.asarray([floor[gap[:, number] <= 800.0].sum() for number in range(len(stations))])
+        result["floor_within_800m_of_a_station"] = float(floor[gap.min(axis=1) <= 800.0].sum() / floor.sum())
+        result["stations_with_almost_nobody_near"] = int((around < 0.1 * np.median(around)).sum())
+
+    blocks = [polygon_of(item) for item in city["blocks"]]
+    use = np.asarray(["none"] * len(shapes), dtype=object)
+    if blocks:
+        inside, block = STRtree(blocks).query(middles, predicate="within")
+        use[inside] = [city["blocks"][number]["landuse"] for number in block]
+    homes = use == "residential"
+    green = [polygon_of(item) for item in city.get("green", [])]
+    shops = [shape for shape, item in zip(blocks, city["blocks"]) if item["landuse"] == "commercial"]
+    for name, places, reach in (("homes_within_400m_of_green", green, 400.0), ("homes_within_800m_of_shops", shops, 800.0)):
+        if homes.any() and places:
+            near = STRtree(places).query(middles[homes], predicate="dwithin", distance=reach)[0]
+            result[name] = float(floor[homes][np.unique(near)].sum() / floor[homes].sum())
+
+    cells = max(int(min(width, height) // 1024), 1)
+    grid = np.zeros((cells, cells))
+    shops_grid = np.zeros((cells, cells))
+    column = np.clip((xy[:, 0] // 1024).astype(int), 0, cells - 1)
+    row = np.clip((xy[:, 1] // 1024).astype(int), 0, cells - 1)
+    np.add.at(grid, (row, column), floor / 1024.0**2)
+    np.add.at(shops_grid, (row[use == "commercial"], column[use == "commercial"]), floor[use == "commercial"] / 1024.0**2)
+    result["busiest_km2_floor_ratio"] = float(grid.max())
+    result["busiest_km2_shop_floor_ratio"] = float(shops_grid.max())
+    for scale in (1, 4):
+        if cells >= 2 * scale:
+            coarse = grid[: cells // scale * scale, : cells // scale * scale].reshape(cells // scale, scale, cells // scale, scale).mean(axis=(1, 3))
+            result[f"floor_spread_{scale}km"] = float(coarse.std() / max(coarse.mean(), 1e-9))
+    return result
+
+
 def audit_city(city, plan=None):
-    report = {"network": network_stats(city), "buildings": building_stats(city), "rail": rail_stats(city), "cover": cover_stats(city)}
+    report = {"network": network_stats(city), "buildings": building_stats(city), "rail": rail_stats(city), "cover": cover_stats(city), "function": function_stats(city)}
     if plan is not None:
         report["follows_plan"], _realised = follows_plan(city, plan)
     return report

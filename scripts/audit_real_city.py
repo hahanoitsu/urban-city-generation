@@ -99,8 +99,11 @@ def real_window(layers, lines, bounds):
         "size_m": [float(size[0]), float(size[1])],
         "roads": roads,
         "rail": rail,
-        "nodes": [{"id": node["id"], "xy": node["position_local_m"][:2]} for node in graph["nodes"]],
-        "edges": [{"from": edge["from_node"], "to": edge["to_node"]} for edge in graph["edges"]],
+        "nodes": [{"id": node["id"], "xy": node["position_local_m"][:2], "mode": node["transport_mode"], "vertical": node["vertical_mode"]} for node in graph["nodes"]],
+        "edges": [
+            {"from": edge["from_node"], "to": edge["to_node"], "mode": edge["transport_mode"], "class": edge["class"], "vertical": edge["vertical_mode"], "points": [point[:2] for point in edge["geometry_local_m"]]}
+            for edge in graph["edges"]
+        ],
         "blocks": block_rows,
         "buildings": buildings,
         "water": [{"polygon": outline(polygon, origin)} for polygon in water],
@@ -165,6 +168,8 @@ def main():
     building_keys = ["buildings", "coverage", "median_height_m", "blocks", "any_overlap_pairs", "on_road_share", "facing_road_share"]
     summary["buildings_median"] = {key: float(np.median([report["buildings"][key] for report in reports])) for key in building_keys}
     summary["rail_median"] = {key: float(np.median([report["rail"][key] for report in reports])) for key in ("track_km", "pieces", "loose_ends")}
+    function_keys = sorted({key for report in reports for key, value in report["function"].items() if value is not None})
+    summary["function_median"] = {key: float(np.median([report["function"][key] for report in reports if report["function"].get(key) is not None])) for key in function_keys}
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
 
