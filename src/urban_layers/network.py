@@ -162,15 +162,21 @@ def stitch(lines, size, reach=40.0, seam=4.0, touch=1.0):
     return lines, stitched
 
 
-def drop_strays(lines, shortest=200.0, alone=30.0):
+def drop_strays(lines, small=200.0, touch=30.0, fragment=1000.0, remote=300.0):
     shapes, label = labels(lines)
     size = np.bincount(label, weights=shapely.length(shapes))
     tree = STRtree(shapes)
+    solid = size >= fragment
+    solid[np.argmax(size)] = True
     drop = set()
-    for piece in np.nonzero(size < shortest)[0]:
+    for piece in np.nonzero(~solid)[0]:
         members = np.nonzero(label == piece)[0]
-        near = tree.query(shapes[members], predicate="dwithin", distance=alone)[1]
-        if not np.any(label[near] != piece):
+        near = label[tree.query(shapes[members], predicate="dwithin", distance=remote)[1]]
+        if not np.any(solid[near[near != piece]]):
+            drop.add(int(piece))
+            continue
+        close = label[tree.query(shapes[members], predicate="dwithin", distance=touch)[1]]
+        if size[piece] < small and not np.any(close != piece):
             drop.add(int(piece))
     return [line for line, piece in zip(lines, label) if int(piece) not in drop], len(drop)
 
