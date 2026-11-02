@@ -37,6 +37,7 @@ def bad_shapes(city):
         shapes = [Polygon(item[key]) if key == "footprint" else polygon_of(item) for item in city[name]]
         result[name] = int(sum(not shape.is_valid or shape.area <= 0.0 for shape in shapes))
     result["lines"] = int(sum(LineString(item["points"]).length <= 0.0 for item in city["roads"] + city["rail"]))
+    result["building_heights"] = int(sum(not np.isfinite(item["height_m"]) or item["height_m"] <= 0.0 for item in city["buildings"]))
     return result
 
 
@@ -175,6 +176,25 @@ def near_misses(city, reach=3.0):
     return count
 
 
+def hanging_flyovers(city, reach=30.0):
+    width, height = city["size_m"]
+    ground = [LineString(road["points"]) for road in city["roads"] if road["vertical"] != "underground"]
+    if not ground:
+        return 0
+    tree = STRtree(ground)
+    count = 0
+    for road in city["roads"]:
+        if road["vertical"] != "elevated":
+            continue
+        line = LineString(road["points"])
+        for x, y in (line.coords[0], line.coords[-1]):
+            if min(x, y, width - x, height - y) < 5.0:
+                continue
+            point = Point(x, y)
+            count += int(not any(ground[index].distance(point) < reach and not ground[index].equals(line) for index in tree.query(point, predicate="dwithin", distance=reach)))
+    return count
+
+
 def tile_seams(city, seam=4.0):
     degree = {item["id"]: item["degree"] for item in city["nodes"]}
     width, height = city["size_m"]
@@ -243,6 +263,7 @@ def check_city(city, plan=None):
         "cover": cover_problems(city),
         "tile_seams_per_km2": round(tile_seams(city) / km2, 2),
         "near_miss_ends_per_km2": round(near_misses(city) / km2, 2),
+        "elevated_ends_with_no_road_near": hanging_flyovers(city),
     }
     if plan is not None:
         expected = [int(round(height / city["plan"]["cell_m"])), int(round(width / city["plan"]["cell_m"]))]

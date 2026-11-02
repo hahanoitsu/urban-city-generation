@@ -23,7 +23,7 @@ def main():
         print(f"{folder.name}: {'all spatial checks pass' if not found else str(len(found)) + ' problems'}")
         for line in found:
             print("   ", line)
-        print("    seams per km2", report["tile_seams_per_km2"], "near miss ends per km2", report["near_miss_ends_per_km2"], "road on the ground over water m", report["roads_on_the_ground_over_water_m"])
+        print("    seams per km2", report["tile_seams_per_km2"], "near miss ends per km2", report["near_miss_ends_per_km2"], "road on the ground over water m", report["roads_on_the_ground_over_water_m"], "elevated ends with no road near", report["elevated_ends_with_no_road_near"])
         if plan is not None:
             print("    plan orientation", {key: round(value, 2) for key, value in report["plan_orientation"].items()})
 
