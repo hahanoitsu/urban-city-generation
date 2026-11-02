@@ -59,6 +59,7 @@ def main():
         building_samples=args.building_samples,
         building_batch=args.building_batch,
         device=args.device,
+        log=lambda text: print(text, flush=True),
     )
     save_city(city, plan, args.output)
     report = audit_city(city, plan)
