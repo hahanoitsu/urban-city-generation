@@ -8,6 +8,7 @@ from pathlib import Path
 import torch
 
 from urban_layers.audit import audit_city
+from urban_layers.check import check_city, failures
 from urban_layers.city import SLIDERS, generate_city, load_layer, save_city
 
 
@@ -34,6 +35,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--building-samples", type=int, default=4, help="samples per block, the one closest to the planned coverage is kept")
+    parser.add_argument("--building-batch", type=int, default=64, help="blocks per call to the building model, more is faster on a big gpu")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--list", action="store_true", help="print the cities the models know and stop")
     args = parser.parse_args()
@@ -55,12 +57,17 @@ def main():
         temperature=args.temperature,
         top_p=args.top_p,
         building_samples=args.building_samples,
+        building_batch=args.building_batch,
         device=args.device,
     )
     save_city(city, plan, args.output)
     report = audit_city(city, plan)
     report["seconds"] = time.time() - started
     (args.output / "audit.json").write_text(json.dumps(report, indent=2) + "\n")
+    checked = check_city(city, plan)
+    checked["failures"] = failures(checked)
+    (args.output / "check.json").write_text(json.dumps(checked, indent=2) + "\n")
+    print("spatial checks:", "all pass" if not checked["failures"] else checked["failures"])
     print(json.dumps({"network": report["network"], "buildings": {k: v for k, v in report["buildings"].items() if k != "landuse"}, "rail": report["rail"], "cover": report["cover"]}, indent=2))
 
 
