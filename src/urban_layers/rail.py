@@ -41,9 +41,10 @@ def best_heading(centre, pull, reach=1024.0):
     return float(options[int(np.argmax(scores))])
 
 
-def walk(start, heading, pull, water, size, step=64.0, turn=0.08, limit=200):
+def walk(start, heading, pull, water, size, step=64.0, turn=0.08, limit=None):
     points = [np.asarray(start, dtype=np.float64)]
     first = heading
+    limit = limit or int(2 * (size[0] + size[1]) / step)
     ahead = np.array([128.0, 256.0, 384.0, 512.0])[:, None]
     area = box(0.0, 0.0, *size)
     for _step in range(limit):
@@ -80,13 +81,14 @@ def smooth_line(points, rounds=2):
     return points
 
 
-def rail_corridors(plan, size, threshold=0.08, smallest=400.0, most=4):
+def rail_corridors(plan, size, threshold=0.08, smallest=400.0, most=None):
     residual = plan_grid(plan, "rail", 0.7)
     leaning = 0.5 * plan_grid(plan, "major", 1.0) + 0.5 * (plan_grid(plan, "coverage", 2.0) + plan_grid(plan, "commercial", 2.0))
     water = plan_grid(plan, "water", 1.0)
     wanted = float(plan[CHANNELS.index("rail")].sum()) * 2.0 * CELL / TRACKS
     lines = []
     total = 0.0
+    most = most or max(4, int(round(4 * size[0] * size[1] / 4096.0**2)))
     while len(lines) < most and total < 0.8 * wanted:
         labels, count = ndimage.label(residual > threshold, structure=np.ones((3, 3)))
         if count == 0:

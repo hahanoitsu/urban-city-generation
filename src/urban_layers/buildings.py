@@ -127,40 +127,38 @@ def face_road(corners, roads, reach=60.0, limit=45.0):
     return (corners - middle) @ np.array([[cos, sin], [-sin, cos]]) + middle
 
 
-def hits(shape, blocked, shapes, boxes, tolerance):
-    found = []
+def near_boxes(shape, boxes):
+    minx, miny, maxx, maxy = shape.bounds
+    return np.nonzero((boxes[:, 0] < maxx) & (boxes[:, 2] > minx) & (boxes[:, 1] < maxy) & (boxes[:, 3] > miny))[0] if len(boxes) else []
+
+
+def clashes(shape, blocked, shapes, boxes, tolerance):
     if blocked is not None and blocked.intersects(shape):
-        part = shape.intersection(blocked)
-        if part.area > tolerance:
-            found.append(part)
-    if len(boxes):
-        minx, miny, maxx, maxy = shape.bounds
-        for index in np.nonzero((boxes[:, 0] < maxx) & (boxes[:, 2] > minx) & (boxes[:, 1] < maxy) & (boxes[:, 3] > miny))[0]:
-            part = shape.intersection(shapes[index])
-            if part.area > tolerance:
-                found.append(part)
-    return found
+        return True
+    return any(shape.intersection(shapes[index]).area > tolerance for index in near_boxes(shape, boxes))
 
 
 def way_out(corners, block_polygon, blocked, shapes, boxes, inside, limit, tolerance):
     shape = Polygon(corners)
-    found = hits(shape, blocked, shapes, boxes, tolerance)
-    if not found:
+    if not clashes(shape, blocked, shapes, boxes, tolerance):
         return corners
+    hit = [shape.intersection(blocked)] if blocked is not None and blocked.intersects(shape) else []
+    hit += [shape.intersection(shapes[index]) for index in near_boxes(shape, boxes)]
     along, across = corners[1] - corners[0], corners[3] - corners[0]
     limit = max(limit, 0.4 * max(np.linalg.norm(along), np.linalg.norm(across)))
     steps = np.linspace(limit / 12.0, limit, 12)
-    for direction in (np.subtract(shape.centroid.coords[0], unary_union(found).centroid.coords[0]), along, -along, across, -across):
+    for direction in (np.subtract(shape.centroid.coords[0], unary_union(hit).centroid.coords[0]), along, -along, across, -across):
         if np.linalg.norm(direction) < 1e-6:
             continue
         direction = direction / np.linalg.norm(direction)
         for step in steps:
             moved = corners + direction * step
             shape = Polygon(moved)
-            if shape.intersection(block_polygon).area < inside * shape.area:
-                break
-            if not hits(shape, blocked, shapes, boxes, tolerance):
+            if clashes(shape, blocked, shapes, boxes, tolerance):
+                continue
+            if shape.intersection(block_polygon).area >= inside * shape.area:
                 return moved
+            break
     return None
 
 
@@ -185,7 +183,9 @@ def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0,
             shape = Polygon(corners)
             if shape.intersection(block_polygon).area < inside * shape.area:
                 continue
-        corners = face_road(corners, roads)
+        turned = face_road(corners, roads)
+        if turned is not corners and Polygon(turned).intersection(block_polygon).area >= inside * Polygon(turned).area:
+            corners = turned
         moved = None
         middle = corners.mean(axis=0)
         for ground in blocked or (None,):
