@@ -203,6 +203,9 @@ def test_models_train_and_generate_a_city(tmp_path):
     assert all(item["tracks"] == 2 for item in city["rail"])
     report = audit_city(city, plan)
     assert {"network", "follows_plan", "rail", "cover"} <= set(report)
+    from urban_layers.check import check_city, failures
+
+    assert failures(check_city(city, plan)) == []
 
 
 @pytest.mark.parametrize("max_len", [40, 512])
@@ -401,3 +404,32 @@ def test_rail_audit_takes_a_single_line():
 
     city = {"size_m": [1000.0, 1000.0], "rail": [{"points": [[0.0, 500.0], [1000.0, 500.0]], "tracks": 2}], "stations": []}
     assert rail_stats(city) == {"track_km": 2.0, "pieces": 1, "loose_ends": 0, "stations": 0}
+
+
+def test_buffer_of_a_road_that_crosses_itself():
+    from urban_layers.data import corridor
+
+    loop = [[1991.0, 2056.0], [1993.0, 2052.0], [1997.0, 2048.0], [1998.0, 2048.0], [1993.0, 2050.0], [1991.0, 2056.0]]
+    assert corridor(loop, 3.0).difference(corridor(loop, 6.0)).area < 0.01
+
+
+def test_blocks_stop_at_the_road_and_keep_their_holes():
+    from urban_layers.city import cut_off_roads, rings
+    from urban_layers.data import corridor, polygon_of
+
+    local = line_class("road", "local", "surface")
+    road = np.array([[0.0, 100.0], [300.0, 100.0]])
+    parts = cut_off_roads([(box(0, 0, 300, 200), 1)], [(local, road)])
+    assert len(parts) == 2 and all(use == 1 for _part, use in parts)
+    assert all(part.intersection(corridor(road, 3.0)).area < 0.01 for part, _use in parts)
+    holed = box(0, 0, 100, 100).difference(box(40, 40, 60, 60))
+    assert polygon_of(rings(holed)).equals(holed)
+
+
+def test_roads_over_water_are_marked_as_bridges():
+    from urban_layers.city import bridge_spans
+
+    water = box(100, -50, 160, 50)
+    spans = bridge_spans([[0.0, 0.0], [300.0, 0.0]], water)
+    assert len(spans) == 1 and np.allclose(spans[0], [100.0, 160.0])
+    assert bridge_spans([[0.0, 0.0], [300.0, 0.0]], None) == []
