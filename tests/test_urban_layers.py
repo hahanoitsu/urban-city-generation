@@ -450,6 +450,45 @@ def test_function_audit_finds_a_town_you_cannot_drive_to():
     assert found["largest_piece_road_share"] == 1.0 and found["major_largest_piece_share"] == 1.0
 
 
+def road(name, level, points):
+    return (line_class("road", name, level), np.asarray(points, dtype=np.float64))
+
+
+def test_a_hanging_flyover_comes_down_onto_the_road():
+    from urban_layers.city import lines_to_layers
+    from urban_layers.network import join_network
+
+    lines = [road("major", "surface", [[0.0, 0.0], [400.0, 0.0]]), road("major", "elevated", [[200.0, 300.0], [200.0, 25.0]])]
+    joined, counts = join_network(lines, np.zeros((len(CHANNELS), 8, 8)), (1024.0, 1024.0))
+    assert counts["ramps"] == 1
+    flyover = [points for class_id, points in joined if LINE_CLASSES[class_id][2] == "elevated"][0]
+    assert np.allclose(flyover[-1], [200.0, 0.0])
+    _roads, _rail, graph = lines_to_layers(joined, 1024.0, 1024.0)
+    landing = [node for node in graph["nodes"] if np.allclose(node["position_local_m"][:2], [200.0, 0.0])]
+    assert len(landing) == 1 and landing[0]["degree"] == 3
+
+
+def test_cut_off_towns_get_joined_and_lone_stubs_go():
+    from urban_layers.audit import road_pieces
+    from urban_layers.network import join_network
+
+    def town(left):
+        lines = [road("major", "surface", [[left, 500.0], [left + 1000.0, 500.0]])]
+        return lines + [road("local", "surface", [[left + x, 200.0], [left + x, 800.0]]) for x in (200.0, 500.0, 800.0)]
+
+    stub_far = road("local", "surface", [[1400.0, 1600.0], [1500.0, 1600.0]])
+    stub_near = road("local", "surface", [[200.0, 820.0], [200.0, 900.0]])
+    lines = town(0.0) + town(1600.0) + [stub_far, stub_near]
+    joined, counts = join_network(lines, np.zeros((len(CHANNELS), 16, 24)), (3072.0, 2048.0))
+    assert counts["dropped"] == 1 and counts["major_links"] >= 1
+    assert not any(np.allclose(points, stub_far[1]) for _class_id, points in joined)
+    _shapes, label = road_pieces([{"points": points, "vertical": LINE_CLASSES[class_id][2]} for class_id, points in joined])
+    assert len(set(label.tolist())) == 1
+    majors = [(class_id, points) for class_id, points in joined if LINE_CLASSES[class_id][1] == "major"]
+    _shapes, label = road_pieces([{"points": points, "vertical": "surface"} for _class_id, points in majors])
+    assert len(set(label.tolist())) == 1
+
+
 def test_buffer_of_a_road_that_crosses_itself():
     from urban_layers.data import corridor
 

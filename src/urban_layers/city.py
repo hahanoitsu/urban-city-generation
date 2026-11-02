@@ -36,6 +36,7 @@ from urban_layers.data import (
     road_index,
     split_block,
 )
+from urban_layers.network import join_network
 from urban_layers.plan import PlanNet, sample_plan
 from urban_layers.rail import RAIL_WIDTH, TRACKS, rail_corridors, rail_runs, rail_stations
 from urban_layers.streets import PORTS, SIDES, StreetModel, collate, condition_arrays, plan_crop, port_key, snap_to_ports
@@ -358,7 +359,38 @@ def lines_to_layers(lines, width_m, height_m):
     roads_frame = gpd.GeoDataFrame(roads, geometry="geometry", crs="EPSG:3857") if roads else gpd.GeoDataFrame({"geometry": []}, geometry="geometry", crs="EPSG:3857")
     rail_frame = gpd.GeoDataFrame(rail, geometry="geometry", crs="EPSG:3857") if rail else gpd.GeoDataFrame({"geometry": []}, geometry="geometry", crs="EPSG:3857")
     tile = TileSpec(city_id="generated", column=0, row=0, minx=0.0, miny=0.0, maxx=float(width_m), maxy=float(height_m))
-    return roads_frame, rail_frame, build_transport_graph(roads_frame, rail_frame, tile)
+    return roads_frame, rail_frame, join_levels(build_transport_graph(roads_frame, rail_frame, tile))
+
+
+def join_levels(graph):
+    spots = {}
+    for node in graph["nodes"]:
+        x, y = node["position_local_m"][:2]
+        spots.setdefault((node["transport_mode"], round(x, 2), round(y, 2)), []).append(node)
+    merged = {}
+    for group in spots.values():
+        if len({node["vertical_mode"] for node in group}) < 2 or not any(node["degree"] == 1 for node in group):
+            continue
+        keep = min(group, key=lambda node: (node["vertical_mode"] != "surface", node["id"]))
+        for node in group:
+            if node is not keep:
+                merged[node["id"]] = keep["id"]
+    if not merged:
+        return graph
+    degree = {}
+    for edge in graph["edges"]:
+        edge["from_node"] = merged.get(edge["from_node"], edge["from_node"])
+        edge["to_node"] = merged.get(edge["to_node"], edge["to_node"])
+        for name in (edge["from_node"], edge["to_node"]):
+            degree[name] = degree.get(name, 0) + 1
+    graph["nodes"] = [node for node in graph["nodes"] if node["id"] not in merged]
+    for node in graph["nodes"]:
+        node["degree"] = degree.get(node["id"], 0)
+        if node["boundary_port_key"] is None:
+            node["node_type"] = "endpoint" if node["degree"] <= 1 else "intersection" if node["degree"] >= 3 else "continuation"
+    graph["statistics"]["nodes"] = len(graph["nodes"])
+    graph["statistics"]["intersections"] = sum(node["node_type"] == "intersection" for node in graph["nodes"])
+    return graph
 
 
 def planned_cover(plan, polygon, step=32.0):
@@ -617,7 +649,9 @@ def generate_city(
         for part in getattr(piece, "geoms", [piece]):
             if part.geom_type == "LineString" and part.length > 2.0:
                 clipped.append((class_id, np.asarray(part.coords), (False, False)))
-    streets = snap_lines(clipped)
+    streets, joined = join_network(snap_lines(clipped), plan, size, water_union)
+    if joined:
+        log(f"roads joined: {joined['ramps']} ramps landed, {joined['stitched']} ends stitched, {joined['dropped']} stray pieces dropped, {joined['major_links']} main road links ({joined['major_link_km']:.1f} km), {joined['links']} other links ({joined['link_km']:.1f} km)")
     lines = streets + [(class_id, points) for class_id, points, _number in runs]
     roads_frame, rail_frame, graph = lines_to_layers(lines, *size)
     log(f"network: {len(graph['nodes'])} nodes, {len(graph['edges'])} edges, {time.time() - started:.0f}s")
