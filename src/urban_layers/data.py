@@ -627,6 +627,32 @@ def box_of(polygon, centre, angle):
     return float(middle[0]), float(middle[1]), float(width), float(depth), float(turn)
 
 
+def half_turn(angle):
+    return (angle + math.pi / 2.0) % math.pi - math.pi / 2.0
+
+
+def road_segments(lines):
+    pieces = []
+    for class_id, shape, *_rest in lines:
+        mode, _name, level = LINE_CLASSES[class_id]
+        points = np.asarray(shape.coords if hasattr(shape, "coords") else shape, dtype=np.float64)[:, :2]
+        if mode == "road" and level != "underground" and len(points) >= 2:
+            pieces.append(np.stack([points[:-1], points[1:]], axis=1))
+    return np.concatenate(pieces) if pieces else np.zeros((0, 2, 2))
+
+
+def road_turn(point, segments, reach=60.0):
+    if not len(segments):
+        return None
+    start, step = segments[:, 0], segments[:, 1] - segments[:, 0]
+    along = np.clip(((point - start) * step).sum(axis=1) / np.maximum((step * step).sum(axis=1), 1e-9), 0.0, 1.0)
+    distance = np.linalg.norm(start + step * along[:, None] - point, axis=1)
+    nearest = int(np.argmin(distance))
+    if distance[nearest] > reach:
+        return None
+    return math.atan2(step[nearest, 1], step[nearest, 0])
+
+
 def box_polygon(x, y, width, depth, turn):
     along = np.array([math.cos(turn), math.sin(turn)]) * width / 2.0
     across = np.array([-math.sin(turn), math.cos(turn)]) * depth / 2.0
@@ -785,6 +811,8 @@ def block_records(layers, lines, plan, bounds):
     blocks = make_blocks(lines, water)
     road_tree, road_classes = road_index(lines)
     line_tree, line_classes = line_index(lines)
+    segments = road_segments(lines)
+    segment_tree = STRtree(shapely.linestrings(segments)) if len(segments) else None
     buildings = []
     if road_tree is None:
         return [], 0, len(layers.buildings)
@@ -822,6 +850,13 @@ def block_records(layers, lines, plan, bounds):
                     continue
                 items.append((kind, *shape, height_m))
         assigned += len(items)
+        if items and segment_tree is not None:
+            spots = from_frame(np.asarray([(item[1], item[2]) for item in items]), centre, angle)
+            near = segment_tree.query(box(*spots.min(axis=0) - 60.0, *spots.max(axis=0) + 60.0))
+            for number, spot in enumerate(spots):
+                road = road_turn(spot, segments[near])
+                if road is not None:
+                    items[number] = (*items[number][:5], half_turn(items[number][5] - (road - angle)), items[number][6])
         use = 0
         if landuse_tree is not None:
             share = np.zeros(len(LANDUSE))

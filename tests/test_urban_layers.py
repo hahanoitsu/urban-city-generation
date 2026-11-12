@@ -231,6 +231,31 @@ def test_a_block_knows_the_roads_on_its_edge_and_the_lines_across_it():
     assert old.condition(batch)[0].shape[1] == 2 + 48 and model.condition(batch)[0].shape[1] == 2 + 48 + 48
 
 
+def test_building_angles_are_kept_relative_to_the_nearest_road():
+    from urban_layers.buildings import place_buildings
+    from urban_layers.data import block_frame, block_records, city_lines, road_segments
+
+    crs = "EPSG:3857"
+    frame = lambda rows: gpd.GeoDataFrame(rows, geometry="geometry", crs=crs) if rows else gpd.GeoDataFrame({"geometry": []}, geometry="geometry", crs=crs)
+    road = lambda points: {"road_class": "local", "vertical_mode": "surface", "estimated_width_m": 6.0, "geometry": LineString(points)}
+    roads = [road([(0, 0), (200, 0)]), road([(200, 0), (200, 100)]), road([(200, 100), (0, 100)]), road([(0, 100), (0, 0)])]
+    homes = [box(170, 30, 182, 70), box(40, 10, 80, 22), Polygon([(100, 40), (130, 57), (125, 66), (95, 49)])]
+    buildings = [{"building": "house", "estimated_height_m": 9.0, "geometry": home} for home in homes]
+    layers = CityLayers(roads=frame(roads), buildings=frame(buildings), landuse=frame([]), landuse_known=frame([]), water=frame([]), green=frame([]), rail=frame([]))
+    lines = city_lines(layers)
+    records, assigned, _total = block_records(layers, lines, np.zeros((len(CHANNELS), 2, 2), dtype=np.float32), (0.0, 0.0, 256.0, 256.0))
+    assert assigned == 3
+    record = next(record for record in records if len(record["buildings"]) == 3)
+    turns = sorted(abs(float(turn)) for turn in record["buildings"][:, 5])
+    assert turns[0] < 0.02 and turns[1] < 0.02 and abs(turns[2] - math.atan2(17, 30)) < 0.03
+    block = box(3, 3, 197, 97)
+    centre, angle = block_frame(block)
+    placed = place_buildings(block, centre, angle, [tuple(row) for row in record["buildings"]], nudge=0.0, roads=road_segments(lines), face=False, relative=True)
+    assert len(placed) == 3
+    for item, home in zip(sorted(placed, key=lambda item: Polygon(item["footprint"]).centroid.x), sorted(homes, key=lambda home: home.centroid.x)):
+        assert Polygon(item["footprint"]).intersection(home.minimum_rotated_rectangle).area > 0.9 * home.area
+
+
 def test_building_tokens_round_trip():
     tokens = BuildingTokens()
     landuse, items = tokens.decode(tokens.encode(2, [(1, 10.2, -40.7, 25.0, 12.0, 0.4, 33.0)]))

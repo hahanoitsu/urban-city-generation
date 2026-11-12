@@ -9,7 +9,7 @@ import torch
 from shapely.geometry import Polygon
 from shapely.ops import nearest_points, unary_union
 
-from urban_layers.data import CHANNELS, LINE_CLASSES, box_polygon, from_frame
+from urban_layers.data import CHANNELS, LINE_CLASSES, box_polygon, from_frame, road_turn
 from urban_layers.decoder import TokenDecoder, fourier
 from urban_layers.tokens import BuildingGrammar, BuildingTokens
 
@@ -206,12 +206,16 @@ def trim(corners, block_polygon, blocked, shapes, boxes, inside, tolerance, most
     return best
 
 
-def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0, blocked=(), roads=None, push=12.0, tolerance=1.0, face=True, tally=None):
+def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0, blocked=(), roads=None, push=12.0, tolerance=1.0, face=True, tally=None, relative=False):
     placed = []
     shapes = []
     boxes = np.zeros((0, 4))
     tally = {} if tally is None else tally
     for kind, x, y, width, depth, turn, height in items:
+        if relative and roads is not None:
+            road = road_turn(from_frame(np.array([[x, y]]), centre, angle)[0], roads)
+            if road is not None:
+                turn = turn + road - angle
         corners = from_frame(box_polygon(x, y, width, depth, turn), centre, angle)
         drawn = corners
         shape = Polygon(corners)

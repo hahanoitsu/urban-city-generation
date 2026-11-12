@@ -34,6 +34,7 @@ from urban_layers.data import (
     is_trunk,
     line_index,
     make_blocks,
+    road_segments,
     plan_raster,
     polygon_of,
     pool_plan,
@@ -591,16 +592,6 @@ def bridge_spans(points, water):
     return [[round(low, 2), round(high, 2)] for low, high in joined if high - low > 1.0]
 
 
-def road_segments(lines):
-    pieces = []
-    for class_id, points in lines:
-        mode, _name, level = LINE_CLASSES[class_id]
-        points = np.asarray(points, dtype=np.float64)
-        if mode == "road" and level != "underground" and len(points) >= 2:
-            pieces.append(np.stack([points[:-1], points[1:]], axis=1))
-    return np.concatenate(pieces) if pieces else np.zeros((0, 2, 2))
-
-
 def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, generator=None, temperature=1.0, top_p=0.95, samples=4, batch_size=64, device="cpu", log=print, water=None):
     scale = np.asarray(checkpoint["scale"], dtype=np.float32)
     shapes = [(class_id, LineString(points), 0.0) for class_id, points in lines]
@@ -625,7 +616,7 @@ def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, ge
                 ground = ground if ground.is_valid else shapely.make_valid(ground)
                 shapely.prepare(ground)
                 blocked.append(ground)
-        roads = segments[segment_tree.query(part.buffer(30.0))] if segment_tree is not None else None
+        roads = segments[segment_tree.query(part.buffer(60.0))] if segment_tree is not None else None
         return blocked, roads
 
     around = [surroundings(part) for _block_id, part, _use in parts]
@@ -640,7 +631,8 @@ def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, ge
             results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, landuse=uses)
             for index, (_landuse, items_out) in zip(chunk, results):
                 blocked, roads = around[index]
-                placed = place_buildings(parts[index][1], records[index]["centre"], records[index]["angle"], items_out, blocked=blocked, roads=roads, face=not model.config.get("roads", False), tally=tally)
+                aware = model.config.get("roads", False)
+                placed = place_buildings(parts[index][1], records[index]["centre"], records[index]["angle"], items_out, blocked=blocked, roads=roads, face=not aware, tally=tally, relative=aware)
                 options[index].append(reachable(placed, road_tree, 120.0 if covers[index] >= 0.06 else 60.0))
         log(f"buildings: parts {chunk[-1] + 1}/{len(parts)}")
 
