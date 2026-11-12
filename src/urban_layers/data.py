@@ -442,7 +442,7 @@ def add_stops(tiles, stations, unit, reach=80.0, same=1.0):
 
 
 def trunk_tiles(lines, bounds, stations=(), unit=TRUNK, stride=TILE / 2):
-    small = [(class_id, affinity.scale(geometry, 1.0 / unit, 1.0 / unit, origin=(0, 0)), width) for class_id, geometry, width in rail_corridors(lines) if is_trunk(class_id)]
+    small = [(class_id, affinity.scale(geometry, 1.0 / unit, 1.0 / unit, origin=(0, 0)), width) for class_id, geometry, width in lines if is_trunk(class_id)]
     if not small:
         return []
     tiles = street_tiles(small, tuple(value / unit for value in bounds), stride)
@@ -706,12 +706,13 @@ def block_records(layers, lines, plan, bounds):
 
 def build_city(gpkg, name, output, stride=TILE):
     layers, _metadata = load_city_gpkg(gpkg)
-    lines = city_lines(layers)
+    lines = [line for line in city_lines(layers) if LINE_CLASSES[line[0]][1] != "tram"]
     bounds = city_bounds(layers)
     plan = plan_raster(layers, lines, bounds)
     stations = city_stations(layers)
-    tiles = street_tiles(lines, bounds, stride)
-    trunk = trunk_tiles(lines, bounds, stations)
+    merged = rail_corridors(lines)
+    tiles = street_tiles(merged, bounds, stride)
+    trunk = trunk_tiles(merged, bounds, stations[stations[:, 2] != RAIL_CLASSES.index("tram")])
     blocks, assigned, total = block_records(layers, lines, plan, bounds)
     folder = Path(output) / name
     folder.mkdir(parents=True, exist_ok=True)

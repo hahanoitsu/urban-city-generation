@@ -68,6 +68,8 @@ def test_build_city_layers(tmp_path):
 def test_stations_are_saved_with_the_city(tmp_path):
     summary = build_city(small_city(tmp_path), "small", tmp_path / "layers", stride=256.0)
     assert summary["stations"]["subway"] == 2 and summary["stations"]["tram"] == 1 and summary["stations"]["rail"] == 0
+    trunk = torch.load(tmp_path / "layers" / "small" / "trunk.pt", weights_only=False)
+    assert sum(len(stops) for tile in trunk for stops in tile["stops"]) == 2
     stations = load_cities(tmp_path / "layers")[0]["stations"]
     assert stations.shape == (3, 3)
     assert sorted(stations[:, 0].tolist()) == [300.0, 600.0, 900.0]
