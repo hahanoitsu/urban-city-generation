@@ -18,7 +18,7 @@ def fourier(values, bands=8):
 
 
 class StreetTokens:
-    def __init__(self, size=int(TILE)):
+    def __init__(self, size=int(TILE), stations=False):
         self.size = size
         self.coords = size + 1
         self.end = 3
@@ -28,6 +28,10 @@ class StreetTokens:
         self.first_x = self.first_class + len(LINE_CLASSES)
         self.first_y = self.first_x + self.coords
         self.vocab = self.first_y + self.coords
+        self.station = None
+        if stations:
+            self.station = self.vocab
+            self.vocab += 1
         kinds = np.zeros(self.vocab, dtype=np.int64)
         kinds[self.end] = 3
         kinds[self.first_class : self.first_x] = 4
@@ -37,27 +41,34 @@ class StreetTokens:
         kinds[self.end_join] = 8
         kinds[EOS] = 2
         kinds[BOS] = 1
+        if stations:
+            kinds[self.station] = 9
         self.kinds = kinds
+        self.rail = np.zeros(self.vocab, dtype=bool)
+        self.rail[self.first_class : self.first_x] = [mode == "rail" for mode, _name, _level in LINE_CLASSES]
 
     def features(self):
-        table = np.zeros((self.vocab, 9 + 16), dtype=np.float32)
+        width = 9 if self.station is None else 10
+        table = np.zeros((self.vocab, width + 16), dtype=np.float32)
         table[np.arange(self.vocab), self.kinds] = 1.0
         values = np.arange(self.coords) / self.size
-        table[self.first_x : self.first_y, 9:] = fourier(values)
-        table[self.first_y :, 9:] = fourier(values)
+        table[self.first_x : self.first_y, width:] = fourier(values)
+        table[self.first_y : self.first_y + self.coords, width:] = fourier(values)
         return torch.from_numpy(table)
 
-    def quantise(self, points):
+    def quantise(self, points, where=False):
         points = np.clip(np.rint(np.asarray(points, dtype=np.float64)), 0, self.size).astype(np.int64)
         keep = np.ones(len(points), dtype=bool)
         keep[1:] = np.any(points[1:] != points[:-1], axis=1)
-        return points[keep]
+        return (points[keep], np.cumsum(keep) - 1) if where else points[keep]
 
     def encode(self, lines, max_len=None):
         tokens = [BOS]
         for line in lines:
-            class_id, points = line[0], self.quantise(line[1])
+            class_id = line[0]
+            points, where = self.quantise(line[1], where=True)
             start_join, end_join = line[2] if len(line) > 2 else (False, False)
+            stops = {int(where[index]) for index in line[3]} if self.station is not None and len(line) > 3 else ()
             if len(points) < 2:
                 continue
             piece = [self.first_class + int(class_id)]
@@ -67,6 +78,8 @@ class StreetTokens:
                 if end_join and index == len(points) - 1:
                     piece.append(self.end_join)
                 piece += [self.first_x + int(x), self.first_y + int(y)]
+                if index in stops:
+                    piece.append(self.station)
             piece.append(self.end)
             if max_len is not None and len(tokens) + len(piece) + 1 > max_len:
                 break
@@ -80,11 +93,12 @@ class StreetTokens:
         points = []
         pending_x = None
         joins = [False, False]
+        stops = []
         for token in list(tokens):
             token = int(token)
             kind = self.kinds[token]
             if kind == 4:
-                class_id, points, pending_x, joins = token - self.first_class, [], None, [False, False]
+                class_id, points, pending_x, joins, stops = token - self.first_class, [], None, [False, False], []
             elif kind == 7:
                 joins[0] = True
             elif kind == 8:
@@ -94,9 +108,12 @@ class StreetTokens:
             elif kind == 6 and pending_x is not None:
                 points.append((pending_x, token - self.first_y))
                 pending_x = None
+            elif kind == 9 and points:
+                stops.append(len(points) - 1)
             elif kind == 3:
                 if class_id is not None and len(points) >= 2:
-                    lines.append((class_id, np.asarray(points, dtype=np.float32), tuple(joins)))
+                    line = (class_id, np.asarray(points, dtype=np.float32), tuple(joins))
+                    lines.append(line if self.station is None else line + (tuple(stops),))
                 class_id, points = None, []
             elif token == EOS:
                 break
@@ -104,8 +121,9 @@ class StreetTokens:
 
 
 class StreetGrammar:
-    def __init__(self, tokens, max_points=48, max_lines=160, ports=None, reach=8, max_len=None, sides=None, margin=4, classes=None):
+    def __init__(self, tokens, max_points=48, max_lines=160, ports=None, reach=8, max_len=None, sides=None, margin=4, classes=None, script=None):
         self.tokens = tokens
+        self.script = script
         self.max_points = max_points
         self.max_lines = max_lines
         self.ports = ports
@@ -114,7 +132,7 @@ class StreetGrammar:
         self.sides = sides
         self.margin = margin
         kinds = torch.from_numpy(tokens.kinds)
-        names = (("eos", 2), ("end", 3), ("class", 4), ("x", 5), ("y", 6), ("join", 7), ("end_join", 8))
+        names = (("eos", 2), ("end", 3), ("class", 4), ("x", 5), ("y", 6), ("join", 7), ("end_join", 8), ("station", 9))
         self.masks = {name: kinds == value for name, value in names}
         if classes is not None:
             self.masks["class"][tokens.first_class : tokens.first_x] &= torch.as_tensor(classes, dtype=torch.bool)
@@ -137,6 +155,9 @@ class StreetGrammar:
             "sides": self.sides.to(device) if self.sides is not None else torch.zeros(batch, 4, dtype=torch.bool, device=device),
             "joined": torch.zeros(batch, dtype=torch.bool, device=device),
             "closing": torch.zeros(batch, dtype=torch.bool, device=device),
+            "rail": torch.zeros(batch, dtype=torch.bool, device=device),
+            "stopped": torch.zeros(batch, dtype=torch.bool, device=device),
+            "step": zeros.clone(),
         }
 
     def pending(self, state):
@@ -184,6 +205,7 @@ class StreetGrammar:
         result |= (after_point & room)[:, None] & (masks["x"] | masks["end_join"])
         result |= (after_point & (points >= 2) & ~stuck)[:, None] & masks["end"]
         result |= ((phase == 3) & closing)[:, None] & masks["end"]
+        result |= ((phase == 3) & state["rail"] & ~state["stopped"])[:, None] & masks["station"]
         result |= (phase == 4)[:, None] & masks["pad"]
 
         rows = torch.arange(batch, device=phase.device)
@@ -198,6 +220,13 @@ class StreetGrammar:
             forced = torch.zeros_like(result)
             forced[rows, token.clamp(0, self.tokens.vocab - 1)] = True
             result = torch.where(condition[:, None], forced, result)
+        if self.script is not None and self.script.shape[1] > 0:
+            script = self.script.to(phase.device)
+            token = script[rows, state["step"].clamp_max(script.shape[1] - 1)]
+            written = (state["step"] < script.shape[1]) & (token >= 0) & (phase != 4)
+            forced = torch.zeros_like(result)
+            forced[rows, token.clamp_min(0)] = True
+            result = torch.where(written[:, None], forced, result)
         return result
 
     def advance(self, state, token):
@@ -227,6 +256,8 @@ class StreetGrammar:
         new_line = kinds == 4
         joined = (state["joined"] | (kinds == 7)) & ~new_line
         closing = (state["closing"] | (kinds == 8)) & ~new_line & ~ended
+        rail = torch.where(new_line, torch.from_numpy(self.tokens.rail).to(token.device)[token], state["rail"])
+        stopped = (state["stopped"] | (kinds == 9)) & ~new_point & ~new_line
 
         phase = torch.where(new_line, torch.ones_like(phase), phase)
         points = torch.where(new_line, torch.zeros_like(points), points)
@@ -250,6 +281,9 @@ class StreetGrammar:
             "length": length,
             "joined": joined,
             "closing": closing,
+            "rail": rail,
+            "stopped": stopped,
+            "step": state["step"] + 1,
         }
 
     def done(self, state):

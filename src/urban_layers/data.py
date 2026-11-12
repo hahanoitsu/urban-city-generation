@@ -13,7 +13,7 @@ from rasterio.transform import from_origin
 from shapely import affinity
 from shapely.errors import GEOSException
 from shapely.geometry import LineString, MultiLineString, Polygon, box
-from shapely.ops import linemerge, polygonize, unary_union
+from shapely.ops import linemerge, nearest_points, polygonize, substring, unary_union
 from shapely.strtree import STRtree
 
 from urban_dataset.prepared import load_city_gpkg
@@ -24,6 +24,7 @@ TILE = 512.0
 MARGIN = 128.0
 FINE = 8.0
 BLOCK_SPLIT = 384.0
+TRUNK = 4.0
 
 CHANNELS = (
     "major",
@@ -54,6 +55,11 @@ def line_class(mode, name, level):
     name = name if name in names else names[-1] if mode == "road" else "rail"
     level = level if level in VERTICAL else "unknown"
     return LINE_CLASSES.index((mode, name, level))
+
+
+def is_trunk(class_id):
+    mode, name, _level = LINE_CLASSES[class_id]
+    return name == "major" if mode == "road" else name != "tram"
 
 
 def corridor(points, reach):
@@ -288,6 +294,161 @@ def touch_lists(lines, reach=2.5):
     return result
 
 
+def pool_plan(plan, factor):
+    factor = int(factor)
+    rows = -(-plan.shape[1] // factor) * factor
+    columns = -(-plan.shape[2] // factor) * factor
+    padded = np.zeros((plan.shape[0], rows, columns), dtype=plan.dtype)
+    padded[:, : plan.shape[1], : plan.shape[2]] = plan
+    return padded.reshape(plan.shape[0], rows // factor, factor, columns // factor, factor).mean(axis=(2, 4))
+
+
+def tangents(line, along, length):
+    ahead = shapely.get_coordinates(shapely.line_interpolate_point(line, np.minimum(along + 1.0, length)))
+    behind = shapely.get_coordinates(shapely.line_interpolate_point(line, np.maximum(along - 1.0, 0.0)))
+    step = ahead - behind
+    return step / np.maximum(np.linalg.norm(step, axis=1, keepdims=True), 1e-9)
+
+
+def rail_corridors(lines, gap=12.0, step=10.0, shortest=30.0, shared=100.0):
+    rail = [index for index, (class_id, _geometry, _width) in enumerate(lines) if LINE_CLASSES[class_id][0] == "rail" and is_trunk(class_id)]
+    if len(rail) < 2:
+        return list(lines)
+    shapes = np.asarray([lines[index][1] for index in rail], dtype=object)
+    classes = np.asarray([lines[index][0] for index in rail])
+    length = shapely.length(shapes)
+    first, second = STRtree(shapes).query(shapes, predicate="dwithin", distance=gap)
+    covers = (first != second) & (classes[first] == classes[second]) & ((length[second] > length[first]) | ((length[second] == length[first]) & (second < first)))
+    partners = {}
+    for mine, other in zip(first[covers].tolist(), second[covers].tolist()):
+        partners.setdefault(mine, []).append(other)
+    chosen = set(rail)
+    kept = [item for index, item in enumerate(lines) if index not in chosen]
+    for local, shape in enumerate(shapes):
+        others = partners.get(local)
+        if not others:
+            kept.append((int(classes[local]), shape, 0.0))
+            continue
+        count = max(int(np.ceil(length[local] / step)), 1)
+        edges = np.linspace(0.0, length[local], count + 1)
+        along = (edges[:-1] + edges[1:]) / 2.0
+        here = shapely.line_interpolate_point(shape, along)
+        heading = tangents(shape, along, length[local])
+        covered = np.zeros(count, dtype=bool)
+        for other in others:
+            position = shapely.line_locate_point(shapes[other], here)
+            near = shapely.distance(here, shapely.line_interpolate_point(shapes[other], position)) <= gap
+            if near.any():
+                covered |= near & (np.abs((heading * tangents(shapes[other], position, length[other])).sum(axis=1)) > 0.85)
+        begin = None
+        for index in range(count + 1):
+            inside = index < count and covered[index]
+            if inside and begin is None:
+                begin = index
+            if not inside and begin is not None:
+                if edges[index] - edges[begin] < shared and (begin > 0 or index < count):
+                    covered[begin:index] = False
+                begin = None
+        if not covered.any():
+            kept.append((int(classes[local]), shape, 0.0))
+            continue
+        rest = unary_union([shapes[other] for other in others])
+        start = None
+        for index in range(count + 1):
+            free = index < count and not covered[index]
+            if free and start is None:
+                start = index
+            if not free and start is not None:
+                if edges[index] - edges[start] >= shortest:
+                    points = np.asarray(substring(shape, edges[start], edges[index]).coords)[:, :2]
+                    for cut, end in ((start > 0, 0), (index < count, -1)):
+                        if cut:
+                            target = np.asarray(nearest_points(rest, shapely.Point(points[end]))[0].coords[0])
+                            if np.linalg.norm(target - points[end]) <= 3.0 * gap:
+                                points = np.vstack([target[None], points]) if end == 0 else np.vstack([points, target[None]])
+                    kept.append((int(classes[local]), LineString(points), 0.0))
+                start = None
+    return close_gaps(kept, gap)
+
+
+def close_gaps(lines, gap):
+    rail = [index for index, (class_id, geometry, _width) in enumerate(lines) if LINE_CLASSES[class_id][0] == "rail" and is_trunk(class_id) and geometry.length > 2.0 * gap]
+    if len(rail) < 2:
+        return lines
+    coords = [np.asarray(lines[index][1].coords)[:, :2].copy() for index in rail]
+    ends = np.asarray([points[slot] for points in coords for slot in (0, -1)])
+    first, second = STRtree(shapely.points(ends)).query(shapely.points(ends), predicate="dwithin", distance=gap)
+    parent = list(range(len(ends)))
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    for a, b in zip(first.tolist(), second.tolist()):
+        if a // 2 != b // 2:
+            parent[find(a)] = find(b)
+    groups = {}
+    for index in range(len(ends)):
+        groups.setdefault(find(index), []).append(index)
+    for members in groups.values():
+        if len(members) > 1:
+            middle = ends[members].mean(axis=0)
+            for member in members:
+                coords[member // 2][0 if member % 2 == 0 else -1] = middle
+    shapes = [LineString(points) for points in coords]
+    tree = STRtree(shapes)
+    for number, points in enumerate(coords):
+        for slot in (0, -1):
+            end = shapely.Point(points[slot])
+            near = [int(other) for other in tree.query(end, predicate="dwithin", distance=gap) if other != number]
+            gaps = [shapes[other].distance(end) for other in near]
+            if near and min(gaps) > 0.5:
+                points[slot] = nearest_points(shapes[near[int(np.argmin(gaps))]], end)[0].coords[0]
+    lines = list(lines)
+    for index, points in zip(rail, coords):
+        lines[index] = (lines[index][0], LineString(points), lines[index][2])
+    return [line for line in lines if line[1].length > 1.0]
+
+
+def add_stops(tiles, stations, unit, reach=80.0, same=1.0):
+    spots = np.asarray(stations, dtype=np.float64).reshape(-1, 3)[:, :2] / unit
+    for tile in tiles:
+        x0, y0 = tile["origin"]
+        stops = [[] for _target in tile["targets"]]
+        inside = spots[(spots[:, 0] >= x0) & (spots[:, 0] < x0 + TILE) & (spots[:, 1] >= y0) & (spots[:, 1] < y0 + TILE)] - (x0, y0) if len(spots) else []
+        for spot in inside:
+            point = shapely.Point(spot)
+            for number, (class_id, points) in enumerate(tile["targets"]):
+                if LINE_CLASSES[class_id][0] != "rail":
+                    continue
+                line = LineString(points)
+                if line.distance(point) > reach / unit:
+                    continue
+                on_line = np.asarray(line.interpolate(line.project(point)).coords[0], dtype=np.float32)
+                gaps = np.linalg.norm(points - on_line, axis=1)
+                index = int(np.argmin(gaps))
+                if gaps[index] > same:
+                    cumulative = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))])
+                    index = int(np.clip(np.searchsorted(cumulative, line.project(point)), 1, len(points) - 1))
+                    points = np.insert(points, index, on_line, axis=0)
+                    tile["targets"][number] = (class_id, points)
+                    stops[number] = [stop + (stop >= index) for stop in stops[number]]
+                if index not in stops[number]:
+                    stops[number] = sorted(stops[number] + [index])
+        tile["stops"] = stops
+    return tiles
+
+
+def trunk_tiles(lines, bounds, stations=(), unit=TRUNK, stride=TILE / 2):
+    small = [(class_id, affinity.scale(geometry, 1.0 / unit, 1.0 / unit, origin=(0, 0)), width) for class_id, geometry, width in rail_corridors(lines) if is_trunk(class_id)]
+    if not small:
+        return []
+    tiles = street_tiles(small, tuple(value / unit for value in bounds), stride)
+    return add_stops(tiles, stations, unit)
+
+
 def street_tiles(lines, bounds, stride=TILE, minimum_length=40.0):
     minx, miny, maxx, maxy = bounds
     geometries = [geometry for _class_id, geometry, _width in lines]
@@ -298,7 +459,8 @@ def street_tiles(lines, bounds, stride=TILE, minimum_length=40.0):
         for x0 in np.arange(minx, maxx - TILE / 2, stride):
             window = box(x0 - MARGIN, y0 - MARGIN, x0 + TILE + MARGIN, y0 + TILE + MARGIN)
             found = tree.query(window, predicate="intersects")
-            if len(found) == 0:
+            spare = (int(round((x0 - minx) / stride)) * 7 + int(round((y0 - miny) / stride)) * 13) % 3 == 0
+            if len(found) == 0 and not spare:
                 continue
             grouped = {}
             for index in found:
@@ -324,7 +486,7 @@ def street_tiles(lines, bounds, stride=TILE, minimum_length=40.0):
                             if piece.length < 2.0:
                                 continue
                             context.append((class_id, np.asarray(piece.coords, dtype=np.float32)[:, :2], ring_index))
-            if inside_length < minimum_length:
+            if inside_length < minimum_length and not spare:
                 continue
             tiles.append(
                 {
@@ -549,12 +711,14 @@ def build_city(gpkg, name, output, stride=TILE):
     plan = plan_raster(layers, lines, bounds)
     stations = city_stations(layers)
     tiles = street_tiles(lines, bounds, stride)
+    trunk = trunk_tiles(lines, bounds, stations)
     blocks, assigned, total = block_records(layers, lines, plan, bounds)
     folder = Path(output) / name
     folder.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(folder / "plan.npz", plan=plan, bounds=np.asarray(bounds))
     np.save(folder / "stations.npy", stations)
     torch.save(tiles, folder / "streets.pt")
+    torch.save(trunk, folder / "trunk.pt")
     torch.save(blocks, folder / "blocks.pt")
     summary = {
         "name": name,
@@ -564,26 +728,30 @@ def build_city(gpkg, name, output, stride=TILE):
         "channels": list(CHANNELS),
         "lines": len(lines),
         "tiles": len(tiles),
+        "trunk_tiles": len(trunk),
+        "trunk_unit_m": TRUNK,
         "blocks": len(blocks),
         "buildings_in_blocks": assigned,
         "buildings": total,
         "stations": {name: int((stations[:, 2] == index).sum()) for index, name in enumerate(RAIL_CLASSES)},
         "channel_means": {channel: float(plan[index].mean()) for index, channel in enumerate(CHANNELS)},
     }
-    summary.update(token_lengths(tiles, blocks))
+    summary.update(token_lengths(tiles, blocks, trunk))
     (folder / "meta.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
 
 
-def token_lengths(tiles, blocks):
+def token_lengths(tiles, blocks, trunk=()):
     from urban_layers.tokens import BuildingTokens, StreetTokens
 
     streets = StreetTokens()
+    marked = StreetTokens(stations=True)
     buildings = BuildingTokens()
     street_lengths = [len(streets.encode(tile["targets"])) for tile in tiles] or [0]
+    trunk_lengths = [len(marked.encode([(class_id, points, (False, False), stops) for (class_id, points), stops in zip(tile["targets"], tile["stops"])])) for tile in trunk] or [0]
     building_lengths = [len(buildings.encode(block["landuse"], block["buildings"])) for block in blocks] or [0]
     result = {}
-    for name, values in (("street_tokens", street_lengths), ("building_tokens", building_lengths)):
+    for name, values in (("street_tokens", street_lengths), ("trunk_tokens", trunk_lengths), ("building_tokens", building_lengths)):
         result[name] = {key: int(np.percentile(values, value)) for key, value in (("p50", 50), ("p90", 90), ("p99", 99), ("max", 100))}
     return result
 

@@ -11,7 +11,7 @@ from urban_dataset.prepared import save_city_gpkg
 from urban_layers.audit import audit_city
 from urban_layers.buildings import BuildingDataset, BuildingModel
 from urban_layers.city import generate_city, snap_lines
-from urban_layers.data import CHANNELS, LINE_CLASSES, build_city, line_class, load_cities
+from urban_layers.data import CHANNELS, LINE_CLASSES, TRUNK, build_city, line_class, load_cities, pool_plan
 from urban_layers.decoder import TokenDecoder, sequence_loss
 from urban_layers.plan import PlanCrops, PlanNet, plan_loss, plan_statistics, urban_cells
 from urban_layers.streets import D4, StreetDataset, StreetModel, collate, find_ports, move_grid, move_points, order_lines, port_key
@@ -91,6 +91,84 @@ def test_street_tokens_round_trip_and_grammar():
         assert bool(grammar.allowed(state)[0, token])
         state = grammar.advance(state, torch.tensor([token]))
     assert bool(grammar.done(state)[0])
+
+
+def test_station_marks_survive_the_tokens_and_the_grammar():
+    tokens = StreetTokens(stations=True)
+    subway = line_class("rail", "subway", "elevated")
+    major = line_class("road", "major", "surface")
+    lines = [
+        (subway, np.array([[0, 10], [100, 10], [100.2, 10.1], [300, 40]]), (False, False), [1, 3]),
+        (major, np.array([[5, 5], [50, 80]]), (True, False), []),
+    ]
+    encoded = tokens.encode(lines)
+    back = tokens.decode(encoded)
+    assert back[0][3] == (1, 2) and back[1][3] == ()
+    assert [len(item[1]) for item in back] == [3, 2]
+    grammar = StreetGrammar(tokens, max_points=8, max_lines=8)
+    state = grammar.start(1, "cpu")
+    for token in encoded[1:]:
+        allowed = grammar.allowed(state)[0]
+        assert bool(allowed[token])
+        if tokens.kinds[token] == 6 and not bool(state["rail"][0]):
+            assert not bool(allowed[tokens.station])
+        state = grammar.advance(state, torch.tensor([token]))
+    assert bool(grammar.done(state)[0])
+    assert StreetTokens().vocab == tokens.vocab - 1 and len(StreetTokens().decode(StreetTokens().encode(lines))[0]) == 3
+
+
+def test_given_lines_are_written_first_and_then_the_model_is_free():
+    tokens = StreetTokens()
+    major = line_class("road", "major", "surface")
+    given = tokens.encode([(major, np.array([[0, 100], [512, 120]])), (major, np.array([[200, 108], [200, 400]]), (True, False))])[1:-1]
+    classes = [LINE_CLASSES[index][1] != "major" and LINE_CLASSES[index][0] == "road" for index in range(len(LINE_CLASSES))]
+    grammar = StreetGrammar(tokens, max_points=8, max_lines=8, classes=classes, script=torch.tensor([given]))
+    state = grammar.start(1, "cpu")
+    for token in given:
+        allowed = grammar.allowed(state)[0]
+        assert int(allowed.sum()) == 1 and bool(allowed[token])
+        state = grammar.advance(state, torch.tensor([token]))
+    allowed = grammar.allowed(state)[0]
+    assert bool(allowed[2]) and not bool(allowed[tokens.first_class + major]) and bool(allowed[tokens.first_class + line_class("road", "local", "surface")])
+    assert int(state["lines"][0]) == 2
+
+
+def test_two_tracks_become_one_corridor_and_a_branch_stays_joined():
+    from urban_layers.audit import road_pieces
+    from urban_layers.data import rail_corridors
+
+    over = line_class("rail", "subway", "elevated")
+    under = line_class("rail", "subway", "underground")
+    lines = [
+        (over, LineString([(0, 100), (3000, 100)]), 0.0),
+        (over, LineString([(0, 104), (1500, 104), (1800, 400), (3000, 400)]), 0.0),
+        (over, LineString([(1000, -500), (1000, 700)]), 0.0),
+        (under, LineString([(3000, 100), (4000, 100)]), 0.0),
+        (under, LineString([(3000, 104), (4000, 104)]), 0.0),
+        (over, LineString([(0, 1600), (2000, 2400)]), 0.0),
+        (over, LineString([(0, 2000), (2000, 2000)]), 0.0),
+        (line_class("road", "major", "surface"), LineString([(0, 96), (3000, 96)]), 0.0),
+    ]
+    kept = rail_corridors(lines)
+    rail = [(class_id, geometry) for class_id, geometry, _width in kept if LINE_CLASSES[class_id][0] == "rail"]
+    assert len(kept) - len(rail) == 1 and len(rail) == 6
+    lengths = sorted(round(geometry.length) for _class_id, geometry in rail)
+    assert lengths == [1000, 1200, 1504, 2000, 2154, 3121]
+    branch = next(geometry for _class_id, geometry in rail if round(geometry.length) == 1504)
+    assert branch.coords[0] == (1500.0, 104.0)
+    _shapes, label = road_pieces([{"points": np.asarray(geometry.coords), "vertical": LINE_CLASSES[class_id][2]} for class_id, geometry in rail])
+    assert len(set(label.tolist())) == 2
+
+
+def test_some_empty_tiles_are_kept_so_the_model_learns_to_draw_nothing():
+    from urban_layers.data import street_tiles
+
+    local = line_class("road", "local", "surface")
+    tiles = street_tiles([(local, LineString([(100, 100), (400, 300)]), 6.0)], (0.0, 0.0, 4096.0, 4096.0))
+    empty = [tile for tile in tiles if not tile["targets"]]
+    assert len(tiles) - len(empty) == 1 and len(empty) == 20
+    data = StreetDataset([(0, tile) for tile in empty], [np.zeros((len(CHANNELS), 32, 32), dtype=np.float32)], 1, np.ones(len(CHANNELS), dtype=np.float32), max_len=64)
+    assert data[0]["tokens"].tolist() == [1, 2]
 
 
 def test_building_tokens_round_trip():
@@ -222,6 +300,57 @@ def test_models_train_and_generate_a_city(tmp_path):
     from urban_layers.check import check_city, failures
 
     assert failures(check_city(city, plan)) == []
+    assert {"rail", "stations", "road joins"} <= set(city["rules"])
+    bare, plan = generate_city(checkpoints, size_m=(512.0, 512.0), style={"small": 1.0}, plan_steps=2, transport_rules=False, log=lambda _text: None)
+    assert bare["rules"] == ["natural cover", "building placement"] and bare["stations"] == []
+    assert [item for item in failures(check_city(bare, plan)) if not item.startswith("plan_orientation")] == []
+
+
+def test_rail_stations_and_main_roads_can_come_from_a_model(tmp_path):
+    torch.manual_seed(0)
+    build_city(small_city(tmp_path), "small", tmp_path / "layers", stride=256.0)
+    cities = load_cities(tmp_path / "layers")
+    plans = [city["plan"] for city in cities]
+    mean, std, control_scale = plan_statistics(plans)
+    scale = 1.0 / std
+    coarse = [pool_plan(plan, TRUNK) for plan in plans]
+    coarse_scale = 1.0 / plan_statistics(coarse)[1]
+
+    trunk = [(0, tile) for tile in torch.load(cities[0]["folder"] / "trunk.pt", weights_only=False)]
+    assert sum(len(stops) for _city, tile in trunk for stops in tile["stops"]) == 2
+    assert all(LINE_CLASSES[class_id][1] in ("major", "subway") for _city, tile in trunk for class_id, _points in tile["targets"])
+    trunk_model = StreetModel(1, d=32, layers=1, heads=4, max_len=512, stations=True)
+    data = StreetDataset(trunk, coarse, 1, coarse_scale, max_len=512, stations=True, plan_cells=16)
+    batch = collate([data[0], data[0]])
+    assert int((batch["tokens"] == trunk_model.tokens.station).sum()) == 4
+    loss = sequence_loss(trunk_model(batch), batch["tokens"])
+    loss.backward()
+    assert torch.isfinite(loss)
+
+    tiles = [(0, tile) for tile in torch.load(cities[0]["folder"] / "streets.pt", weights_only=False)]
+    street_model = StreetModel(1, d=32, layers=1, heads=4, max_len=512)
+    item = StreetDataset(tiles, plans, 1, scale, max_len=512, trunk_first=True, augment=False)[8]
+    lines = street_model.tokens.decode(item["tokens"])
+    given = sum(LINE_CLASSES[class_id][1] in ("major", "subway") for class_id, _points, _joins in lines)
+    assert given > 0 and all(LINE_CLASSES[class_id][1] in ("major", "subway") for class_id, _points, _joins in lines[:given])
+    assert not any(LINE_CLASSES[class_id][1] in ("major", "subway") for class_id, _points, _joins in lines[given:])
+    hidden = int((item["labels"] == 0).sum())
+    assert hidden == len(street_model.tokens.encode(lines[:given])) - 2 and item["labels"][hidden + 1] == item["tokens"][hidden + 1]
+
+    plan_model = PlanNet(1, width=16)
+    building_model = BuildingModel(1, d=32, layers=1, heads=4, max_len=256)
+    checkpoints = {
+        "plan": (plan_model.eval(), {"cities": ["small"], "mean": mean, "std": std, "control_scale": control_scale, "city_controls": [plans[0].mean(axis=(1, 2))]}),
+        "trunk": (trunk_model.eval(), {"cities": ["small"], "scale": coarse_scale, "unit": TRUNK, "plan_cells": 16}),
+        "streets": (street_model.eval(), {"cities": ["small"], "scale": scale}),
+        "buildings": (building_model.eval(), {"cities": ["small"], "scale": scale}),
+    }
+    city, plan = generate_city(checkpoints, size_m=(1024.0, 1024.0), style={"small": 1.0}, plan_steps=2, seed=3, log=lambda _text: None)
+    assert city["rules"] == ["natural cover", "building placement"]
+    assert all(LINE_CLASSES[line_class("rail", item["class"], item["vertical"])][0] == "rail" for item in city["rail"])
+    from urban_layers.check import check_city, failures
+
+    assert [item for item in failures(check_city(city, plan)) if not item.startswith("plan_orientation")] == []
 
 
 @pytest.mark.parametrize("max_len", [40, 512])

@@ -13,7 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from urban_layers.buildings import BuildingDataset, BuildingModel
-from urban_layers.data import load_cities
+from urban_layers.data import TRUNK, load_cities, pool_plan
 from urban_layers.decoder import sequence_loss
 from urban_layers.plan import PlanCrops, PlanNet, plan_loss, plan_statistics, urban_cells
 from urban_layers.streets import StreetDataset, StreetModel, collate
@@ -36,7 +36,7 @@ def move(batch, device):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--layer", choices=["plan", "streets", "buildings"], required=True)
+    parser.add_argument("--layer", choices=["plan", "trunk", "streets", "buildings"], required=True)
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--epochs", type=int, default=50)
@@ -57,6 +57,9 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cities", nargs="*", help="train on these cities only, any other city in the data folder is held out")
+    parser.add_argument("--trunk-first", action="store_true", help="streets: rail and main roads come first in every tile and are given, not learned")
+    parser.add_argument("--plan-cells", type=int, default=16, help="trunk: plan cells each tile sees")
+    parser.add_argument("--spread", nargs="*", default=[], help="trunk: plan channels the model is told the amount of but not where, for example major rail")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -88,11 +91,15 @@ def main():
         }
     else:
         items = []
+        files = {"streets": "streets.pt", "trunk": "trunk.pt", "buildings": "blocks.pt"}
+        unit = TRUNK if args.layer == "trunk" else 1.0
         for index, city in enumerate(cities):
-            records = torch.load(city["folder"] / ("streets.pt" if args.layer == "streets" else "blocks.pt"), weights_only=False)
+            if not (city["folder"] / files[args.layer]).exists():
+                raise SystemExit(f"{city['name']} has no {files[args.layer]}, build its layer data again")
+            records = torch.load(city["folder"] / files[args.layer], weights_only=False)
             for record in records:
-                x, y = record["origin"] if args.layer == "streets" else record["centre"]
-                items.append((index, record, held_out(city["name"], x, y)))
+                x, y = record["centre"] if args.layer == "buildings" else record["origin"]
+                items.append((index, record, held_out(city["name"], x * unit, y * unit)))
         if args.overfit:
             items = sorted(items, key=lambda item: hashlib.sha1(repr(item[1].get("origin", item[1].get("centre"))).encode(), usedforsecurity=False).hexdigest())[: args.overfit]
             train_items = [(index, record) for index, record, _flag in items]
@@ -100,15 +107,23 @@ def main():
         else:
             train_items = [(index, record) for index, record, flag in items if not flag]
             validation_items = [(index, record) for index, record, flag in items if flag] or train_items[:64]
+        extra = {"scale": scale}
         if args.layer == "streets":
             model = StreetModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout)
-            train_set = StreetDataset(train_items, plans, len(cities), scale, augment=not args.overfit, max_len=args.max_len)
-            validation_set = StreetDataset(validation_items, plans, len(cities), scale, augment=False, max_len=args.max_len)
+            train_set = StreetDataset(train_items, plans, len(cities), scale, augment=not args.overfit, max_len=args.max_len, trunk_first=args.trunk_first)
+            validation_set = StreetDataset(validation_items, plans, len(cities), scale, augment=False, max_len=args.max_len, trunk_first=args.trunk_first)
+            extra["trunk_first"] = args.trunk_first
+        elif args.layer == "trunk":
+            coarse = [pool_plan(plan, TRUNK) for plan in plans]
+            scale = (1.0 / plan_statistics(coarse)[1]).astype(np.float32)
+            model = StreetModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout, stations=True)
+            train_set = StreetDataset(train_items, coarse, len(cities), scale, augment=not args.overfit, max_len=args.max_len, stations=True, plan_cells=args.plan_cells, spread=args.spread)
+            validation_set = StreetDataset(validation_items, coarse, len(cities), scale, augment=False, max_len=args.max_len, stations=True, plan_cells=args.plan_cells, spread=args.spread)
+            extra = {"scale": scale, "unit": TRUNK, "plan_cells": args.plan_cells, "spread": args.spread}
         else:
             model = BuildingModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout)
             train_set = BuildingDataset(train_items, len(cities), scale, augment=not args.overfit, max_len=args.max_len)
             validation_set = BuildingDataset(validation_items, len(cities), scale, augment=False, max_len=args.max_len)
-        extra = {"scale": scale}
         print(json.dumps({"train": len(train_set), "validation": len(validation_set)}), flush=True)
 
     model = model.to(device)
@@ -127,7 +142,7 @@ def main():
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
             if args.layer == "plan":
                 return plan_loss(net, batch)
-            return sequence_loss(net(batch), batch["tokens"])
+            return sequence_loss(net(batch), batch.get("labels", batch["tokens"]))
 
     step = 0
     best = math.inf

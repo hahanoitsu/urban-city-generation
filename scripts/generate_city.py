@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--streets", type=Path, required=True)
     parser.add_argument("--buildings", type=Path, required=True)
+    parser.add_argument("--trunk", type=Path, help="model for rail, stations and main roads, without it they are drawn by rule")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--size", type=float, nargs=2, default=(4096.0, 4096.0), help="width and height in metres")
     parser.add_argument("--style", nargs="*", help="city=weight, for example singapore=0.7 tokyo=0.3")
@@ -37,10 +38,11 @@ def main():
     parser.add_argument("--building-samples", type=int, default=4, help="samples per block, the one closest to the planned coverage is kept")
     parser.add_argument("--building-batch", type=int, default=64, help="blocks per call to the building model, more is faster on a big gpu")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--no-transport-rules", action="store_true", help="keep rail and roads exactly as the models drew them, no rail layer and no joining of roads")
     parser.add_argument("--list", action="store_true", help="print the cities the models know and stop")
     args = parser.parse_args()
 
-    models = {name: load_layer(path, args.device) for name, path in (("plan", args.plan), ("streets", args.streets), ("buildings", args.buildings))}
+    models = {name: load_layer(path, args.device) for name, path in (("plan", args.plan), ("trunk", args.trunk), ("streets", args.streets), ("buildings", args.buildings)) if path is not None}
     if args.list:
         for name, (_model, checkpoint) in models.items():
             print(name, checkpoint["cities"])
@@ -58,6 +60,7 @@ def main():
         top_p=args.top_p,
         building_samples=args.building_samples,
         building_batch=args.building_batch,
+        transport_rules=not args.no_transport_rules,
         device=args.device,
         log=lambda text: print(text, flush=True),
     )

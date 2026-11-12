@@ -260,6 +260,7 @@ def check_city(city, plan=None):
         "graph": graph_problems(city),
         "crossings_without_a_junction": unjoined_crossings(city),
         "rail": rail_problems(city),
+        "rules": city.get("rules", ["rail", "stations", "road joins"]),
         "cover": cover_problems(city),
         "tile_seams_per_km2": round(tile_seams(city) / km2, 2),
         "near_miss_ends_per_km2": round(near_misses(city) / km2, 2),
@@ -274,8 +275,9 @@ def check_city(city, plan=None):
 
 def failures(report):
     found = []
+    learned = ("breaks_between_runs", "lines_stopping_inside_the_map") if "rail" not in report.get("rules", ["rail"]) else ()
     for name in ("points_outside_the_map", "bad_shapes", "buildings", "graph", "rail"):
-        found += [f"{name}.{key} = {value}" for key, value in report[name].items() if value]
+        found += [f"{name}.{key} = {value}" for key, value in report[name].items() if value and key not in learned]
     for name in ("overlapping_blocks", "crossings_without_a_junction"):
         if report[name]:
             found.append(f"{name} = {report[name]}")

@@ -29,17 +29,19 @@ from urban_layers.data import (
     block_record,
     boundary_side,
     corridor,
+    is_trunk,
     make_blocks,
     plan_raster,
     polygon_of,
+    pool_plan,
     ring_box,
     road_index,
     split_block,
 )
 from urban_layers.network import join_network
 from urban_layers.plan import PlanNet, sample_plan
-from urban_layers.rail import RAIL_WIDTH, TRACKS, rail_corridors, rail_runs, rail_stations
-from urban_layers.streets import PORTS, SIDES, StreetModel, collate, condition_arrays, plan_crop, port_key, snap_to_ports
+from urban_layers.rail import RAIL_WIDTH, TRACKS, heading_at, rail_corridors, rail_runs, rail_stations
+from urban_layers.streets import PLAN_CELLS, PORTS, SIDES, StreetModel, collate, condition_arrays, order_lines, plan_crop, port_key, snap_to_ports
 from urban_model.structured_city_data import BUILDING_KINDS
 
 SLIDERS = {
@@ -65,7 +67,7 @@ def load_layer(path, device="cpu"):
     layer = checkpoint["layer"]
     if layer == "plan":
         model = PlanNet(**checkpoint["config"])
-    elif layer == "streets":
+    elif layer in ("streets", "trunk"):
         model = StreetModel(**checkpoint["config"])
     else:
         model = BuildingModel(**checkpoint["config"])
@@ -231,37 +233,140 @@ def to_edge(points, reach=4.0, visible=(), joins=(False, False)):
     return points
 
 
-def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False):
+def given_lines(given, row, column, tokens, limit):
+    if given is None:
+        return []
+    tree, shapes, classes = given
+    tile = box(column * TILE, row * TILE, (column + 1) * TILE, (row + 1) * TILE)
+    pieces = []
+    for index in tree.query(tile, predicate="intersects"):
+        inside = shapes[index].intersection(tile)
+        for part in getattr(inside, "geoms", [inside]):
+            if part.geom_type == "LineString" and part.length > 2.0:
+                pieces.append((int(classes[index]), np.asarray(part.coords, dtype=np.float32)[:, :2] - (column * TILE, row * TILE)))
+    if not pieces:
+        return []
+    return tokens.encode(order_lines(pieces, set(), [], first=range(len(pieces))), limit)[1:-1]
+
+
+def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets"):
+    spread = [CHANNELS.index(channel) for channel in checkpoint.get("spread", ())]
     rows = math.ceil(plan.shape[1] * CELL / TILE)
     columns = math.ceil(plan.shape[2] * CELL / TILE)
     scale = np.asarray(checkpoint["scale"], dtype=np.float32)
     per_tile = int(round(TILE / CELL))
-    classes = None
-    if not rail:
+    if classes is None and not rail:
         plan = plan.copy()
         plan[CHANNELS.index("rail")] = 0.0
         classes = [mode == "road" for mode, _name, _level in LINE_CLASSES]
+    if given is not None:
+        shapes = np.asarray([LineString(points) for _class_id, points in given], dtype=object)
+        given = (STRtree(shapes), shapes, [class_id for class_id, _points in given])
+        classes = [mode == "road" and not is_trunk(class_id) for class_id, (mode, _name, _level) in enumerate(LINE_CLASSES)]
     done = {}
+    marks = {}
     for diagonal in range(rows + columns - 1):
         batch = [(row, diagonal - row) for row in range(rows) if 0 <= diagonal - row < columns]
         items = []
         meta = []
+        scripts = []
         for row, column in batch:
             context, ports, visible = neighbour_lines(done, row, column)
-            crop = plan_crop(plan, row * per_tile, column * per_tile) * scale[:, None, None]
+            if given is not None:
+                ports = [port for port in ports if not is_trunk(port[4])]
+            crop = plan_crop(plan, row * per_tile, column * per_tile, size=plan_cells) * scale[:, None, None]
+            if spread:
+                crop[spread] = crop[spread].mean(axis=(1, 2), keepdims=True)
             items.append(condition_arrays(crop, context, ports, weights))
             meta.append((ports, visible))
+            scripts.append(given_lines(given, row, column, model.tokens, model.decoder.max_len - 128))
         arrays = {name: value.to(device) for name, value in collate(items).items()}
         arrays["sides"] = torch.tensor([[SIDES[side] in visible for side in range(4)] for _ports, visible in meta], dtype=torch.bool, device=device)
-        results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, classes=classes)
+        script = None
+        if any(scripts):
+            script = torch.full((len(scripts), max(len(item) for item in scripts)), -1, dtype=torch.long)
+            for index, item in enumerate(scripts):
+                script[index, : len(item)] = torch.as_tensor(item, dtype=torch.long)
+        results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, classes=classes, script=script)
         for (row, column), lines, (ports, visible) in zip(batch, results, meta):
-            done[(row, column)] = [(class_id, to_edge(points, visible=visible, joins=joins), joins) for class_id, points, joins in snap_to_ports(lines, ports)]
-        log(f"streets: diagonal {diagonal + 1}/{rows + columns - 1}, tiles {len(done)}/{rows * columns}")
+            snapped = snap_to_ports(lines, ports)
+            done[(row, column)] = [(class_id, to_edge(points, visible=visible, joins=joins), joins) for class_id, points, joins, *_rest in snapped]
+            marks[(row, column)] = [rest[0] if rest else () for _class_id, _points, _joins, *rest in snapped]
+        log(f"{name}: diagonal {diagonal + 1}/{rows + columns - 1}, tiles {len(done)}/{rows * columns}")
     lines = []
+    stops = []
     for (row, column), items in done.items():
-        for class_id, points, joins in items:
-            lines.append((class_id, np.asarray(points, dtype=np.float64) + (column * TILE, row * TILE), joins))
-    return lines
+        for (class_id, points, joins), stopped in zip(items, marks[(row, column)]):
+            if given is not None and is_trunk(class_id):
+                continue
+            moved = np.asarray(points, dtype=np.float64) + (column * TILE, row * TILE)
+            lines.append((class_id, moved, joins))
+            stops += [(float(moved[index][0]), float(moved[index][1])) for index in stopped if index < len(moved)]
+    return (lines, stops) if model.tokens.station is not None else lines
+
+
+def clip_lines(lines, size):
+    area = box(0.0, 0.0, *size)
+    clipped = []
+    for class_id, points, joins in lines:
+        line = LineString(points)
+        if area.covers(line):
+            clipped.append((class_id, np.asarray(points, dtype=np.float64), joins))
+            continue
+        piece = line.intersection(area)
+        for part in getattr(piece, "geoms", [piece]):
+            if part.geom_type == "LineString" and part.length > 2.0:
+                clipped.append((class_id, np.asarray(part.coords), (False, False)))
+    return clipped
+
+
+def rail_lines(lines, touch=1.0):
+    rail = [(class_id, points) for class_id, points in lines if LINE_CLASSES[class_id][0] == "rail"]
+    parent = list(range(len(rail)))
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    shapes = [LineString(points) for _class_id, points in rail]
+    tree = STRtree(shapes) if shapes else None
+    for index, (_class_id, points) in enumerate(rail):
+        for end in (points[0], points[-1]):
+            for other in tree.query(Point(end), predicate="dwithin", distance=touch):
+                parent[find(index)] = find(int(other))
+    names = {}
+    return [(class_id, points, names.setdefault(find(index), len(names))) for index, (class_id, points) in enumerate(rail)]
+
+
+def place_stations(stops, runs, reach=100.0, same=60.0, touch=1.0):
+    shapes = [LineString(points) for _class_id, points, _number in runs]
+    if not shapes or not stops:
+        return []
+    tree = STRtree(shapes)
+    spots = []
+    for x, y in stops:
+        nearest = tree.query_nearest(Point(x, y), max_distance=reach, all_matches=False)
+        if len(nearest):
+            point = shapes[int(nearest[0])].interpolate(shapes[int(nearest[0])].project(Point(x, y)))
+            if all(np.hypot(point.x - other.x, point.y - other.y) > same for other in spots):
+                spots.append(point)
+    stations = []
+    for point in spots:
+        near = sorted(tree.query(point, predicate="dwithin", distance=touch).tolist())
+        numbers = sorted({runs[index][2] for index in near})
+        stations.append({"xy": [point.x, point.y], "lines": numbers, "heading_deg": heading_at(shapes[near[0]], shapes[near[0]].project(point))})
+    return stations
+
+
+def generate_trunk(model, checkpoint, plan, weights, size, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print):
+    unit = float(checkpoint["unit"])
+    classes = [is_trunk(class_id) for class_id in range(len(LINE_CLASSES))]
+    lines, stops = generate_streets(model, checkpoint, pool_plan(plan, unit), weights, generator, temperature, top_p, device, log, classes=classes, plan_cells=int(checkpoint.get("plan_cells", PLAN_CELLS)), name="trunk")
+    snapped = snap_lines(clip_lines(lines, (size[0] / unit, size[1] / unit)))
+    main = [(class_id, np.asarray(points, dtype=np.float64) * unit) for class_id, points in snapped]
+    return main, [(x * unit, y * unit) for x, y in stops]
 
 
 def insert_vertex(points, point):
@@ -289,13 +394,16 @@ def snap_lines(lines, reach=3.0, join_reach=40.0, corner=2.0):
             limit = join_reach if joins[slot] else reach
             best = None
             for other in tree.query(point, predicate="dwithin", distance=limit):
-                if other == index or groups[other] != groups[index]:
+                if other == index or groups[other][0] != groups[index][0]:
                     continue
-                distance = geometries[other].distance(point)
-                if best is None or distance < best[0]:
-                    best = (distance, int(other))
+                if groups[other] != groups[index] and not joins[slot]:
+                    continue
+                order = (groups[other] != groups[index], geometries[other].distance(point))
+                if best is None or order < best[0]:
+                    best = (order, int(other))
             if best is None:
                 continue
+            best = (best[0][1], best[1])
             target = geometries[best[1]]
             spot = nearest_points(target, point)[0]
             ends = [Point(target.coords[0]), Point(target.coords[-1])]
@@ -597,6 +705,7 @@ def generate_city(
     building_samples=4,
     building_batch=64,
     log=print,
+    transport_rules=True,
 ):
     started = time.time()
     plan_model, plan_checkpoint = models["plan"]
@@ -631,27 +740,37 @@ def generate_city(
     labels = landuse_labels(plan)
     regions = landuse_regions(plan, labels=labels)
     natural = natural_cover(plan, labels)
-    corridors = rail_corridors(plan, size)
-    runs = rail_runs(corridors, plan)
-    stations = rail_stations(corridors, plan)
-    log(f"rail: {len(corridors)} lines, {sum(LineString(points).length for points in corridors) / 1000.0:.1f} km, {len(stations)} stations, {time.time() - started:.0f}s")
-
     street_weights = style_weights(street_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in street_checkpoint["cities"]})
-    lines = generate_streets(street_model, street_checkpoint, plan, street_weights, generator, temperature, top_p, device, log)
     area = box(0.0, 0.0, *size)
-    clipped = []
-    for class_id, points, joins in lines:
-        line = LineString(points)
-        if area.covers(line):
-            clipped.append((class_id, np.asarray(points, dtype=np.float64), joins))
-            continue
-        piece = line.intersection(area)
-        for part in getattr(piece, "geoms", [piece]):
-            if part.geom_type == "LineString" and part.length > 2.0:
-                clipped.append((class_id, np.asarray(part.coords), (False, False)))
-    streets, joined = join_network(snap_lines(clipped), plan, size, water_union)
-    if joined:
-        log(f"roads joined: {joined['ramps']} ramps landed, {joined['stitched']} ends stitched, {joined['dropped']} stray pieces dropped, {joined['major_links']} main road links ({joined['major_link_km']:.1f} km), {joined['links']} other links ({joined['link_km']:.1f} km)")
+    rules = ["natural cover", "building placement"]
+    if models.get("trunk") is None and not transport_rules:
+        lines = generate_streets(street_model, street_checkpoint, plan, street_weights, generator, temperature, top_p, device, log, rail=True)
+        snapped = snap_lines(clip_lines(lines, size))
+        streets = [(class_id, points) for class_id, points in snapped if LINE_CLASSES[class_id][0] == "road"]
+        runs = rail_lines(snapped)
+        stations = []
+    elif models.get("trunk") is None:
+        rules += ["rail", "stations", "road joins"]
+        corridors = rail_corridors(plan, size)
+        runs = rail_runs(corridors, plan)
+        stations = rail_stations(corridors, plan)
+        log(f"rail: {len(corridors)} lines, {sum(LineString(points).length for points in corridors) / 1000.0:.1f} km, {len(stations)} stations, {time.time() - started:.0f}s")
+        lines = generate_streets(street_model, street_checkpoint, plan, street_weights, generator, temperature, top_p, device, log)
+        streets, joined = join_network(snap_lines(clip_lines(lines, size)), plan, size, water_union)
+        if joined:
+            log(f"roads joined: {joined['ramps']} ramps landed, {joined['stitched']} ends stitched, {joined['dropped']} stray pieces dropped, {joined['major_links']} main road links ({joined['major_link_km']:.1f} km), {joined['links']} other links ({joined['link_km']:.1f} km)")
+    else:
+        trunk_model, trunk_checkpoint = models["trunk"]
+        trunk_weights = style_weights(trunk_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in trunk_checkpoint["cities"]})
+        main, stops = generate_trunk(trunk_model, trunk_checkpoint, plan, trunk_weights, size, generator, temperature, top_p, device, log)
+        km = lambda mode: sum(LineString(points).length for class_id, points in main if LINE_CLASSES[class_id][0] == mode) / 1000.0
+        log(f"trunk: {km('rail'):.1f} km of rail, {km('road'):.1f} km of main road, {time.time() - started:.0f}s")
+        lines = generate_streets(street_model, street_checkpoint, plan, street_weights, generator, temperature, top_p, device, log, given=main)
+        snapped = snap_lines(clip_lines(lines, size) + [(class_id, points, (False, False)) for class_id, points in main])
+        streets = [(class_id, points) for class_id, points in snapped if LINE_CLASSES[class_id][0] == "road"]
+        runs = rail_lines(snapped)
+        stations = place_stations(stops, runs)
+        log(f"rail: {len(runs)} pieces, {len(stations)} stations")
     lines = streets + [(class_id, points) for class_id, points, _number in runs]
     roads_frame, rail_frame, graph = lines_to_layers(lines, *size)
     log(f"network: {len(graph['nodes'])} nodes, {len(graph['edges'])} edges, {time.time() - started:.0f}s")
@@ -680,6 +799,7 @@ def generate_city(
         "style": {name: float(weight) for name, weight in zip(cities, weights)},
         "sliders": {name: float(value) for name, value in sliders.items()},
         "controls": {channel: float(value) for channel, value in zip(CHANNELS, controls)},
+        "rules": rules,
         "plan": {"cell_m": CELL, "channels": list(CHANNELS), "shape": list(plan.shape)},
         "roads": [],
         "rail": [],
