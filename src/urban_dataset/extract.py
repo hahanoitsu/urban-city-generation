@@ -292,6 +292,9 @@ def _sea(
         return _empty()
     coast = lines[lines["natural"].map(clean_tag).eq("coastline")].geometry
     region = box(*bbox_wgs84)
+    extent = region.intersection(box(*roads.total_bounds)) if not roads.empty else region
+    if extent.is_empty or extent.geom_type != "Polygon":
+        extent = region
     pieces = []
     for way in coast:
         for part in _line_parts(way.intersection(region)):
@@ -316,16 +319,20 @@ def _sea(
             closed.update((a, b))
             patches.append(shapely.LineString([a, b]))
     coast_tree = STRtree(pieces)
+    west, south, east, north = extent.bounds
     for key in loose:
         if key in closed:
             continue
         end = Point(key)
+        sides = [(abs(key[0] - west), (bbox_wgs84[0], key[1])), (abs(east - key[0]), (bbox_wgs84[2], key[1])), (abs(key[1] - south), (key[0], bbox_wgs84[1])), (abs(north - key[1]), (key[0], bbox_wgs84[3]))]
         others = [pieces[index] for index in coast_tree.query(end, predicate="dwithin", distance=bridge) if min(end.distance(Point(pieces[index].coords[0])), end.distance(Point(pieces[index].coords[-1]))) > 1e-9]
-        if others:
+        if min(sides)[0] <= bridge:
+            patches.append(shapely.LineString([key, min(sides)[1]]))
+        elif others:
             target = min(others, key=end.distance)
             patches.append(shapely.LineString([key, target.interpolate(target.project(end)).coords[0]]))
-        elif region.exterior.distance(end) <= 3.0 * bridge:
-            patches.append(shapely.LineString([key, region.exterior.interpolate(region.exterior.project(end)).coords[0]]))
+        elif min(sides)[0] <= 3.0 * bridge:
+            patches.append(shapely.LineString([key, min(sides)[1]]))
     faces = list(polygonize(unary_union([region.boundary, *pieces, *patches])))
     if not faces:
         return _empty()
@@ -344,26 +351,27 @@ def _sea(
             for side, point in enumerate((Point(here.x + dy, here.y - dx), Point(here.x - dy, here.y + dx))):
                 for index in tree.query(point, predicate="within"):
                     votes[index, side] += part.length
-    wet = [index for index in range(len(faces)) if votes[index, 0] > clear * votes[index, 1]]
+    wet = [faces[index] for index in range(len(faces)) if votes[index, 0] > clear * votes[index, 1]]
+    if wet and not polygons.empty and "natural" in polygons.columns:
+        islands = polygons[polygons["natural"].map(clean_tag).eq("coastline")].geometry
+        islands = [island for island in islands if island is not None and not island.is_empty]
+        if islands:
+            land = unary_union(islands)
+            wet = [face.difference(land) for face in wet]
+            wet = [face for face in wet if not face.is_empty]
     if wet and not roads.empty:
         road_tree = STRtree(roads.geometry.values)
         squash = float(np.cos(np.radians((bbox_wgs84[1] + bbox_wgs84[3]) / 2.0)))
         kept = []
-        for index in wet:
-            face = faces[index]
+        for face in wet:
             near = road_tree.query(face, predicate="intersects")
             length = float(shapely.length(shapely.intersection(roads.geometry.values[near], face)).sum()) if len(near) else 0.0
             if length * 111.32 * np.sqrt(squash) <= busy * face.area * 111.32**2 * squash:
-                kept.append(index)
+                kept.append(face)
         wet = kept
     if not wet:
         return _empty()
-    sea = unary_union([faces[index] for index in wet])
-    if not polygons.empty and "natural" in polygons.columns:
-        islands = polygons[polygons["natural"].map(clean_tag).eq("coastline")].geometry
-        islands = [island for island in islands if island is not None and not island.is_empty]
-        if islands:
-            sea = sea.difference(unary_union(islands))
+    sea = unary_union(wet)
     west, south, east, north = bbox_wgs84
     rows = []
     for x in np.arange(west, east, cell):
