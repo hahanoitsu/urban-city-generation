@@ -4,6 +4,7 @@ import math
 import random
 
 import numpy as np
+import shapely
 import torch
 from shapely.geometry import Polygon
 from shapely.ops import nearest_points, unary_union
@@ -132,10 +133,14 @@ def near_boxes(shape, boxes):
     return np.nonzero((boxes[:, 0] < maxx) & (boxes[:, 2] > minx) & (boxes[:, 1] < maxy) & (boxes[:, 3] > miny))[0] if len(boxes) else []
 
 
+def overlaps(shape, shapes, boxes, tolerance):
+    return any(shape.intersects(shapes[index]) and shape.intersection(shapes[index]).area > tolerance for index in near_boxes(shape, boxes))
+
+
 def clashes(shape, blocked, shapes, boxes, tolerance):
     if blocked is not None and blocked.intersects(shape):
         return True
-    return any(shape.intersection(shapes[index]).area > tolerance for index in near_boxes(shape, boxes))
+    return overlaps(shape, shapes, boxes, tolerance)
 
 
 def way_out(corners, block_polygon, blocked, shapes, boxes, inside, limit, tolerance):
@@ -151,13 +156,15 @@ def way_out(corners, block_polygon, blocked, shapes, boxes, inside, limit, toler
         if np.linalg.norm(direction) < 1e-6:
             continue
         direction = direction / np.linalg.norm(direction)
-        for step in steps:
-            moved = corners + direction * step
-            shape = Polygon(moved)
-            if clashes(shape, blocked, shapes, boxes, tolerance):
+        moves = corners[None] + direction * steps[:, None, None]
+        tries = shapely.polygons(moves)
+        free = ~shapely.intersects(blocked, tries) if blocked is not None else np.ones(len(steps), dtype=bool)
+        for index in np.nonzero(free)[0]:
+            shape = tries[index]
+            if overlaps(shape, shapes, boxes, tolerance):
                 continue
             if shape.intersection(block_polygon).area >= inside * shape.area:
-                return moved
+                return moves[index]
             break
     return None
 
@@ -212,7 +219,9 @@ def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0,
         sides = [corners[1] - corners[0], corners[3] - corners[0]]
         sides = [side / max(np.linalg.norm(side), 1e-9) for side in sides]
         lengths = [np.linalg.norm(corners[1] - corners[0]), np.linalg.norm(corners[3] - corners[0])]
-        for ground in blocked or (None,):
+        for number, ground in enumerate(blocked or (None,)):
+            if number and not blocked[0].intersects(Polygon(corners).buffer(max(push, 0.4 * max(lengths)))):
+                break
             moved = way_out(corners, block_polygon, ground, shapes, boxes, inside, push, tolerance)
             if moved is not None:
                 break
