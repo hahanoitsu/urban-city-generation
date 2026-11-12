@@ -14,7 +14,7 @@ from urban_layers.city import generate_city, snap_lines
 from urban_layers.data import CHANNELS, LINE_CLASSES, TRUNK, build_city, line_class, load_cities, pool_plan
 from urban_layers.decoder import TokenDecoder, sequence_loss
 from urban_layers.plan import PlanCrops, PlanNet, plan_loss, plan_statistics, urban_cells
-from urban_layers.streets import D4, StreetDataset, StreetModel, collate, find_ports, move_grid, move_points, order_lines, port_key
+from urban_layers.streets import D4, StreetDataset, StreetModel, collate, find_ports, guide_crossings, move_grid, move_points, order_lines, port_key
 from urban_layers.tokens import BuildingTokens, StreetGrammar, StreetTokens
 
 
@@ -156,6 +156,20 @@ def test_main_road_corridors_leave_out_ramps_and_merge_twin_carriageways():
     loss = sequence_loss(model(batch), batch["tokens"])
     loss.backward()
     assert torch.isfinite(loss) and model.condition(batch)[0].shape[1] == StreetModel(1, d=32, layers=1, heads=4, max_len=256).condition(batch)[0].shape[1] + 192
+
+    done = {(-1, 0), (-1, -1), (0, -1), (1, -1)}
+    crossings = guide_crossings(tile["corridors"], done)
+    assert sorted((x, y) for x, y, *_rest in crossings) == [(488.0, 512.0), (512.0, 300.0)]
+    assert all(hx < -0.9 if x == 512.0 else hy < -0.9 for x, y, hx, hy, _class_id in crossings)
+    plain = find_ports(tile["targets"], done)
+    pinned = find_ports(tile["targets"], done, tile["corridors"])
+    assert len(plain) == 3 and sorted(set(pinned) - set(plain)) == [(488.0, 512.0, 0.0, -1.0, crossings[0][4]), (512.0, 300.0, -1.0, 0.0, crossings[0][4])]
+    held = StreetDataset([(0, tile)], [np.zeros((len(CHANNELS), 16, 16), dtype=np.float32)], 1, np.ones(len(CHANNELS), dtype=np.float32), augment=False, max_len=256, exits=True, pinned=True)
+    leave = lambda tokens: int((tokens == held.tokens.exit).sum())
+    assert leave(item["tokens"]) == 0 and leave(held[0]["tokens"]) == 2 and int(held[0]["port_mask"].sum()) == 5
+    seen = [np.ones((len(CHANNELS), 16, 16), dtype=np.float32)]
+    blind = StreetDataset([(0, tile)], seen, 1, np.ones(len(CHANNELS), dtype=np.float32), augment=False, max_len=256, exits=True, hidden=("major", "rail"))[0]["plan"]
+    assert blind[:, [CHANNELS.index("major"), CHANNELS.index("rail")]].max() == 0.0 and blind[:, CHANNELS.index("local")].max() == 1.0
 
 
 def test_two_tracks_become_one_corridor_and_a_branch_stays_joined():
@@ -442,6 +456,22 @@ def test_rail_stations_and_main_roads_can_come_from_a_model(tmp_path):
     from urban_layers.check import check_city, failures
 
     assert [item for item in failures(check_city(city, plan)) if not item.startswith("plan_orientation")] == []
+
+
+def test_a_corridor_is_handed_from_tile_to_tile():
+    from urban_layers.city import generate_streets
+
+    torch.manual_seed(0)
+    major = line_class("road", "major", "surface")
+    model = StreetModel(1, d=32, layers=1, heads=4, max_len=512, exits=True, guided=True).eval()
+    plan = np.zeros((len(CHANNELS), 8, 8), dtype=np.float32)
+    checkpoint = {"scale": np.ones(len(CHANNELS), dtype=np.float32)}
+    given = [(major, np.array([[0.0, 300.0], [1024.0, 700.0]]))]
+    lines = generate_streets(model, checkpoint, plan, np.ones(1, dtype=np.float32), torch.Generator().manual_seed(0), given=given, pinned=True, log=lambda _text: None)
+    ends = np.asarray([points[slot] for class_id, points, _joins in lines if class_id == major for slot in (0, -1)]).reshape(-1, 2)
+    for x, y in ((0.0, 300.0), (512.0, 500.0), (542.72, 512.0), (1024.0, 700.0)):
+        assert np.hypot(ends[:, 0] - x, ends[:, 1] - y).min() < 1.0
+    assert (np.hypot(ends[:, 0] - 512.0, ends[:, 1] - 500.0) < 1.0).sum() >= 2
 
 
 @pytest.mark.parametrize("max_len", [40, 512])

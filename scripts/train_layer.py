@@ -59,6 +59,7 @@ def main():
     parser.add_argument("--cities", nargs="*", help="train on these cities only, any other city in the data folder is held out")
     parser.add_argument("--plan-cells", type=int, default=16, help="trunk: plan cells each tile sees")
     parser.add_argument("--spread", nargs="*", default=[], help="trunk: plan channels the model is told the amount of but not where, for example major rail")
+    parser.add_argument("--start", type=Path, help="checkpoint to start from instead of random weights")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -109,8 +110,10 @@ def main():
         extra = {"scale": scale}
         if args.layer == "streets":
             model = StreetModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout, exits=True, guided=True)
-            train_set = StreetDataset(train_items, plans, len(cities), scale, augment=not args.overfit, max_len=args.max_len, exits=True)
-            validation_set = StreetDataset(validation_items, plans, len(cities), scale, augment=False, max_len=args.max_len, exits=True)
+            hidden = ("major", "rail")
+            train_set = StreetDataset(train_items, plans, len(cities), scale, augment=not args.overfit, max_len=args.max_len, exits=True, pinned=True, hidden=hidden)
+            validation_set = StreetDataset(validation_items, plans, len(cities), scale, augment=False, max_len=args.max_len, exits=True, pinned=True, hidden=hidden)
+            extra = {"scale": scale, "pinned": True, "hidden": hidden}
         elif args.layer == "trunk":
             coarse = [pool_plan(plan, TRUNK) for plan in plans]
             scale = (1.0 / plan_statistics(coarse)[1]).astype(np.float32)
@@ -124,6 +127,11 @@ def main():
             validation_set = BuildingDataset(validation_items, len(cities), scale, augment=False, max_len=args.max_len)
         print(json.dumps({"train": len(train_set), "validation": len(validation_set)}), flush=True)
 
+    if args.start is not None:
+        saved = torch.load(args.start, map_location="cpu", weights_only=False)
+        if saved["cities"] != names:
+            raise SystemExit(f"{args.start} was trained on {saved['cities']}, not {names}")
+        model.load_state_dict(saved["ema"])
     model = model.to(device)
     ema = copy.deepcopy(model).eval()
     ema.requires_grad_(False)

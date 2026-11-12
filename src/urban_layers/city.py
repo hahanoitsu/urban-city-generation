@@ -45,7 +45,7 @@ from urban_layers.data import (
 from urban_layers.network import join_network
 from urban_layers.plan import PlanNet, sample_plan
 from urban_layers.rail import RAIL_WIDTH, TRACKS, heading_at, rail_corridors, rail_runs, rail_stations
-from urban_layers.streets import PLAN_CELLS, PORTS, SIDES, StreetModel, collate, condition_arrays, plan_crop, port_key, snap_to_ports
+from urban_layers.streets import PLAN_CELLS, PORTS, SIDES, StreetModel, collate, condition_arrays, guide_crossings, plan_crop, port_key, snap_to_ports
 from urban_model.structured_city_data import BUILDING_KINDS
 
 SLIDERS = {
@@ -237,8 +237,9 @@ def to_edge(points, reach=4.0, visible=(), joins=(False, False)):
     return points
 
 
-def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets", offset=0):
+def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets", offset=0, pinned=False):
     spread = [CHANNELS.index(channel) for channel in checkpoint.get("spread", ())]
+    hidden = [CHANNELS.index(channel) for channel in checkpoint.get("hidden", ())]
     rows = math.ceil((plan.shape[1] - 2 * offset) * CELL / TILE)
     columns = math.ceil((plan.shape[2] - 2 * offset) * CELL / TILE)
     scale = np.asarray(checkpoint["scale"], dtype=np.float32)
@@ -262,10 +263,14 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
             crop = plan_crop(plan, row * per_tile + offset, column * per_tile + offset, size=plan_cells) * scale[:, None, None]
             if spread:
                 crop[spread] = crop[spread].mean(axis=(1, 2), keepdims=True)
+            if hidden:
+                crop[hidden] = 0.0
             corridors = []
             if given:
                 window = box(column * TILE - MARGIN, row * TILE - MARGIN, (column + 1) * TILE + MARGIN, (row + 1) * TILE + MARGIN)
                 corridors = guide_pieces(given, guide_tree, window, (column * TILE, row * TILE))
+                if pinned:
+                    ports = sorted(ports + guide_crossings(corridors, visible), key=port_key)[:PORTS]
             items.append(condition_arrays(crop, context, ports, weights, corridors))
             meta.append((ports, visible))
         arrays = {name: value.to(device) for name, value in collate(items).items()}
@@ -752,7 +757,7 @@ def generate_city(
         main, stops = generate_trunk(trunk_model, trunk_checkpoint, wide, trunk_weights, size, generator, temperature, top_p, device, log, margin=margin)
         km = lambda mode: sum(LineString(points).length for class_id, points in main if LINE_CLASSES[class_id][0] == mode) / 1000.0
         log(f"trunk: {km('rail'):.1f} km of rail, {km('road'):.1f} km of main road corridor, {time.time() - started:.0f}s")
-        lines = generate_streets(street_model, street_checkpoint, wide, street_weights, generator, temperature, top_p, device, log, given=main, offset=margin)
+        lines = generate_streets(street_model, street_checkpoint, wide, street_weights, generator, temperature, top_p, device, log, given=main, offset=margin, pinned=street_checkpoint.get("pinned", False))
         streets = snap_lines(clip_lines(lines, size))
         runs = rail_lines(main)
         stations = place_stations(stops, runs)

@@ -4,6 +4,7 @@ import random
 
 import numpy as np
 import torch
+from shapely.geometry import LineString, box
 from torch import nn
 
 from urban_layers.data import CELL, CHANNELS, LINE_CLASSES, MARGIN, TILE, boundary_side, touch_lists
@@ -82,14 +83,52 @@ def port_key(port):
     return side, round(port[1] if side in (0, 2) else port[0], 3)
 
 
-def find_ports(lines, visible):
+def guide_crossings(corridors, visible, reach=8.0):
+    edge = box(0.0, 0.0, TILE, TILE).exterior
+    found = []
+    for class_id, points in corridors:
+        if LINE_CLASSES[class_id][0] != "road" or len(points) < 2:
+            continue
+        line = LineString(np.asarray(points, dtype=np.float64))
+        crossing = line.intersection(edge)
+        for spot in getattr(crossing, "geoms", [crossing]):
+            if spot.geom_type != "Point":
+                continue
+            point = np.clip([spot.x, spot.y], 0.0, TILE)
+            side = boundary_side(point, eps=1e-3)
+            if side < 0 or SIDES[side] in visible:
+                continue
+            along = line.project(spot)
+            step = np.subtract(line.interpolate(min(along + reach, line.length)).coords[0], line.interpolate(max(along - reach, 0.0)).coords[0])
+            if step @ np.asarray(SIDES[side]) > 0:
+                step = -step
+            length = np.linalg.norm(step)
+            if length > 1e-6:
+                found.append((float(point[0]), float(point[1]), float(step[0] / length), float(step[1] / length), class_id))
+    return found
+
+
+def find_ports(lines, visible, corridors=(), near=6.0):
     ports = []
+    loose = []
     for class_id, points in lines:
         for start in (True, False):
             point = points[0] if start else points[-1]
             side = boundary_side(point)
-            if side >= 0 and SIDES[side] in visible:
-                ports.append((float(point[0]), float(point[1]), *heading(points, start), class_id))
+            if side < 0:
+                continue
+            port = (float(point[0]), float(point[1]), *heading(points, start), class_id)
+            (ports if SIDES[side] in visible else loose).append(port)
+    if len(corridors) and loose:
+        spots = np.asarray([port[:2] for port in loose])
+        classes = np.asarray([port[4] for port in loose])
+        taken = set()
+        for x, y, _hx, _hy, class_id in guide_crossings(corridors, visible):
+            distance = np.where(classes == class_id, np.hypot(spots[:, 0] - x, spots[:, 1] - y), np.inf)
+            nearest = int(np.argmin(distance))
+            if distance[nearest] <= near and nearest not in taken:
+                taken.add(nearest)
+                ports.append(loose[nearest])
     ports.sort(key=port_key)
     return ports
 
@@ -258,7 +297,7 @@ def collate(items):
 
 
 class StreetDataset(torch.utils.data.Dataset):
-    def __init__(self, tiles, plans, cities, scale, augment=True, max_len=1536, city_dropout=0.1, stations=False, plan_cells=PLAN_CELLS, spread=(), exits=False):
+    def __init__(self, tiles, plans, cities, scale, augment=True, max_len=1536, city_dropout=0.1, stations=False, plan_cells=PLAN_CELLS, spread=(), exits=False, pinned=False, hidden=()):
         self.tiles = tiles
         self.plans = plans
         self.cities = cities
@@ -270,6 +309,8 @@ class StreetDataset(torch.utils.data.Dataset):
         self.plan_cells = plan_cells
         self.spread = [CHANNELS.index(name) for name in spread]
         self.exits = exits
+        self.pinned = pinned
+        self.hidden = [CHANNELS.index(name) for name in hidden]
         self.tokens = StreetTokens(stations=stations, exits=exits)
         for _city_index, tile in tiles:
             if "touches" not in tile:
@@ -291,11 +332,13 @@ class StreetDataset(torch.utils.data.Dataset):
         crop = move_grid(plan_crop(self.plans[city_index], *tile["cell"], size=self.plan_cells), matrix) * self.scale[:, None, None]
         if self.spread:
             crop[self.spread] = crop[self.spread].mean(axis=(1, 2), keepdims=True)
-        ports = find_ports(targets, visible)[:PORTS]
+        if self.hidden:
+            crop[self.hidden] = 0.0
+        corridors = [(class_id, move_points(points, matrix)) for class_id, points in tile.get("corridors", ())]
+        ports = find_ports(targets, visible, corridors if self.pinned else ())[:PORTS]
         city = np.zeros(self.cities, dtype=np.float32)
         if not self.augment or random.random() > self.city_dropout:
             city[city_index] = 1.0
-        corridors = [(class_id, move_points(points, matrix)) for class_id, points in tile.get("corridors", ())]
         item = condition_arrays(crop, context, ports, city, corridors)
         ordered = order_lines(targets, visible, ports, tile["touches"], tile.get("stops") if self.stations else None, self.exits)
         item["tokens"] = np.asarray(self.tokens.encode(ordered, self.max_len), dtype=np.int64)
