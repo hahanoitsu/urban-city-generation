@@ -206,13 +206,16 @@ def trim(corners, block_polygon, blocked, shapes, boxes, inside, tolerance, most
     return best
 
 
-def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0, blocked=(), roads=None, push=12.0, tolerance=1.0, face=True):
+def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0, blocked=(), roads=None, push=12.0, tolerance=1.0, face=True, tally=None):
     placed = []
     shapes = []
     boxes = np.zeros((0, 4))
+    tally = {} if tally is None else tally
     for kind, x, y, width, depth, turn, height in items:
         corners = from_frame(box_polygon(x, y, width, depth, turn), centre, angle)
+        drawn = corners
         shape = Polygon(corners)
+        tally["drawn"] = tally.get("drawn", 0) + 1
         if not shape.is_valid or shape.area < 4.0:
             continue
         if shape.intersection(block_polygon).area < inside * shape.area:
@@ -258,6 +261,7 @@ def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0,
                 break
         if moved is None:
             continue
+        tally["kept" if moved is drawn else "changed"] = tally.get("kept" if moved is drawn else "changed", 0) + 1
         shape = Polygon(moved)
         shapes.append(shape)
         boxes = np.vstack([boxes, shape.bounds])

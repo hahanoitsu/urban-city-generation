@@ -630,6 +630,7 @@ def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, ge
 
     around = [surroundings(part) for _block_id, part, _use in parts]
     options = [[] for _part in parts]
+    tally = {}
     for start in range(0, len(parts), batch_size):
         chunk = list(range(start, min(start + batch_size, len(parts))))
         items = [block_arrays(records[index], scale, weights) for index in chunk]
@@ -639,7 +640,7 @@ def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, ge
             results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, landuse=uses)
             for index, (_landuse, items_out) in zip(chunk, results):
                 blocked, roads = around[index]
-                placed = place_buildings(parts[index][1], records[index]["centre"], records[index]["angle"], items_out, blocked=blocked, roads=roads, face=not model.config.get("roads", False))
+                placed = place_buildings(parts[index][1], records[index]["centre"], records[index]["angle"], items_out, blocked=blocked, roads=roads, face=not model.config.get("roads", False), tally=tally)
                 options[index].append(reachable(placed, road_tree, 120.0 if covers[index] >= 0.06 else 60.0))
         log(f"buildings: parts {chunk[-1] + 1}/{len(parts)}")
 
@@ -667,7 +668,10 @@ def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, ge
         item["kind"] = BUILDING_KINDS[item["kind"]] if item["kind"] < len(BUILDING_KINDS) else "generic"
         buildings.append(item)
     log(f"buildings: {len(buildings)} in {len(blocks)} blocks, built area {built / max(goal, 1.0):.2f} of the plan")
-    return blocks, buildings
+    drawn = max(tally.get("drawn", 0), 1)
+    placement = {"kept_as_drawn": tally.get("kept", 0) / drawn, "moved_or_cut": tally.get("changed", 0) / drawn, "dropped": 1.0 - (tally.get("kept", 0) + tally.get("changed", 0)) / drawn}
+    log("boxes from the model: " + ", ".join(f"{name.replace('_', ' ')} {share:.0%}" for name, share in placement.items()))
+    return blocks, buildings, placement
 
 
 def generate_city(
@@ -766,7 +770,7 @@ def generate_city(
         kept += [part for part in getattr(rest, "geoms", [rest]) if part.geom_type == "Polygon" and part.area >= 1500.0]
     natural = kept
     building_weights = style_weights(building_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in building_checkpoint["cities"]})
-    blocks, buildings = generate_buildings(
+    blocks, buildings, placement = generate_buildings(
         building_model, building_checkpoint, pieces, plan, size, lines, building_weights, generator, temperature, top_p, samples=building_samples, batch_size=building_batch, device=device, log=log, water=water_union
     )
     log(f"buildings done, {time.time() - started:.0f}s")
@@ -782,6 +786,7 @@ def generate_city(
         "sliders": {name: float(value) for name, value in sliders.items()},
         "controls": {channel: float(value) for channel, value in zip(CHANNELS, controls)},
         "rules": rules,
+        "placement": placement,
         "plan": {"cell_m": CELL, "channels": list(CHANNELS), "shape": list(plan.shape)},
         "roads": [],
         "rail": [],
