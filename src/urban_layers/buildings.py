@@ -211,6 +211,10 @@ def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0,
     shapes = []
     boxes = np.zeros((0, 4))
     tally = {} if tally is None else tally
+
+    def count(name):
+        tally[name] = tally.get(name, 0) + 1
+
     for kind, x, y, width, depth, turn, height in items:
         if relative and roads is not None:
             road = road_turn(from_frame(np.array([[x, y]]), centre, angle)[0], roads)
@@ -219,25 +223,27 @@ def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0,
         corners = from_frame(box_polygon(x, y, width, depth, turn), centre, angle)
         drawn = corners
         shape = Polygon(corners)
-        tally["drawn"] = tally.get("drawn", 0) + 1
+        count("drawn")
         if not shape.is_valid or shape.area < 4.0:
+            count("dropped, too small")
             continue
         if shape.intersection(block_polygon).area < inside * shape.area:
             room = block_polygon.buffer(-min(width, depth) / 2.0)
-            if room.is_empty:
-                continue
             middle = shape.centroid
-            target = nearest_points(room, middle)[0]
-            if target.distance(middle) > nudge:
+            target = nearest_points(room, middle)[0] if not room.is_empty else None
+            if target is None or target.distance(middle) > nudge:
+                count("dropped, off its block")
                 continue
             corners = corners + (target.x - middle.x, target.y - middle.y)
             shape = Polygon(corners)
             if shape.intersection(block_polygon).area < inside * shape.area:
+                count("dropped, off its block")
                 continue
         turned = face_road(corners, roads) if face else corners
         if turned is not corners and Polygon(turned).intersection(block_polygon).area >= inside * Polygon(turned).area:
             corners = turned
         moved = None
+        cause = "off its block" if corners is not drawn else "on a road or water" if blocked and blocked[0].intersects(Polygon(corners)) else "on another box"
         middle = corners.mean(axis=0)
         offset = corners - middle
         sides = [corners[1] - corners[0], corners[3] - corners[0]]
@@ -264,8 +270,11 @@ def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0,
             if moved is not None:
                 break
         if moved is None:
+            count("dropped, " + cause)
             continue
-        tally["kept" if moved is drawn else "changed"] = tally.get("kept" if moved is drawn else "changed", 0) + 1
+        count("kept" if moved is drawn else "changed")
+        if moved is not drawn:
+            count("changed, " + cause)
         shape = Polygon(moved)
         shapes.append(shape)
         boxes = np.vstack([boxes, shape.bounds])

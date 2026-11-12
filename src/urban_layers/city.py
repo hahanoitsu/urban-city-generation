@@ -663,6 +663,8 @@ def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, ge
     drawn = max(tally.get("drawn", 0), 1)
     placement = {"kept_as_drawn": tally.get("kept", 0) / drawn, "moved_or_cut": tally.get("changed", 0) / drawn, "dropped": 1.0 - (tally.get("kept", 0) + tally.get("changed", 0)) / drawn}
     log("boxes from the model: " + ", ".join(f"{name.replace('_', ' ')} {share:.0%}" for name, share in placement.items()))
+    placement["why"] = {name: count / drawn for name, count in sorted(tally.items()) if "," in name}
+    log("why: " + ", ".join(f"{name} {share:.0%}" for name, share in placement["why"].items()))
     return blocks, buildings, placement
 
 
