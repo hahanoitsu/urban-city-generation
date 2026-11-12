@@ -383,7 +383,8 @@ def split_block(polygon, size=BLOCK_SPLIT):
             part = local.intersection(cell)
             for item in getattr(part, "geoms", [part]):
                 if item.geom_type == "Polygon" and item.area > 50.0:
-                    pieces.append(Polygon(from_frame(np.asarray(item.exterior.coords), centre, angle)))
+                    holes = [from_frame(np.asarray(ring.coords), centre, angle) for ring in item.interiors]
+                    pieces.append(Polygon(from_frame(np.asarray(item.exterior.coords), centre, angle), holes))
     return pieces
 
 

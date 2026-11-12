@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 import geopandas as gpd
-from shapely.geometry import LineString, Polygon, box
+from shapely.geometry import LineString, Point, Polygon, box
 
 from urban_dataset.extract import CityLayers
 from urban_dataset.prepared import save_city_gpkg
@@ -507,6 +507,22 @@ def test_blocks_stop_at_the_road_and_keep_their_holes():
     assert all(part.intersection(corridor(road, 3.0)).area < 0.01 for part, _use in parts)
     holed = box(0, 0, 100, 100).difference(box(40, 40, 60, 60))
     assert polygon_of(rings(holed)).equals(holed)
+
+
+def test_a_split_block_keeps_its_holes():
+    from urban_layers.buildings import place_buildings
+    from urban_layers.data import block_frame, split_block, to_frame
+
+    island = box(180, 180, 220, 220)
+    block = box(0, 0, 800, 800).difference(island)
+    parts = split_block(block)
+    assert len(parts) > 1
+    assert np.isclose(sum(part.area for part in parts), block.area)
+    assert not any(part.intersects(Point(200, 200)) for part in parts)
+    part = next(part for part in parts if part.distance(island) < 1.0)
+    centre, angle = block_frame(part)
+    x, y = to_frame(np.array([[200.0, 200.0]]), centre, angle)[0]
+    assert place_buildings(part, centre, angle, [(0, x, y, 6.0, 6.0, 0.0, 9.0)], nudge=0.0) == []
 
 
 def test_roads_over_water_are_marked_as_bridges():
