@@ -79,6 +79,8 @@ def real_window(layers, lines, bounds):
         column = layers.buildings["estimated_height_m"] if "estimated_height_m" in layers.buildings.columns else pd.Series(np.nan, index=layers.buildings.index)
         heights = pd.to_numeric(column, errors="coerce").fillna(9.0).to_numpy()
         for position, geometry in enumerate(layers.buildings.geometry):
+            if geometry is not None and geometry.geom_type == "MultiPolygon":
+                geometry = max(geometry.geoms, key=lambda part: part.area)
             if geometry is None or geometry.is_empty or geometry.geom_type != "Polygon":
                 continue
             if not window.contains(geometry.representative_point()):
