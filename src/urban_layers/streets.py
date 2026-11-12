@@ -6,12 +6,13 @@ import numpy as np
 import torch
 from torch import nn
 
-from urban_layers.data import CELL, CHANNELS, LINE_CLASSES, MARGIN, TILE, boundary_side, is_trunk, touch_lists
+from urban_layers.data import CELL, CHANNELS, LINE_CLASSES, MARGIN, TILE, boundary_side, touch_lists
 from urban_layers.decoder import TokenDecoder, fourier
 from urban_layers.tokens import StreetGrammar, StreetTokens
 
 PLAN_CELLS = 8
 CONTEXT_POINTS = 256
+GUIDE_POINTS = 192
 PORTS = 64
 D4 = [
     np.array([[1, 0], [0, 1]]),
@@ -98,7 +99,7 @@ def rank(class_id):
     return PRIORITY.get(name, 3) if mode == "road" else 3
 
 
-def order_lines(lines, visible, ports=None, touches=None, stops=None, first=(), exits=False):
+def order_lines(lines, visible, ports=None, touches=None, stops=None, exits=False):
     ports = find_ports(lines, visible) if ports is None else ports
     touches = touch_lists(lines) if touches is None else touches
     spots = np.asarray([(port[0], port[1]) for port in ports], dtype=np.float64).reshape(-1, 2)
@@ -113,10 +114,10 @@ def order_lines(lines, visible, ports=None, touches=None, stops=None, first=(), 
     order = []
     placed = set()
 
-    def grow(wanted):
+    def grow():
         best = None
         for index, (class_id, points) in enumerate(lines):
-            if index in placed or (wanted is not None and index not in wanted):
+            if index in placed:
                 continue
             start_on = any(other in placed for other in touches[index][0])
             end_on = any(other in placed for other in touches[index][1])
@@ -132,9 +133,6 @@ def order_lines(lines, visible, ports=None, touches=None, stops=None, first=(), 
         order.append((index, flip, False))
         placed.add(index)
 
-    wanted = set(first)
-    for _line in wanted:
-        grow(wanted)
     starts = []
     for index, (_class_id, points) in enumerate(lines):
         if index in placed:
@@ -147,7 +145,7 @@ def order_lines(lines, visible, ports=None, touches=None, stops=None, first=(), 
         order.append((index, flip, True))
         placed.add(index)
     while len(placed) < len(lines):
-        grow(None)
+        grow()
 
     result = []
     for index, flip, from_port in order:
@@ -184,33 +182,37 @@ def resample(points, spacing=16.0):
     return result, direction
 
 
-def condition_arrays(crop, context, ports, city):
+def line_points(pieces, limit):
+    xy = np.zeros((limit, 2), dtype=np.float32)
+    direction = np.zeros((limit, 2), dtype=np.float32)
+    kind = np.zeros(limit, dtype=np.int64)
+    mask = np.zeros(limit, dtype=bool)
+    sampled = []
+    for class_id, points in pieces:
+        along, heading_of = resample(points)
+        sampled.append((np.abs(along - TILE / 2.0).max(axis=1).min(), class_id, along, heading_of))
+    sampled.sort(key=lambda item: item[0])
+    count = 0
+    for _distance, class_id, along, heading_of in sampled:
+        take = min(len(along), limit - count)
+        if take <= 0:
+            break
+        xy[count : count + take] = along[:take] / TILE
+        direction[count : count + take] = heading_of[:take]
+        kind[count : count + take] = class_id
+        mask[count : count + take] = True
+        count += take
+    return xy, direction, kind, mask
+
+
+def condition_arrays(crop, context, ports, city, corridors=()):
     plan = crop.reshape(crop.shape[0], -1).T.astype(np.float32)
     index = np.arange(crop.shape[1])
     rows, columns = np.meshgrid(index, index, indexing="ij")
     border = (crop.shape[1] - int(TILE / CELL)) // 2
     plan_xy = np.stack([(columns - border + 0.5) * CELL, (rows - border + 0.5) * CELL], axis=-1).reshape(-1, 2) / TILE
-
-    context_xy = np.zeros((CONTEXT_POINTS, 2), dtype=np.float32)
-    context_direction = np.zeros((CONTEXT_POINTS, 2), dtype=np.float32)
-    context_class = np.zeros(CONTEXT_POINTS, dtype=np.int64)
-    context_mask = np.zeros(CONTEXT_POINTS, dtype=bool)
-    pieces = []
-    for class_id, points in context:
-        xy, direction = resample(points)
-        distance = np.abs(xy - TILE / 2.0).max(axis=1)
-        pieces.append((distance.min(), class_id, xy, direction))
-    pieces.sort(key=lambda item: item[0])
-    count = 0
-    for _distance, class_id, xy, direction in pieces:
-        take = min(len(xy), CONTEXT_POINTS - count)
-        if take <= 0:
-            break
-        context_xy[count : count + take] = xy[:take] / TILE
-        context_direction[count : count + take] = direction[:take]
-        context_class[count : count + take] = class_id
-        context_mask[count : count + take] = True
-        count += take
+    context_xy, context_direction, context_class, context_mask = line_points(context, CONTEXT_POINTS)
+    guide_xy, guide_direction, guide_class, guide_mask = line_points(corridors, GUIDE_POINTS)
 
     port_xy = np.zeros((PORTS, 2), dtype=np.float32)
     port_heading = np.zeros((PORTS, 2), dtype=np.float32)
@@ -228,6 +230,10 @@ def condition_arrays(crop, context, ports, city):
         "context_direction": context_direction,
         "context_class": context_class,
         "context_mask": context_mask,
+        "guide_xy": guide_xy,
+        "guide_direction": guide_direction,
+        "guide_class": guide_class,
+        "guide_mask": guide_mask,
         "port_xy": port_xy,
         "port_heading": port_heading,
         "port_class": port_class,
@@ -239,21 +245,20 @@ def condition_arrays(crop, context, ports, city):
 def collate(items):
     result = {}
     for name in items[0]:
-        if name in ("tokens", "labels"):
+        if name == "tokens":
             continue
         result[name] = torch.from_numpy(np.stack([item[name] for item in items]))
-    for name in ("tokens", "labels"):
-        if name in items[0]:
-            length = max(len(item[name]) for item in items)
-            tokens = np.zeros((len(items), length), dtype=np.int64)
-            for index, item in enumerate(items):
-                tokens[index, : len(item[name])] = item[name]
-            result[name] = torch.from_numpy(tokens)
+    if "tokens" in items[0]:
+        length = max(len(item["tokens"]) for item in items)
+        tokens = np.zeros((len(items), length), dtype=np.int64)
+        for index, item in enumerate(items):
+            tokens[index, : len(item["tokens"])] = item["tokens"]
+        result["tokens"] = torch.from_numpy(tokens)
     return result
 
 
 class StreetDataset(torch.utils.data.Dataset):
-    def __init__(self, tiles, plans, cities, scale, augment=True, max_len=1536, city_dropout=0.1, stations=False, plan_cells=PLAN_CELLS, trunk_first=False, spread=(), exits=False):
+    def __init__(self, tiles, plans, cities, scale, augment=True, max_len=1536, city_dropout=0.1, stations=False, plan_cells=PLAN_CELLS, spread=(), exits=False):
         self.tiles = tiles
         self.plans = plans
         self.cities = cities
@@ -263,7 +268,6 @@ class StreetDataset(torch.utils.data.Dataset):
         self.city_dropout = city_dropout
         self.stations = stations
         self.plan_cells = plan_cells
-        self.trunk_first = trunk_first
         self.spread = [CHANNELS.index(name) for name in spread]
         self.exits = exits
         self.tokens = StreetTokens(stations=stations, exits=exits)
@@ -287,32 +291,29 @@ class StreetDataset(torch.utils.data.Dataset):
         crop = move_grid(plan_crop(self.plans[city_index], *tile["cell"], size=self.plan_cells), matrix) * self.scale[:, None, None]
         if self.spread:
             crop[self.spread] = crop[self.spread].mean(axis=(1, 2), keepdims=True)
-        first = [number for number, (class_id, _points) in enumerate(targets) if is_trunk(class_id)] if self.trunk_first else []
-        ports = find_ports([line for number, line in enumerate(targets) if number not in first], visible)[:PORTS]
+        ports = find_ports(targets, visible)[:PORTS]
         city = np.zeros(self.cities, dtype=np.float32)
         if not self.augment or random.random() > self.city_dropout:
             city[city_index] = 1.0
-        item = condition_arrays(crop, context, ports, city)
-        ordered = order_lines(targets, visible, ports, tile["touches"], tile.get("stops") if self.stations else None, first, self.exits)
+        corridors = [(class_id, move_points(points, matrix)) for class_id, points in tile.get("corridors", ())]
+        item = condition_arrays(crop, context, ports, city, corridors)
+        ordered = order_lines(targets, visible, ports, tile["touches"], tile.get("stops") if self.stations else None, self.exits)
         item["tokens"] = np.asarray(self.tokens.encode(ordered, self.max_len), dtype=np.int64)
-        if self.trunk_first:
-            written = len(self.tokens.encode(ordered[: len(first)], self.max_len)) - 1
-            item["labels"] = item["tokens"].copy()
-            item["labels"][1:written] = 0
         return item
 
 
 class StreetModel(nn.Module):
-    def __init__(self, cities, d=256, layers=6, heads=8, max_len=1536, bands=8, dropout=0.0, stations=False, exits=False):
+    def __init__(self, cities, d=256, layers=6, heads=8, max_len=1536, bands=8, dropout=0.0, stations=False, exits=False, guided=False):
         super().__init__()
-        self.config = {"cities": cities, "d": d, "layers": layers, "heads": heads, "max_len": max_len, "bands": bands, "dropout": dropout, "stations": stations, "exits": exits}
+        self.config = {"cities": cities, "d": d, "layers": layers, "heads": heads, "max_len": max_len, "bands": bands, "dropout": dropout, "stations": stations, "exits": exits, "guided": guided}
         self.tokens = StreetTokens(stations=stations, exits=exits)
         self.bands = bands
+        self.guided = guided
         self.place = nn.Linear(4 * bands, d)
         self.plan = nn.Linear(len(CHANNELS), d)
         self.line_class = nn.Embedding(len(LINE_CLASSES), d)
         self.direction = nn.Linear(2, d)
-        self.kind = nn.Embedding(4, d)
+        self.kind = nn.Embedding(5 if guided else 4, d)
         self.city = nn.Linear(cities, d)
         self.decoder = TokenDecoder(self.tokens.vocab, self.tokens.features(), d, layers, heads, max_len, dropout)
 
@@ -331,6 +332,10 @@ class StreetModel(nn.Module):
         batch_size = memory.shape[0]
         fixed = torch.zeros(batch_size, 1 + plan.shape[1], dtype=torch.bool, device=memory.device)
         padding = torch.cat([fixed, ~batch["context_mask"], ~batch["port_mask"]], dim=1)
+        if self.guided:
+            guide = self.place(fourier(batch["guide_xy"], self.bands)) + self.line_class(batch["guide_class"]) + self.direction(batch["guide_direction"]) + kinds[4]
+            memory = torch.cat([memory, guide], dim=1)
+            padding = torch.cat([padding, ~batch["guide_mask"]], dim=1)
         return memory, padding
 
     def forward(self, batch):
@@ -338,13 +343,13 @@ class StreetModel(nn.Module):
         return self.decoder(batch["tokens"], memory, padding)
 
     @torch.no_grad()
-    def generate(self, batch, temperature=1.0, top_p=0.95, generator=None, max_points=128, max_lines=400, force_ports=True, classes=None, script=None):
+    def generate(self, batch, temperature=1.0, top_p=0.95, generator=None, max_points=128, max_lines=400, force_ports=True, classes=None):
         memory, padding = self.condition(batch)
         ports = None
         if force_ports:
             spots = torch.round(batch["port_xy"] * TILE).clamp(0, TILE).long()
             ports = torch.cat([batch["port_class"][..., None], spots], dim=-1).masked_fill(~batch["port_mask"][..., None], -1)
-        grammar = StreetGrammar(self.tokens, max_points, max_lines, ports, max_len=self.decoder.max_len, sides=batch.get("sides"), classes=classes, script=script)
+        grammar = StreetGrammar(self.tokens, max_points, max_lines, ports, max_len=self.decoder.max_len, sides=batch.get("sides"), classes=classes)
         tokens = self.decoder.generate(memory, padding, grammar, temperature=temperature, top_p=top_p, generator=generator)
         return [self.tokens.decode(row.tolist()) for row in tokens.cpu()]
 

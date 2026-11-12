@@ -57,7 +57,6 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cities", nargs="*", help="train on these cities only, any other city in the data folder is held out")
-    parser.add_argument("--trunk-first", action="store_true", help="streets: rail and main roads come first in every tile and are given, not learned")
     parser.add_argument("--plan-cells", type=int, default=16, help="trunk: plan cells each tile sees")
     parser.add_argument("--spread", nargs="*", default=[], help="trunk: plan channels the model is told the amount of but not where, for example major rail")
     args = parser.parse_args()
@@ -109,10 +108,9 @@ def main():
             validation_items = [(index, record) for index, record, flag in items if flag] or train_items[:64]
         extra = {"scale": scale}
         if args.layer == "streets":
-            model = StreetModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout, exits=True)
-            train_set = StreetDataset(train_items, plans, len(cities), scale, augment=not args.overfit, max_len=args.max_len, trunk_first=args.trunk_first, exits=True)
-            validation_set = StreetDataset(validation_items, plans, len(cities), scale, augment=False, max_len=args.max_len, trunk_first=args.trunk_first, exits=True)
-            extra["trunk_first"] = args.trunk_first
+            model = StreetModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout, exits=True, guided=True)
+            train_set = StreetDataset(train_items, plans, len(cities), scale, augment=not args.overfit, max_len=args.max_len, exits=True)
+            validation_set = StreetDataset(validation_items, plans, len(cities), scale, augment=False, max_len=args.max_len, exits=True)
         elif args.layer == "trunk":
             coarse = [pool_plan(plan, TRUNK) for plan in plans]
             scale = (1.0 / plan_statistics(coarse)[1]).astype(np.float32)
@@ -142,7 +140,7 @@ def main():
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
             if args.layer == "plan":
                 return plan_loss(net, batch)
-            return sequence_loss(net(batch), batch.get("labels", batch["tokens"]))
+            return sequence_loss(net(batch), batch["tokens"])
 
     step = 0
     best = math.inf

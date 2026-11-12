@@ -129,9 +129,8 @@ class StreetTokens:
 
 
 class StreetGrammar:
-    def __init__(self, tokens, max_points=48, max_lines=160, ports=None, reach=8, max_len=None, sides=None, margin=4, classes=None, script=None):
+    def __init__(self, tokens, max_points=48, max_lines=160, ports=None, reach=8, max_len=None, sides=None, margin=4, classes=None):
         self.tokens = tokens
-        self.script = script
         self.max_points = max_points
         self.max_lines = max_lines
         self.ports = ports
@@ -165,7 +164,6 @@ class StreetGrammar:
             "closing": torch.zeros(batch, dtype=torch.bool, device=device),
             "rail": torch.zeros(batch, dtype=torch.bool, device=device),
             "stopped": torch.zeros(batch, dtype=torch.bool, device=device),
-            "step": zeros.clone(),
             "klass": torch.full((batch,), -1, dtype=torch.long, device=device),
         }
 
@@ -238,13 +236,6 @@ class StreetGrammar:
             forced = torch.zeros_like(result)
             forced[rows, token.clamp(0, self.tokens.vocab - 1)] = True
             result = torch.where(condition[:, None], forced, result)
-        if self.script is not None and self.script.shape[1] > 0:
-            script = self.script.to(phase.device)
-            token = script[rows, state["step"].clamp_max(script.shape[1] - 1)]
-            written = (state["step"] < script.shape[1]) & (token >= 0) & (phase != 4)
-            forced = torch.zeros_like(result)
-            forced[rows, token.clamp_min(0)] = True
-            result = torch.where(written[:, None], forced, result)
         return result
 
     def advance(self, state, token):
@@ -305,7 +296,6 @@ class StreetGrammar:
             "closing": closing,
             "rail": rail,
             "stopped": stopped,
-            "step": state["step"] + 1,
             "klass": klass,
         }
 

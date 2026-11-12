@@ -26,9 +26,11 @@ from urban_layers.data import (
     LANDUSE,
     LINE_CLASSES,
     TILE,
+    MARGIN,
     block_record,
     boundary_side,
     corridor,
+    guide_pieces,
     is_trunk,
     line_index,
     make_blocks,
@@ -42,7 +44,7 @@ from urban_layers.data import (
 from urban_layers.network import join_network
 from urban_layers.plan import PlanNet, sample_plan
 from urban_layers.rail import RAIL_WIDTH, TRACKS, heading_at, rail_corridors, rail_runs, rail_stations
-from urban_layers.streets import PLAN_CELLS, PORTS, SIDES, StreetModel, collate, condition_arrays, order_lines, plan_crop, port_key, snap_to_ports
+from urban_layers.streets import PLAN_CELLS, PORTS, SIDES, StreetModel, collate, condition_arrays, plan_crop, port_key, snap_to_ports
 from urban_model.structured_city_data import BUILDING_KINDS
 
 SLIDERS = {
@@ -234,61 +236,40 @@ def to_edge(points, reach=4.0, visible=(), joins=(False, False)):
     return points
 
 
-def given_lines(given, row, column, tokens, limit):
-    if given is None:
-        return []
-    tree, shapes, classes = given
-    tile = box(column * TILE, row * TILE, (column + 1) * TILE, (row + 1) * TILE)
-    pieces = []
-    for index in tree.query(tile, predicate="intersects"):
-        inside = shapes[index].intersection(tile)
-        for part in getattr(inside, "geoms", [inside]):
-            if part.geom_type == "LineString" and part.length > 2.0:
-                pieces.append((int(classes[index]), np.asarray(part.coords, dtype=np.float32)[:, :2] - (column * TILE, row * TILE)))
-    if not pieces:
-        return []
-    return tokens.encode(order_lines(pieces, set(), [], first=range(len(pieces))), limit)[1:-1]
-
-
 def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets"):
     spread = [CHANNELS.index(channel) for channel in checkpoint.get("spread", ())]
     rows = math.ceil(plan.shape[1] * CELL / TILE)
     columns = math.ceil(plan.shape[2] * CELL / TILE)
     scale = np.asarray(checkpoint["scale"], dtype=np.float32)
     per_tile = int(round(TILE / CELL))
-    if classes is None and not rail:
+    if given is not None:
+        given = [(class_id, LineString(points), 0.0) for class_id, points in given]
+        guide_tree = STRtree([geometry for _class_id, geometry, _width in given]) if given else None
+        classes = [mode == "road" for mode, _name, _level in LINE_CLASSES]
+    elif classes is None and not rail:
         plan = plan.copy()
         plan[CHANNELS.index("rail")] = 0.0
         classes = [mode == "road" for mode, _name, _level in LINE_CLASSES]
-    if given is not None:
-        shapes = np.asarray([LineString(points) for _class_id, points in given], dtype=object)
-        given = (STRtree(shapes), shapes, [class_id for class_id, _points in given])
-        classes = [mode == "road" and not is_trunk(class_id) for class_id, (mode, _name, _level) in enumerate(LINE_CLASSES)]
     done = {}
     marks = {}
     for diagonal in range(rows + columns - 1):
         batch = [(row, diagonal - row) for row in range(rows) if 0 <= diagonal - row < columns]
         items = []
         meta = []
-        scripts = []
         for row, column in batch:
             context, ports, visible = neighbour_lines(done, row, column)
-            if given is not None:
-                ports = [port for port in ports if not is_trunk(port[4])]
             crop = plan_crop(plan, row * per_tile, column * per_tile, size=plan_cells) * scale[:, None, None]
             if spread:
                 crop[spread] = crop[spread].mean(axis=(1, 2), keepdims=True)
-            items.append(condition_arrays(crop, context, ports, weights))
+            corridors = []
+            if given:
+                window = box(column * TILE - MARGIN, row * TILE - MARGIN, (column + 1) * TILE + MARGIN, (row + 1) * TILE + MARGIN)
+                corridors = guide_pieces(given, guide_tree, window, (column * TILE, row * TILE))
+            items.append(condition_arrays(crop, context, ports, weights, corridors))
             meta.append((ports, visible))
-            scripts.append(given_lines(given, row, column, model.tokens, model.decoder.max_len - 128))
         arrays = {name: value.to(device) for name, value in collate(items).items()}
         arrays["sides"] = torch.tensor([[SIDES[side] in visible for side in range(4)] for _ports, visible in meta], dtype=torch.bool, device=device)
-        script = None
-        if any(scripts):
-            script = torch.full((len(scripts), max(len(item) for item in scripts)), -1, dtype=torch.long)
-            for index, item in enumerate(scripts):
-                script[index, : len(item)] = torch.as_tensor(item, dtype=torch.long)
-        results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, classes=classes, script=script)
+        results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, classes=classes)
         for (row, column), lines, (ports, visible) in zip(batch, results, meta):
             snapped = snap_to_ports(lines, ports)
             done[(row, column)] = [(class_id, to_edge(points, visible=visible, joins=joins), joins) for class_id, points, joins, *_rest in snapped]
@@ -298,8 +279,6 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
     stops = []
     for (row, column), items in done.items():
         for (class_id, points, joins), stopped in zip(items, marks[(row, column)]):
-            if given is not None and is_trunk(class_id):
-                continue
             moved = np.asarray(points, dtype=np.float64) + (column * TILE, row * TILE)
             lines.append((class_id, moved, joins))
             stops += [(float(moved[index][0]), float(moved[index][1])) for index in stopped if index < len(moved)]
@@ -745,7 +724,8 @@ def generate_city(
     natural = natural_cover(plan, labels)
     street_weights = style_weights(street_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in street_checkpoint["cities"]})
     area = box(0.0, 0.0, *size)
-    rules = ["natural cover", "building clearance" if building_model.config.get("roads", False) else "building placement"]
+    rules = ["plan totals"] if match else []
+    rules += ["natural cover", "building clearance" if building_model.config.get("roads", False) else "building placement"]
     if models.get("trunk") is None and not transport_rules:
         lines = generate_streets(street_model, street_checkpoint, plan, street_weights, generator, temperature, top_p, device, log, rail=True)
         snapped = snap_lines(clip_lines(lines, size))
@@ -767,11 +747,10 @@ def generate_city(
         trunk_weights = style_weights(trunk_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in trunk_checkpoint["cities"]})
         main, stops = generate_trunk(trunk_model, trunk_checkpoint, plan, trunk_weights, size, generator, temperature, top_p, device, log)
         km = lambda mode: sum(LineString(points).length for class_id, points in main if LINE_CLASSES[class_id][0] == mode) / 1000.0
-        log(f"trunk: {km('rail'):.1f} km of rail, {km('road'):.1f} km of main road, {time.time() - started:.0f}s")
+        log(f"trunk: {km('rail'):.1f} km of rail, {km('road'):.1f} km of main road corridor, {time.time() - started:.0f}s")
         lines = generate_streets(street_model, street_checkpoint, plan, street_weights, generator, temperature, top_p, device, log, given=main)
-        snapped = snap_lines(clip_lines(lines, size) + [(class_id, points, (False, False)) for class_id, points in main])
-        streets = [(class_id, points) for class_id, points in snapped if LINE_CLASSES[class_id][0] == "road"]
-        runs = rail_lines(snapped)
+        streets = snap_lines(clip_lines(lines, size))
+        runs = rail_lines(main)
         stations = place_stations(stops, runs)
         log(f"rail: {len(runs)} pieces, {len(stations)} stations")
     lines = streets + [(class_id, points) for class_id, points, _number in runs]

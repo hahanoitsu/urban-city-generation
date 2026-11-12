@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -310,8 +311,25 @@ def tangents(line, along, length):
     return step / np.maximum(np.linalg.norm(step, axis=1, keepdims=True), 1e-9)
 
 
-def rail_corridors(lines, gap=12.0, step=10.0, shortest=30.0, shared=100.0):
-    rail = [index for index, (class_id, _geometry, _width) in enumerate(lines) if LINE_CLASSES[class_id][0] == "rail" and is_trunk(class_id)]
+def is_rail_trunk(class_id):
+    return LINE_CLASSES[class_id][0] == "rail" and is_trunk(class_id)
+
+
+def rail_corridors(lines, gap=12.0):
+    return merge_corridors(lines, is_rail_trunk, gap)
+
+
+def guide_lines(layers, lines):
+    roads = layers.roads
+    if not roads.empty and "highway" in roads.columns:
+        roads = roads[~roads["highway"].fillna("").astype(str).str.endswith("_link")]
+    main = [line for line in city_lines(replace(layers, roads=roads, rail=layers.rail.iloc[0:0])) if LINE_CLASSES[line[0]][1] == "major"]
+    main = merge_corridors(main, is_road, gap=30.0, shortest=50.0, shared=150.0)
+    return main + [line for line in rail_corridors(lines) if is_rail_trunk(line[0])]
+
+
+def merge_corridors(lines, chosen, gap=12.0, step=10.0, shortest=30.0, shared=100.0):
+    rail = [index for index, (class_id, _geometry, _width) in enumerate(lines) if chosen(class_id)]
     if len(rail) < 2:
         return list(lines)
     shapes = np.asarray([lines[index][1] for index in rail], dtype=object)
@@ -322,8 +340,8 @@ def rail_corridors(lines, gap=12.0, step=10.0, shortest=30.0, shared=100.0):
     partners = {}
     for mine, other in zip(first[covers].tolist(), second[covers].tolist()):
         partners.setdefault(mine, []).append(other)
-    chosen = set(rail)
-    kept = [item for index, item in enumerate(lines) if index not in chosen]
+    picked = set(rail)
+    kept = [item for index, item in enumerate(lines) if index not in picked]
     for local, shape in enumerate(shapes):
         others = partners.get(local)
         if not others:
@@ -368,11 +386,11 @@ def rail_corridors(lines, gap=12.0, step=10.0, shortest=30.0, shared=100.0):
                                 points = np.vstack([target[None], points]) if end == 0 else np.vstack([points, target[None]])
                     kept.append((int(classes[local]), LineString(points), 0.0))
                 start = None
-    return close_gaps(kept, gap)
+    return close_gaps(kept, gap, chosen)
 
 
-def close_gaps(lines, gap):
-    rail = [index for index, (class_id, geometry, _width) in enumerate(lines) if LINE_CLASSES[class_id][0] == "rail" and is_trunk(class_id) and geometry.length > 2.0 * gap]
+def close_gaps(lines, gap, chosen):
+    rail = [index for index, (class_id, geometry, _width) in enumerate(lines) if chosen(class_id) and geometry.length > 2.0 * gap]
     if len(rail) < 2:
         return lines
     coords = [np.asarray(lines[index][1].coords)[:, :2].copy() for index in rail]
@@ -449,10 +467,11 @@ def trunk_tiles(lines, bounds, stations=(), unit=TRUNK, stride=TILE / 2):
     return add_stops(tiles, stations, unit)
 
 
-def street_tiles(lines, bounds, stride=TILE, minimum_length=40.0):
+def street_tiles(lines, bounds, stride=TILE, minimum_length=40.0, guide=None):
     minx, miny, maxx, maxy = bounds
     geometries = [geometry for _class_id, geometry, _width in lines]
     tree = STRtree(geometries)
+    guide_tree = STRtree([geometry for _class_id, geometry, _width in guide]) if guide else None
     tile_box = box(0.0, 0.0, TILE, TILE)
     tiles = []
     for y0 in np.arange(miny, maxy - TILE / 2, stride):
@@ -488,16 +507,27 @@ def street_tiles(lines, bounds, stride=TILE, minimum_length=40.0):
                             context.append((class_id, np.asarray(piece.coords, dtype=np.float32)[:, :2], ring_index))
             if inside_length < minimum_length and not spare:
                 continue
-            tiles.append(
-                {
-                    "origin": (float(x0), float(y0)),
-                    "cell": (int(round((y0 - miny) / CELL)), int(round((x0 - minx) / CELL))),
-                    "targets": targets,
-                    "context": context,
-                    "touches": touch_lists(targets),
-                }
-            )
+            tile = {
+                "origin": (float(x0), float(y0)),
+                "cell": (int(round((y0 - miny) / CELL)), int(round((x0 - minx) / CELL))),
+                "targets": targets,
+                "context": context,
+                "touches": touch_lists(targets),
+            }
+            if guide_tree is not None:
+                tile["corridors"] = guide_pieces(guide, guide_tree, window, (x0, y0))
+            tiles.append(tile)
     return tiles
+
+
+def guide_pieces(guide, tree, window, origin):
+    pieces = []
+    for index in tree.query(window, predicate="intersects"):
+        for part in _parts(guide[index][1].intersection(window)):
+            part = part.simplify(2.0)
+            if part.length >= 4.0:
+                pieces.append((guide[index][0], np.asarray(part.coords, dtype=np.float32)[:, :2] - np.asarray(origin, dtype=np.float32)))
+    return pieces
 
 
 def block_frame(polygon):
@@ -765,9 +795,9 @@ def build_city(gpkg, name, output, stride=TILE):
     bounds = city_bounds(layers)
     plan = plan_raster(layers, lines, bounds)
     stations = city_stations(layers)
-    merged = rail_corridors(lines)
-    tiles = street_tiles(merged, bounds, stride)
-    trunk = trunk_tiles(merged, bounds, stations[stations[:, 2] != RAIL_CLASSES.index("tram")])
+    guide = guide_lines(layers, lines)
+    tiles = street_tiles([line for line in lines if is_road(line[0])], bounds, stride, guide=guide)
+    trunk = trunk_tiles(guide, bounds, stations[stations[:, 2] != RAIL_CLASSES.index("tram")])
     blocks, assigned, total = block_records(layers, lines, plan, bounds)
     folder = Path(output) / name
     folder.mkdir(parents=True, exist_ok=True)
