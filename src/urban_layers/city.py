@@ -236,10 +236,10 @@ def to_edge(points, reach=4.0, visible=(), joins=(False, False)):
     return points
 
 
-def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets"):
+def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets", offset=0):
     spread = [CHANNELS.index(channel) for channel in checkpoint.get("spread", ())]
-    rows = math.ceil(plan.shape[1] * CELL / TILE)
-    columns = math.ceil(plan.shape[2] * CELL / TILE)
+    rows = math.ceil((plan.shape[1] - 2 * offset) * CELL / TILE)
+    columns = math.ceil((plan.shape[2] - 2 * offset) * CELL / TILE)
     scale = np.asarray(checkpoint["scale"], dtype=np.float32)
     per_tile = int(round(TILE / CELL))
     if given is not None:
@@ -258,7 +258,7 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
         meta = []
         for row, column in batch:
             context, ports, visible = neighbour_lines(done, row, column)
-            crop = plan_crop(plan, row * per_tile, column * per_tile, size=plan_cells) * scale[:, None, None]
+            crop = plan_crop(plan, row * per_tile + offset, column * per_tile + offset, size=plan_cells) * scale[:, None, None]
             if spread:
                 crop[spread] = crop[spread].mean(axis=(1, 2), keepdims=True)
             corridors = []
@@ -340,10 +340,10 @@ def place_stations(stops, runs, reach=100.0, same=60.0, touch=1.0):
     return stations
 
 
-def generate_trunk(model, checkpoint, plan, weights, size, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print):
+def generate_trunk(model, checkpoint, plan, weights, size, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, margin=0):
     unit = float(checkpoint["unit"])
     classes = [is_trunk(class_id) for class_id in range(len(LINE_CLASSES))]
-    lines, stops = generate_streets(model, checkpoint, pool_plan(plan, unit), weights, generator, temperature, top_p, device, log, classes=classes, plan_cells=int(checkpoint.get("plan_cells", PLAN_CELLS)), name="trunk")
+    lines, stops = generate_streets(model, checkpoint, pool_plan(plan, unit), weights, generator, temperature, top_p, device, log, classes=classes, plan_cells=int(checkpoint.get("plan_cells", PLAN_CELLS)), name="trunk", offset=int(margin // unit))
     snapped = snap_lines(clip_lines(lines, (size[0] / unit, size[1] / unit)))
     main = [(class_id, np.asarray(points, dtype=np.float64) * unit) for class_id, points in snapped]
     return main, [(x * unit, y * unit) for x, y in stops]
@@ -610,7 +610,7 @@ def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, ge
     parts = [(block_id, part, use) for block_id, (polygon, use) in enumerate(pieces) for part in split_block(polygon)]
     records = [block_record(part, plan, bounds, road_tree, road_classes, line_tree, line_classes) for _block_id, part, _use in parts]
     covers = [planned_cover(plan, part) for _block_id, part, _use in parts]
-    grounds = [keep_out(lines, size, water, setback) for setback in (True, False)]
+    grounds = [keep_out(lines, size, water, setback) for setback in ((False,) if model.config.get("roads", False) else (True, False))]
     trees = [STRtree(shapes) for shapes in grounds]
     segments = road_segments(lines)
     segment_tree = STRtree(shapely.linestrings(segments)) if len(segments) else None
@@ -704,10 +704,14 @@ def generate_city(
     generator = torch.Generator(device=device).manual_seed(int(seed))
     height = int(math.ceil(size_m[1] / CELL / 4) * 4)
     width = int(math.ceil(size_m[0] / CELL / 4) * 4)
-    plan = sample_plan(
+    margin = 32 if models.get("trunk") is not None else 0
+    if margin and known_plan is not None:
+        known_plan = np.pad(known_plan, ((0, 0), (margin, margin), (margin, margin)))
+        known_mask = np.pad(known_mask, ((margin, margin), (margin, margin)))
+    wide = sample_plan(
         plan_model,
-        height,
-        width,
+        height + 2 * margin,
+        width + 2 * margin,
         weights,
         controls * np.asarray(plan_checkpoint["control_scale"]),
         plan_checkpoint["mean"],
@@ -719,6 +723,7 @@ def generate_city(
         known_mask=known_mask,
         wanted=controls if match else None,
     )
+    plan = wide[:, margin : margin + height, margin : margin + width]
     size = (width * CELL, height * CELL)
     log(f"plan: {height} x {width} cells, {time.time() - started:.0f}s")
     water = plan_polygons(plan, "water")
@@ -749,10 +754,10 @@ def generate_city(
     else:
         trunk_model, trunk_checkpoint = models["trunk"]
         trunk_weights = style_weights(trunk_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in trunk_checkpoint["cities"]})
-        main, stops = generate_trunk(trunk_model, trunk_checkpoint, plan, trunk_weights, size, generator, temperature, top_p, device, log)
+        main, stops = generate_trunk(trunk_model, trunk_checkpoint, wide, trunk_weights, size, generator, temperature, top_p, device, log, margin=margin)
         km = lambda mode: sum(LineString(points).length for class_id, points in main if LINE_CLASSES[class_id][0] == mode) / 1000.0
         log(f"trunk: {km('rail'):.1f} km of rail, {km('road'):.1f} km of main road corridor, {time.time() - started:.0f}s")
-        lines = generate_streets(street_model, street_checkpoint, plan, street_weights, generator, temperature, top_p, device, log, given=main)
+        lines = generate_streets(street_model, street_checkpoint, wide, street_weights, generator, temperature, top_p, device, log, given=main, offset=margin)
         streets = snap_lines(clip_lines(lines, size))
         runs = rail_lines(main)
         stations = place_stations(stops, runs)

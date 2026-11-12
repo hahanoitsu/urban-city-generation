@@ -159,6 +159,8 @@ def match_means(plan, wanted, rounds=4):
             plan[index] *= target / current
             if channel in FRACTIONS:
                 plan[index] = np.clip(plan[index], 0.0, 1.0)
+            elif index < 4:
+                plan[index] = np.clip(plan[index], 0.0, 3.0)
     return plan
 
 
