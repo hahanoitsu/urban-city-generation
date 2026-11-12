@@ -727,6 +727,7 @@ def generate_city(
     natural = natural_cover(plan, labels)
     street_weights = style_weights(street_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in street_checkpoint["cities"]})
     area = box(0.0, 0.0, *size)
+    corridors = []
     rules = ["plan totals"] if match else []
     rules += ["natural cover", "building clearance" if building_model.config.get("roads", False) else "building placement"]
     if models.get("trunk") is None and not transport_rules:
@@ -755,6 +756,7 @@ def generate_city(
         streets = snap_lines(clip_lines(lines, size))
         runs = rail_lines(main)
         stations = place_stations(stops, runs)
+        corridors = [(class_id, line) for class_id, points in main if LINE_CLASSES[class_id][0] == "road" for line in [LineString(points).intersection(area)] if line.geom_type == "LineString" and line.length > 1.0]
         log(f"rail: {len(runs)} pieces, {len(stations)} stations")
     lines = streets + [(class_id, points) for class_id, points, _number in runs]
     roads_frame, rail_frame, graph = lines_to_layers(lines, *size)
@@ -802,6 +804,7 @@ def generate_city(
         "water": [rings(polygon) for polygon in water],
         "green": [{**rings(polygon), "kind": "park"} for polygon in green] + [{**rings(polygon), "kind": "natural"} for polygon in natural],
         "stations": stations,
+        "corridors": [{"class": LINE_CLASSES[class_id][1], "vertical": LINE_CLASSES[class_id][2], "points": np.asarray(line.coords).tolist()} for class_id, line in corridors],
     }
     for index, (class_id, points) in enumerate(streets):
         mode, name, level = LINE_CLASSES[class_id]

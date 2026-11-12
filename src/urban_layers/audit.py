@@ -264,8 +264,17 @@ def function_stats(city):
     return result
 
 
+def corridor_stats(city):
+    roads = [item for item in city.get("corridors", []) if len(item["points"]) >= 2]
+    if not roads:
+        return {}
+    lines, label = road_pieces(roads)
+    length = np.bincount(label, weights=shapely.length(lines))
+    return {"km": float(length.sum() / 1000.0), "pieces": int(len(length)), "largest_piece_share": float(length.max() / length.sum())}
+
+
 def audit_city(city, plan=None):
-    report = {"network": network_stats(city), "buildings": building_stats(city), "rail": rail_stats(city), "cover": cover_stats(city), "function": function_stats(city)}
+    report = {"network": network_stats(city), "buildings": building_stats(city), "rail": rail_stats(city), "cover": cover_stats(city), "function": function_stats(city), "corridors": corridor_stats(city)}
     if plan is not None:
         report["follows_plan"], _realised = follows_plan(city, plan)
     return report
