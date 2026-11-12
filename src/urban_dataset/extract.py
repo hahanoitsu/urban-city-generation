@@ -50,8 +50,8 @@ ROAD_TAGS = [
 ]
 RAIL_TAGS = ["name", *TRANSPORT_VERTICAL_TAGS]
 RAILWAYS = {"rail", "light_rail", "subway", "tram", "monorail"}
-STOPS = {"station", "halt", "tram_stop"}
-STATION_TAGS = ["name", "railway", "station", "subway", "light_rail", "monorail", "tram"]
+STOPS = {"station", "halt", "tram_stop", "stop"}
+STATION_TAGS = ["name", "railway", "station", "subway", "light_rail", "monorail", "tram", "train"]
 BUILDING_TAGS = [
     "height",
     "min_height",
@@ -227,9 +227,9 @@ def station_kind(row: Any) -> str:
     kind = clean_tag(row.get("station"))
     if kind in {"subway", "light_rail", "monorail"}:
         return kind
-    for name in ("subway", "light_rail", "monorail", "tram"):
+    for name in ("subway", "light_rail", "monorail", "train", "tram"):
         if tag_is_true(row.get(name)):
-            return name
+            return "rail" if name == "train" else name
     return "rail"
 
 
@@ -285,6 +285,8 @@ def _sea(
     probe: float = 5e-5,
     busy: float = 1.0,
     cell: float = 0.02,
+    bridge: float = 0.01,
+    clear: float = 3.0,
 ) -> gpd.GeoDataFrame:
     if lines.empty or "natural" not in lines.columns:
         return _empty()
@@ -300,7 +302,20 @@ def _sea(
             pieces.append(part)
     if not pieces:
         return _empty()
-    faces = list(polygonize(unary_union([region.boundary, *pieces])))
+    meets = {}
+    for part in pieces:
+        for end in (part.coords[0], part.coords[-1]):
+            key = (round(end[0], 7), round(end[1], 7))
+            meets[key] = meets.get(key, 0) + 1
+    loose = [key for key, count in meets.items() if count == 1 and region.exterior.distance(Point(key)) > 1e-7]
+    pairs = sorted((float(np.hypot(a[0] - b[0], a[1] - b[1])), a, b) for number, a in enumerate(loose) for b in loose[number + 1 :])
+    closed = set()
+    patches = []
+    for gap, a, b in pairs:
+        if gap <= bridge and a not in closed and b not in closed:
+            closed.update((a, b))
+            patches.append(shapely.LineString([a, b]))
+    faces = list(polygonize(unary_union([region.boundary, *pieces, *patches])))
     if not faces:
         return _empty()
     tree = STRtree(faces)
@@ -318,7 +333,7 @@ def _sea(
             for side, point in enumerate((Point(here.x + dy, here.y - dx), Point(here.x - dy, here.y + dx))):
                 for index in tree.query(point, predicate="within"):
                     votes[index, side] += part.length
-    wet = [index for index in range(len(faces)) if votes[index, 0] > votes[index, 1]]
+    wet = [index for index in range(len(faces)) if votes[index, 0] > clear * votes[index, 1]]
     if wet and not roads.empty:
         road_tree = STRtree(roads.geometry.values)
         squash = float(np.cos(np.radians((bbox_wgs84[1] + bbox_wgs84[3]) / 2.0)))

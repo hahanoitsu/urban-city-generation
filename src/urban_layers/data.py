@@ -112,7 +112,7 @@ def city_lines(layers):
     return lines
 
 
-def city_stations(layers, same=60.0):
+def city_stations(layers, same=150.0):
     frame = layers.stations
     if frame is None or frame.empty:
         return np.zeros((0, 3), dtype=np.float32)
@@ -130,7 +130,7 @@ def city_stations(layers, same=60.0):
         for other in reversed(keep):
             if row[0] - other[0] > same:
                 break
-            if other[2] == row[2] and np.hypot(other[0] - row[0], other[1] - row[1]) <= same:
+            if (other[2] == 3) == (row[2] == 3) and np.hypot(other[0] - row[0], other[1] - row[1]) <= same:
                 twin = True
                 break
         if not twin:
