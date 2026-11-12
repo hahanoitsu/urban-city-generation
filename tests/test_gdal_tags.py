@@ -102,8 +102,8 @@ def test_stations_and_monorail_come_out_of_an_osm_file(tmp_path):
     assert layers.water.empty
 
 
-def coast(backwards, gap=False):
-    nodes = [(1 + index, lon, lat, {}) for index, (lon, lat) in enumerate([(103.780, 1.300), (103.800, 1.298), (103.810, 1.302), (103.820, 1.299), (103.840, 1.300), (103.812, 1.3015)])]
+def coast(backwards, gap=False, short=False):
+    nodes = [(1 + index, lon, lat, {}) for index, (lon, lat) in enumerate([(103.780, 1.300), (103.800, 1.298), (103.810, 1.302), (103.820, 1.299), (103.827 if short else 103.840, 1.300), (103.812, 1.3015)])]
     nodes += [(20 + index, lon, lat, {}) for index, (lon, lat) in enumerate([(103.805, 1.293), (103.808, 1.293), (103.808, 1.295), (103.805, 1.295)])]
     ways = [(100, [5, 4, 3, 2, 1] if backwards else [1, 2, 3, 4, 5], {"natural": "coastline"}), (101, [20, 21, 22, 23, 20], {"natural": "coastline"})]
     if gap:
@@ -132,6 +132,14 @@ def test_a_small_break_in_the_coastline_is_closed(tmp_path):
     if "OSM" not in pyogrio.list_drivers():
         pytest.skip("no osm driver")
     layers = _extract_with_gdal(write_osm(tmp_path / "coast.osm", *coast(False, gap=True)), (103.79, 1.29, 103.83, 1.32))
+    sea = unary_union(list(layers.water.geometry))
+    assert sea.contains(Point(103.815, 1.292)) and not sea.contains(Point(103.815, 1.310))
+
+
+def test_a_coastline_that_stops_short_of_the_edge_is_run_out_to_it(tmp_path):
+    if "OSM" not in pyogrio.list_drivers():
+        pytest.skip("no osm driver")
+    layers = _extract_with_gdal(write_osm(tmp_path / "coast.osm", *coast(False, short=True)), (103.79, 1.29, 103.83, 1.32))
     sea = unary_union(list(layers.water.geometry))
     assert sea.contains(Point(103.815, 1.292)) and not sea.contains(Point(103.815, 1.310))
 

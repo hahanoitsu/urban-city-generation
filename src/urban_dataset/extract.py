@@ -315,6 +315,17 @@ def _sea(
         if gap <= bridge and a not in closed and b not in closed:
             closed.update((a, b))
             patches.append(shapely.LineString([a, b]))
+    coast_tree = STRtree(pieces)
+    for key in loose:
+        if key in closed:
+            continue
+        end = Point(key)
+        others = [pieces[index] for index in coast_tree.query(end, predicate="dwithin", distance=bridge) if min(end.distance(Point(pieces[index].coords[0])), end.distance(Point(pieces[index].coords[-1]))) > 1e-9]
+        if others:
+            target = min(others, key=end.distance)
+            patches.append(shapely.LineString([key, target.interpolate(target.project(end)).coords[0]]))
+        elif region.exterior.distance(end) <= 3.0 * bridge:
+            patches.append(shapely.LineString([key, region.exterior.interpolate(region.exterior.project(end)).coords[0]]))
     faces = list(polygonize(unary_union([region.boundary, *pieces, *patches])))
     if not faces:
         return _empty()
