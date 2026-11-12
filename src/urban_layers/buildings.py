@@ -9,7 +9,7 @@ import torch
 from shapely.geometry import Polygon
 from shapely.ops import nearest_points, unary_union
 
-from urban_layers.data import CHANNELS, box_polygon, from_frame
+from urban_layers.data import CHANNELS, LINE_CLASSES, box_polygon, from_frame
 from urban_layers.decoder import TokenDecoder, fourier
 from urban_layers.tokens import BuildingGrammar, BuildingTokens
 
@@ -27,26 +27,32 @@ def block_arrays(block, scale, city):
             [math.log1p(block["area"]) / 10.0],
         ]
     ).astype(np.float32)
+    count = len(block["inner_mask"]) if "inner_mask" in block else 48
     return {
         "ring": ring / 256.0,
         "tangent": tangent.astype(np.float32),
         "features": features,
         "city": np.asarray(city, dtype=np.float32),
+        "edge": np.asarray(block.get("edge", np.zeros((len(ring), 5))), dtype=np.float32),
+        "inner_xy": np.asarray(block.get("inner_xy", np.zeros((count, 2))), dtype=np.float32) / 256.0,
+        "inner_heading": np.asarray(block.get("inner_heading", np.zeros((count, 2))), dtype=np.float32),
+        "inner_class": np.asarray(block.get("inner_class", np.zeros(count)), dtype=np.int64),
+        "inner_mask": np.asarray(block.get("inner_mask", np.zeros(count)), dtype=bool),
     }
 
 
 def flip(block, flip_x, flip_y):
     ring = np.asarray(block["ring"], dtype=np.float32).copy()
     items = np.asarray(block["buildings"], dtype=np.float32).copy()
-    if flip_x:
-        ring[:, 0] *= -1
-        items[:, 1] *= -1
-        items[:, 5] *= -1
-    if flip_y:
-        ring[:, 1] *= -1
-        items[:, 2] *= -1
-        items[:, 5] *= -1
-    return {**block, "ring": ring, "buildings": items}
+    inner = {name: np.asarray(block[name], dtype=np.float32).copy() for name in ("inner_xy", "inner_heading") if name in block}
+    for flipped, axis, column in ((flip_x, 0, 1), (flip_y, 1, 2)):
+        if flipped:
+            ring[:, axis] *= -1
+            items[:, column] *= -1
+            items[:, 5] *= -1
+            for values in inner.values():
+                values[:, axis] *= -1
+    return {**block, **inner, "ring": ring, "buildings": items}
 
 
 class BuildingDataset(torch.utils.data.Dataset):
@@ -75,25 +81,36 @@ class BuildingDataset(torch.utils.data.Dataset):
 
 
 class BuildingModel(torch.nn.Module):
-    def __init__(self, cities, d=256, layers=6, heads=8, max_len=1024, bands=8, dropout=0.0):
+    def __init__(self, cities, d=256, layers=6, heads=8, max_len=1024, bands=8, dropout=0.0, roads=False):
         super().__init__()
-        self.config = {"cities": cities, "d": d, "layers": layers, "heads": heads, "max_len": max_len, "bands": bands, "dropout": dropout}
+        self.config = {"cities": cities, "d": d, "layers": layers, "heads": heads, "max_len": max_len, "bands": bands, "dropout": dropout, "roads": roads}
         self.tokens = BuildingTokens()
         self.bands = bands
+        self.roads = roads
         self.place = torch.nn.Linear(4 * bands, d)
         self.tangent = torch.nn.Linear(2, d)
         self.features = torch.nn.Sequential(torch.nn.Linear(len(CHANNELS) + 4, d), torch.nn.GELU(), torch.nn.Linear(d, d))
-        self.kind = torch.nn.Embedding(3, d)
+        self.kind = torch.nn.Embedding(4 if roads else 3, d)
+        if roads:
+            self.edge = torch.nn.Linear(5, d)
+            self.line_class = torch.nn.Embedding(len(LINE_CLASSES), d)
+            self.heading = torch.nn.Linear(2, d)
         self.city = torch.nn.Linear(cities, d)
         self.decoder = TokenDecoder(self.tokens.vocab, self.tokens.features(), d, layers, heads, max_len, dropout)
 
     def condition(self, batch):
         kinds = self.kind.weight
         ring = self.place(fourier(batch["ring"], self.bands)) + self.tangent(batch["tangent"]) + kinds[0]
+        if self.roads:
+            ring = ring + self.edge(batch["edge"])
         features = (self.features(batch["features"]) + kinds[1])[:, None]
         city = (self.city(batch["city"]) + kinds[2])[:, None]
         memory = torch.cat([city, features, ring], dim=1)
         padding = torch.zeros(memory.shape[:2], dtype=torch.bool, device=memory.device)
+        if self.roads:
+            inner = self.place(fourier(batch["inner_xy"], self.bands)) + self.line_class(batch["inner_class"]) + self.heading(batch["inner_heading"]) + kinds[3]
+            memory = torch.cat([memory, inner], dim=1)
+            padding = torch.cat([padding, ~batch["inner_mask"]], dim=1)
         return memory, padding
 
     def forward(self, batch):
@@ -189,7 +206,7 @@ def trim(corners, block_polygon, blocked, shapes, boxes, inside, tolerance, most
     return best
 
 
-def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0, blocked=(), roads=None, push=12.0, tolerance=1.0):
+def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0, blocked=(), roads=None, push=12.0, tolerance=1.0, face=True):
     placed = []
     shapes = []
     boxes = np.zeros((0, 4))
@@ -210,7 +227,7 @@ def place_buildings(block_polygon, centre, angle, items, inside=0.7, nudge=15.0,
             shape = Polygon(corners)
             if shape.intersection(block_polygon).area < inside * shape.area:
                 continue
-        turned = face_road(corners, roads)
+        turned = face_road(corners, roads) if face else corners
         if turned is not corners and Polygon(turned).intersection(block_polygon).area >= inside * Polygon(turned).area:
             corners = turned
         moved = None

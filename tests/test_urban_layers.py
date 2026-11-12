@@ -208,6 +208,41 @@ def test_some_empty_tiles_are_kept_so_the_model_learns_to_draw_nothing():
     assert data[0]["tokens"].tolist() == [1, 2]
 
 
+def test_a_block_knows_the_roads_on_its_edge_and_the_lines_across_it():
+    from urban_layers.buildings import block_arrays, flip
+    from urban_layers.data import block_record, line_index, road_index
+
+    lines = [
+        (line_class("road", "major", "surface"), LineString([(-50, -3), (250, -3)]), 14.0),
+        (line_class("road", "local", "surface"), LineString([(-3, -50), (-3, 150)]), 6.0),
+        (line_class("road", "local", "surface"), LineString([(100, -3), (100, 60)]), 6.0),
+        (line_class("rail", "subway", "elevated"), LineString([(-50, 80), (250, 80)]), 0.0),
+        (line_class("rail", "subway", "underground"), LineString([(-50, 40), (250, 40)]), 0.0),
+    ]
+    block = box(0, 0, 200, 100)
+    record = block_record(block, np.zeros((len(CHANNELS), 4, 4), dtype=np.float32), (0.0, 0.0, 512.0, 512.0), *road_index(lines), *line_index(lines))
+    edge = record["edge"]
+    assert edge.shape == (48, 5)
+    assert np.all(edge[34:40, 0] == 1.0) and np.allclose(edge[34:40, 4], 0.1) and np.all(edge[41:47, 0] == 1.0)
+    assert edge[40, 2] == 1.0 and edge[40, 4] == 0.0
+    assert np.all(edge[26:31, 2] == 1.0) and np.allclose(edge[26:31, 4], 0.1)
+    assert np.all(edge[10:23, 3] == 1.0) and np.allclose(edge[10:23, 4], 20.0 / 30.0)
+    kinds = {LINE_CLASSES[int(value)][1:] for value in record["inner_class"][record["inner_mask"]]}
+    assert kinds == {("local", "surface"), ("subway", "elevated")}
+    arrays = block_arrays({**record, "buildings": np.zeros((0, 7)), "landuse": 1}, np.ones(len(CHANNELS), dtype=np.float32), np.ones(1))
+    assert arrays["edge"].shape == (48, 5) and arrays["inner_mask"].sum() == record["inner_mask"].sum()
+    mirrored = flip({**record, "buildings": np.zeros((0, 7))}, True, False)
+    assert np.allclose(mirrored["inner_xy"][:, 0], -record["inner_xy"][:, 0]) and np.allclose(mirrored["inner_heading"][:, 1], record["inner_heading"][:, 1])
+    model = BuildingModel(1, d=32, layers=1, heads=4, max_len=64, roads=True)
+    batch = {name: torch.from_numpy(np.stack([value, value])) for name, value in arrays.items()}
+    batch["tokens"] = torch.tensor([[1, 4, 2], [1, 4, 2]])
+    loss = sequence_loss(model(batch), batch["tokens"])
+    loss.backward()
+    assert torch.isfinite(loss) and model.edge.weight.grad is not None
+    old = BuildingModel(1, d=32, layers=1, heads=4, max_len=64)
+    assert old.condition(batch)[0].shape[1] == 2 + 48 and model.condition(batch)[0].shape[1] == 2 + 48 + 48
+
+
 def test_building_tokens_round_trip():
     tokens = BuildingTokens()
     landuse, items = tokens.decode(tokens.encode(2, [(1, 10.2, -40.7, 25.0, 12.0, 0.4, 33.0)]))
@@ -375,7 +410,13 @@ def test_rail_stations_and_main_roads_can_come_from_a_model(tmp_path):
     assert hidden == len(street_model.tokens.encode(lines[:given])) - 2 and item["labels"][hidden + 1] == item["tokens"][hidden + 1]
 
     plan_model = PlanNet(1, width=16)
-    building_model = BuildingModel(1, d=32, layers=1, heads=4, max_len=256)
+    blocks = [(0, block) for block in torch.load(cities[0]["folder"] / "blocks.pt", weights_only=False)]
+    assert sum(float(block["edge"][:, :4].sum()) for _city, block in blocks) > 0
+    building_model = BuildingModel(1, d=32, layers=1, heads=4, max_len=256, roads=True)
+    batch = collate([BuildingDataset(blocks, 1, scale, max_len=256)[index] for index in range(4)])
+    loss = sequence_loss(building_model(batch), batch["tokens"])
+    loss.backward()
+    assert torch.isfinite(loss)
     checkpoints = {
         "plan": (plan_model.eval(), {"cities": ["small"], "mean": mean, "std": std, "control_scale": control_scale, "city_controls": [plans[0].mean(axis=(1, 2))]}),
         "trunk": (trunk_model.eval(), {"cities": ["small"], "scale": coarse_scale, "unit": TRUNK, "plan_cells": 16}),
@@ -383,7 +424,7 @@ def test_rail_stations_and_main_roads_can_come_from_a_model(tmp_path):
         "buildings": (building_model.eval(), {"cities": ["small"], "scale": scale}),
     }
     city, plan = generate_city(checkpoints, size_m=(1024.0, 1024.0), style={"small": 1.0}, plan_steps=2, seed=3, log=lambda _text: None)
-    assert city["rules"] == ["natural cover", "building placement"]
+    assert city["rules"] == ["natural cover", "building clearance"]
     assert all(LINE_CLASSES[line_class("rail", item["class"], item["vertical"])][0] == "rail" for item in city["rail"])
     from urban_layers.check import check_city, failures
 

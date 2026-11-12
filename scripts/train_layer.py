@@ -121,7 +121,7 @@ def main():
             validation_set = StreetDataset(validation_items, coarse, len(cities), scale, augment=False, max_len=args.max_len, stations=True, plan_cells=args.plan_cells, spread=args.spread, exits=True)
             extra = {"scale": scale, "unit": TRUNK, "plan_cells": args.plan_cells, "spread": args.spread}
         else:
-            model = BuildingModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout)
+            model = BuildingModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout, roads=True)
             train_set = BuildingDataset(train_items, len(cities), scale, augment=not args.overfit, max_len=args.max_len)
             validation_set = BuildingDataset(validation_items, len(cities), scale, augment=False, max_len=args.max_len)
         print(json.dumps({"train": len(train_set), "validation": len(validation_set)}), flush=True)

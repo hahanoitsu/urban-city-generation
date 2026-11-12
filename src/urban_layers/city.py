@@ -30,6 +30,7 @@ from urban_layers.data import (
     boundary_side,
     corridor,
     is_trunk,
+    line_index,
     make_blocks,
     plan_raster,
     polygon_of,
@@ -623,10 +624,12 @@ def road_segments(lines):
 
 def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, generator=None, temperature=1.0, top_p=0.95, samples=4, batch_size=64, device="cpu", log=print, water=None):
     scale = np.asarray(checkpoint["scale"], dtype=np.float32)
-    road_tree, road_classes = road_index([(class_id, LineString(points), 0.0) for class_id, points in lines])
+    shapes = [(class_id, LineString(points), 0.0) for class_id, points in lines]
+    road_tree, road_classes = road_index(shapes)
+    line_tree, line_classes = line_index(shapes)
     bounds = (0.0, 0.0, size[0], size[1])
     parts = [(block_id, part, use) for block_id, (polygon, use) in enumerate(pieces) for part in split_block(polygon)]
-    records = [block_record(part, plan, bounds, road_tree, road_classes) for _block_id, part, _use in parts]
+    records = [block_record(part, plan, bounds, road_tree, road_classes, line_tree, line_classes) for _block_id, part, _use in parts]
     covers = [planned_cover(plan, part) for _block_id, part, _use in parts]
     grounds = [keep_out(lines, size, water, setback) for setback in (True, False)]
     trees = [STRtree(shapes) for shapes in grounds]
@@ -657,7 +660,7 @@ def generate_buildings(model, checkpoint, pieces, plan, size, lines, weights, ge
             results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, landuse=uses)
             for index, (_landuse, items_out) in zip(chunk, results):
                 blocked, roads = around[index]
-                placed = place_buildings(parts[index][1], records[index]["centre"], records[index]["angle"], items_out, blocked=blocked, roads=roads)
+                placed = place_buildings(parts[index][1], records[index]["centre"], records[index]["angle"], items_out, blocked=blocked, roads=roads, face=not model.config.get("roads", False))
                 options[index].append(reachable(placed, road_tree, 120.0 if covers[index] >= 0.06 else 60.0))
         log(f"buildings: parts {chunk[-1] + 1}/{len(parts)}")
 
@@ -742,7 +745,7 @@ def generate_city(
     natural = natural_cover(plan, labels)
     street_weights = style_weights(street_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in street_checkpoint["cities"]})
     area = box(0.0, 0.0, *size)
-    rules = ["natural cover", "building placement"]
+    rules = ["natural cover", "building clearance" if building_model.config.get("roads", False) else "building placement"]
     if models.get("trunk") is None and not transport_rules:
         lines = generate_streets(street_model, street_checkpoint, plan, street_weights, generator, temperature, top_p, device, log, rail=True)
         snapped = snap_lines(clip_lines(lines, size))

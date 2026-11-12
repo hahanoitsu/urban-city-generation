@@ -627,8 +627,57 @@ def frontage(polygon, road_tree, road_classes, count=32, reach=20.0):
     return shares / count
 
 
-def block_record(polygon, plan, bounds, road_tree, road_classes):
+def line_index(lines):
+    items = [(geometry, class_id) for class_id, geometry, _width in lines if LINE_CLASSES[class_id][2] != "underground"]
+    if not items:
+        return None, []
+    return STRtree([item[0] for item in items]), [item[1] for item in items]
+
+
+def edge_lines(polygon, tree, classes, count=48, reach=30.0):
+    features = np.zeros((count, 5), dtype=np.float32)
+    if tree is None:
+        return features
+    ring = polygon.exterior
+    points = shapely.line_interpolate_point(ring, np.linspace(0.0, ring.length, count, endpoint=False))
+    (found, nearest), gaps = tree.query_nearest(points, max_distance=reach, all_matches=False, return_distance=True)
+    for point, line, gap in zip(found.tolist(), nearest.tolist(), gaps.tolist()):
+        mode, name, _level = LINE_CLASSES[classes[line]]
+        features[point, 3 if mode == "rail" else ROAD_CLASSES.index(name)] = 1.0
+        features[point, 4] = gap / reach
+    return features
+
+
+def inner_lines(polygon, centre, angle, tree, classes, count=48, spacing=12.0, inset=2.0):
+    xy = np.zeros((count, 2), dtype=np.float32)
+    heading = np.zeros((count, 2), dtype=np.float32)
+    kind = np.zeros(count, dtype=np.int64)
+    mask = np.zeros(count, dtype=bool)
+    core = polygon.buffer(-inset)
+    if tree is None or core.is_empty:
+        return xy, heading, kind, mask
+    used = 0
+    for index in tree.query(core, predicate="intersects"):
+        for part in _parts(tree.geometries[index].intersection(core)):
+            if part.length < 4.0 or used >= count:
+                continue
+            steps = min(max(int(part.length // spacing), 1), count - used)
+            along = (np.arange(steps) + 0.5) * part.length / steps
+            here = shapely.get_coordinates(shapely.line_interpolate_point(part, along))
+            ahead = shapely.get_coordinates(shapely.line_interpolate_point(part, np.minimum(along + 1.0, part.length)))
+            local = to_frame(here, centre, angle)
+            step = to_frame(ahead, centre, angle) - local
+            xy[used : used + steps] = local
+            heading[used : used + steps] = step / np.maximum(np.linalg.norm(step, axis=1, keepdims=True), 1e-6)
+            kind[used : used + steps] = classes[index]
+            mask[used : used + steps] = True
+            used += steps
+    return xy, heading, kind, mask
+
+
+def block_record(polygon, plan, bounds, road_tree, road_classes, line_tree=None, line_classes=()):
     centre, angle = block_frame(polygon)
+    xy, heading, kind, mask = inner_lines(polygon, centre, angle, line_tree, line_classes)
     return {
         "centre": centre.astype(np.float32),
         "angle": float(angle),
@@ -636,6 +685,11 @@ def block_record(polygon, plan, bounds, road_tree, road_classes):
         "area": float(polygon.area),
         "plan": plan_at(plan, bounds, centre),
         "frontage": frontage(polygon, road_tree, road_classes),
+        "edge": edge_lines(polygon, line_tree, line_classes),
+        "inner_xy": xy,
+        "inner_heading": heading,
+        "inner_class": kind,
+        "inner_mask": mask,
     }
 
 
@@ -650,6 +704,7 @@ def block_records(layers, lines, plan, bounds):
     water = unary_union(_polygons(layers.water)) if not layers.water.empty else None
     blocks = make_blocks(lines, water)
     road_tree, road_classes = road_index(lines)
+    line_tree, line_classes = line_index(lines)
     buildings = []
     if road_tree is None:
         return [], 0, len(layers.buildings)
@@ -676,7 +731,7 @@ def block_records(layers, lines, plan, bounds):
     records = []
     assigned = 0
     for polygon in blocks:
-        record = block_record(polygon, plan, bounds, road_tree, road_classes)
+        record = block_record(polygon, plan, bounds, road_tree, road_classes, line_tree, line_classes)
         centre, angle = record["centre"], record["angle"]
         items = []
         if building_tree is not None:
