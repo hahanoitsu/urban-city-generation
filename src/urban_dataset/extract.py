@@ -8,7 +8,7 @@ from typing import Any, Callable
 import geopandas as gpd
 import pandas as pd
 
-from .classify import classify_highway, classify_landuse, clean_tag, road_is_usable
+from .classify import classify_highway, classify_landuse, clean_tag, road_is_usable, tag_is_true
 
 
 class ExtractionError(RuntimeError):
@@ -44,6 +44,9 @@ ROAD_TAGS = [
     *TRANSPORT_VERTICAL_TAGS,
 ]
 RAIL_TAGS = ["name", *TRANSPORT_VERTICAL_TAGS]
+RAILWAYS = {"rail", "light_rail", "subway", "tram", "monorail"}
+STOPS = {"station", "halt", "tram_stop"}
+STATION_TAGS = ["name", "railway", "station", "subway", "light_rail", "monorail", "tram"]
 BUILDING_TAGS = [
     "height",
     "min_height",
@@ -108,6 +111,11 @@ class CityLayers:
     water: gpd.GeoDataFrame
     green: gpd.GeoDataFrame
     rail: gpd.GeoDataFrame
+    stations: gpd.GeoDataFrame | None = None
+
+    def __post_init__(self):
+        if self.stations is None:
+            self.stations = gpd.GeoDataFrame({"geometry": []}, geometry="geometry", crs=self.roads.crs)
 
     def items(self):
         return {
@@ -118,6 +126,7 @@ class CityLayers:
             "water": self.water,
             "green": self.green,
             "rail": self.rail,
+            "stations": self.stations,
         }.items()
 
 
@@ -199,12 +208,60 @@ def _classify_lines(lines: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, gpd.GeoD
     )
 
     railway = lines.get("railway", pd.Series(index=lines.index, dtype=object)).map(clean_tag)
-    rail = lines[railway.isin({"rail", "light_rail", "subway", "tram"})].copy()
+    rail = lines[railway.isin(RAILWAYS)].copy()
     rail = _keep_columns(
         rail,
         ["id", "osm_type", "railway", *RAIL_TAGS, "geometry"],
     )
     return roads, rail
+
+
+def station_kind(row: Any) -> str:
+    if clean_tag(row.get("railway")) == "tram_stop":
+        return "tram"
+    kind = clean_tag(row.get("station"))
+    if kind in {"subway", "light_rail", "monorail"}:
+        return kind
+    for name in ("subway", "light_rail", "monorail", "tram"):
+        if tag_is_true(row.get(name)):
+            return name
+    return "rail"
+
+
+def _classify_stations(frames: list[gpd.GeoDataFrame]) -> gpd.GeoDataFrame:
+    found = []
+    for frame in frames:
+        if frame is None or frame.empty:
+            continue
+        railway = frame.get("railway", pd.Series(index=frame.index, dtype=object)).map(clean_tag)
+        stops = frame[railway.isin(STOPS)].copy()
+        if stops.empty:
+            continue
+        stops["geometry"] = stops.geometry.representative_point()
+        stops["station_kind"] = stops.apply(station_kind, axis=1)
+        found.append(
+            _keep_columns(stops, ["id", "osm_type", "name", "railway", "station_kind", "geometry"])
+        )
+    return _normalise_candidates(found)
+
+
+def _station_points(
+    pbf_path: Path,
+    bbox_wgs84: tuple[float, float, float, float],
+) -> gpd.GeoDataFrame:
+    import pyogrio
+
+    points = pyogrio.read_dataframe(
+        pbf_path,
+        layer="points",
+        bbox=bbox_wgs84,
+        where="other_tags LIKE '%railway%'",
+    )
+    points = _expand_other_tags(points, STATION_TAGS)
+    if points.crs is None:
+        points = points.set_crs("EPSG:4326")
+    points["osm_type"] = "node"
+    return points
 
 
 def _classify_polygons(polygons: gpd.GeoDataFrame) -> tuple[
@@ -303,16 +360,23 @@ def _extract_with_gdal(
             "natural",
             "water",
             "waterway",
+            "railway",
+            "station",
         ],
     )
     if lines.crs is None:
         lines = lines.set_crs("EPSG:4326")
     if polygons.crs is None:
         polygons = polygons.set_crs("EPSG:4326")
+    try:
+        points = _station_points(pbf_path, bbox_wgs84)
+    except Exception as exc:
+        raise ExtractionError(f"GDAL OSM station extraction failed: {exc}") from exc
 
     roads, rail = _classify_lines(lines)
     buildings, landuse, landuse_known, water, green = _classify_polygons(polygons)
-    return CityLayers(roads, buildings, landuse, landuse_known, water, green, rail)
+    stations = _classify_stations([points, polygons])
+    return CityLayers(roads, buildings, landuse, landuse_known, water, green, rail, stations)
 
 
 def extract_from_pbf(
@@ -425,7 +489,7 @@ def extract_from_pbf(
         "rail",
         lambda: _custom(
             osm,
-            {"railway": ["rail", "light_rail", "subway", "tram"]},
+            {"railway": sorted(RAILWAYS)},
             extra_attributes=RAIL_TAGS,
         ),
     )
@@ -487,4 +551,8 @@ def extract_from_pbf(
     else:
         water = _empty()
 
-    return CityLayers(roads, buildings, landuse, landuse_known, water, green, rail)
+    try:
+        stations = _classify_stations([_station_points(pbf_path, bbox_wgs84)])
+    except Exception:
+        stations = _empty()
+    return CityLayers(roads, buildings, landuse, landuse_known, water, green, rail, stations)

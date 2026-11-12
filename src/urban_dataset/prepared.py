@@ -26,6 +26,7 @@ LAYER_NAMES = (
     "water",
     "green",
     "rail",
+    "stations",
 )
 
 

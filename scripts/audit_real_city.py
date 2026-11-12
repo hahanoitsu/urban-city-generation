@@ -14,7 +14,7 @@ from urban_dataset.extract import CityLayers
 from urban_dataset.prepared import load_city_gpkg
 from urban_layers.audit import audit_city
 from urban_layers.city import WIDTHS, lines_to_layers
-from urban_layers.data import CELL, LANDUSE, LANDUSE_SOURCE, LINE_CLASSES, city_bounds, city_lines, make_blocks, plan_raster
+from urban_layers.data import CELL, LANDUSE, LANDUSE_SOURCE, LINE_CLASSES, RAIL_CLASSES, city_bounds, city_lines, city_stations, make_blocks, plan_raster
 from urban_layers.plan import urban_cells
 from urban_layers.render import city_image
 
@@ -85,6 +85,11 @@ def real_window(layers, lines, bounds):
                 continue
             buildings.append({"kind": "real", "height_m": float(heights[position]), "footprint": outline(geometry, origin)})
 
+    stations = [
+        {"xy": [float(x - minx), float(y - miny)], "kind": RAIL_CLASSES[int(kind)]}
+        for x, y, kind in city_stations(layers)
+        if minx <= x <= maxx and miny <= y <= maxy
+    ]
     roads = []
     rail = []
     for index, (class_id, points) in enumerate(local):
@@ -108,6 +113,7 @@ def real_window(layers, lines, bounds):
         "buildings": buildings,
         "water": [{"polygon": outline(polygon, origin)} for polygon in water],
         "green": [{"polygon": outline(polygon, origin)} for polygon in green],
+        "stations": stations,
     }
 
 

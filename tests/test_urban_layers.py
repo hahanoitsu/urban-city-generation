@@ -39,6 +39,14 @@ def small_city(tmp_path):
         water=frame([{"geometry": box(700, 1300, 1000, 1400)}]),
         green=frame([]),
         rail=frame([{"railway": "subway", "vertical_mode": "elevated", "geometry": LineString([(0, 500), (1536, 520)])}]),
+        stations=frame(
+            [
+                {"station_kind": "subway", "geometry": Point(300, 504)},
+                {"station_kind": "subway", "geometry": Point(320, 504)},
+                {"station_kind": "subway", "geometry": Point(900, 512)},
+                {"station_kind": "tram", "geometry": Point(600, 700)},
+            ]
+        ),
     )
     path = tmp_path / "small.gpkg"
     save_city_gpkg(layers, path, {"city_id": "small"}, overwrite=True)
@@ -55,6 +63,14 @@ def test_build_city_layers(tmp_path):
     assert plan.shape[0] == len(CHANNELS)
     assert plan[CHANNELS.index("local")].max() > 0
     assert plan[CHANNELS.index("water")].max() > 0.5
+
+
+def test_stations_are_saved_with_the_city(tmp_path):
+    summary = build_city(small_city(tmp_path), "small", tmp_path / "layers", stride=256.0)
+    assert summary["stations"]["subway"] == 2 and summary["stations"]["tram"] == 1 and summary["stations"]["rail"] == 0
+    stations = load_cities(tmp_path / "layers")[0]["stations"]
+    assert stations.shape == (3, 3)
+    assert sorted(stations[:, 0].tolist()) == [300.0, 600.0, 900.0]
 
 
 def test_street_tokens_round_trip_and_grammar():
@@ -445,6 +461,11 @@ def test_function_audit_finds_a_town_you_cannot_drive_to():
     assert found["largest_piece_road_share"] < 0.55
     assert found["floor_on_largest_piece"] == 0.5
     assert found["floor_within_800m_of_a_station"] == 0.5
+    city["stations"].append({"xy": [2320.0, 450.0], "kind": "tram"})
+    assert function_stats(city)["floor_within_800m_of_a_station"] == 0.5
+    city["stations"][-1]["kind"] = "subway"
+    assert function_stats(city)["floor_within_800m_of_a_station"] == 1.0
+    city["stations"].pop()
     city["roads"] = west + east + [{"class": "major", "vertical": "elevated", "points": [[1000.0, 500.0], [2000.0, 500.0]]}]
     found = function_stats(city)
     assert found["largest_piece_road_share"] == 1.0 and found["major_largest_piece_share"] == 1.0

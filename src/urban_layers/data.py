@@ -106,6 +106,32 @@ def city_lines(layers):
     return lines
 
 
+def city_stations(layers, same=60.0):
+    frame = layers.stations
+    if frame is None or frame.empty:
+        return np.zeros((0, 3), dtype=np.float32)
+    kinds = _text(frame, "station_kind", "rail")
+    rows = []
+    for geometry, kind in zip(frame.geometry, kinds):
+        if geometry is None or geometry.is_empty:
+            continue
+        point = geometry.representative_point()
+        rows.append((point.x, point.y, RAIL_CLASSES.index(kind) if kind in RAIL_CLASSES else 0))
+    rows = np.asarray(sorted(rows), dtype=np.float64).reshape(-1, 3)
+    keep = []
+    for row in rows:
+        twin = False
+        for other in reversed(keep):
+            if row[0] - other[0] > same:
+                break
+            if other[2] == row[2] and np.hypot(other[0] - row[0], other[1] - row[1]) <= same:
+                twin = True
+                break
+        if not twin:
+            keep.append(row)
+    return np.asarray(keep, dtype=np.float64).reshape(-1, 3)
+
+
 def city_bounds(layers):
     values = [frame.total_bounds for _name, frame in layers.items() if not frame.empty]
     values = np.asarray(values)
@@ -521,11 +547,13 @@ def build_city(gpkg, name, output, stride=TILE):
     lines = city_lines(layers)
     bounds = city_bounds(layers)
     plan = plan_raster(layers, lines, bounds)
+    stations = city_stations(layers)
     tiles = street_tiles(lines, bounds, stride)
     blocks, assigned, total = block_records(layers, lines, plan, bounds)
     folder = Path(output) / name
     folder.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(folder / "plan.npz", plan=plan, bounds=np.asarray(bounds))
+    np.save(folder / "stations.npy", stations)
     torch.save(tiles, folder / "streets.pt")
     torch.save(blocks, folder / "blocks.pt")
     summary = {
@@ -539,6 +567,7 @@ def build_city(gpkg, name, output, stride=TILE):
         "blocks": len(blocks),
         "buildings_in_blocks": assigned,
         "buildings": total,
+        "stations": {name: int((stations[:, 2] == index).sum()) for index, name in enumerate(RAIL_CLASSES)},
         "channel_means": {channel: float(plan[index].mean()) for index, channel in enumerate(CHANNELS)},
     }
     summary.update(token_lengths(tiles, blocks))
@@ -569,6 +598,7 @@ def load_cities(root):
                 "name": folder.name,
                 "plan": plan["plan"],
                 "bounds": tuple(plan["bounds"].tolist()),
+                "stations": np.load(folder / "stations.npy") if (folder / "stations.npy").exists() else np.zeros((0, 3)),
                 "folder": folder,
             }
         )

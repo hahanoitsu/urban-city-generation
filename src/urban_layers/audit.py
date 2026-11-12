@@ -228,7 +228,7 @@ def function_stats(city):
         "detour_1_to_3km": detour(city),
     }
 
-    stations = np.asarray([item["xy"] for item in city.get("stations", [])])
+    stations = np.asarray([item["xy"] for item in city.get("stations", []) if item.get("kind") != "tram"])
     if len(stations):
         gap = np.linalg.norm(xy[:, None] - stations[None], axis=2)
         around = np.asarray([floor[gap[:, number] <= 800.0].sum() for number in range(len(stations))])
