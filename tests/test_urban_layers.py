@@ -133,6 +133,41 @@ def test_given_lines_are_written_first_and_then_the_model_is_free():
     assert int(state["lines"][0]) == 2
 
 
+def test_a_line_leaves_through_a_port_it_picks_from_the_list():
+    tokens = StreetTokens(exits=True)
+    local = line_class("road", "local", "surface")
+    major = line_class("road", "major", "surface")
+    lines = [(local, np.array([[0.0, 100.0], [150.0, 60.0], [200.0, 0.0]])), (major, np.array([[0.0, 300.0], [400.0, 300.0]]))]
+    visible = {(-1, 0), (0, -1)}
+    ordered = order_lines(lines, visible, exits=True)
+    assert [item[2] for item in ordered] == [(False, False, True), (False, False, False)]
+    encoded = tokens.encode(ordered)
+    assert encoded.count(tokens.exit) == 1 and encoded[encoded.index(tokens.exit) + 1] == tokens.first_x + 200
+    assert [item[1].tolist() for item in tokens.decode(encoded)] == [line[1].tolist() for line in lines]
+    assert tokens.exit not in StreetTokens().encode(ordered)
+
+    ports = torch.tensor([[[local, 0, 100], [major, 0, 300], [local, 200, 0]]])
+    grammar = StreetGrammar(tokens, max_points=8, max_lines=8, ports=ports)
+    state = grammar.start(1, "cpu")
+    for token in encoded[1 : encoded.index(tokens.exit)]:
+        assert bool(grammar.allowed(state)[0, token])
+        state = grammar.advance(state, torch.tensor([token]))
+    assert bool(grammar.allowed(state)[0, tokens.exit])
+    state = grammar.advance(state, torch.tensor([tokens.exit]))
+    assert torch.nonzero(grammar.allowed(state)[0]).flatten().tolist() == [tokens.first_x + 200]
+    state = grammar.advance(state, torch.tensor([tokens.first_x + 200]))
+    assert torch.nonzero(grammar.allowed(state)[0]).flatten().tolist() == [tokens.first_y]
+    state = grammar.advance(state, torch.tensor([tokens.first_y]))
+    assert torch.nonzero(grammar.allowed(state)[0]).flatten().tolist() == [tokens.end]
+    state = grammar.advance(state, torch.tensor([tokens.end]))
+    assert state["used"][0].tolist() == [True, False, True]
+    assert torch.nonzero(grammar.allowed(state)[0]).flatten().tolist() == [tokens.first_class + major]
+    state = grammar.advance(state, torch.tensor([tokens.first_class + major]))
+    state = grammar.advance(state, torch.tensor([tokens.first_x]))
+    state = grammar.advance(state, torch.tensor([tokens.first_y + 300]))
+    assert not bool(grammar.allowed(state)[0, tokens.exit])
+
+
 def test_two_tracks_become_one_corridor_and_a_branch_stays_joined():
     from urban_layers.audit import road_pieces
     from urban_layers.data import rail_corridors
@@ -319,8 +354,8 @@ def test_rail_stations_and_main_roads_can_come_from_a_model(tmp_path):
     trunk = [(0, tile) for tile in torch.load(cities[0]["folder"] / "trunk.pt", weights_only=False)]
     assert sum(len(stops) for _city, tile in trunk for stops in tile["stops"]) == 2
     assert all(LINE_CLASSES[class_id][1] in ("major", "subway") for _city, tile in trunk for class_id, _points in tile["targets"])
-    trunk_model = StreetModel(1, d=32, layers=1, heads=4, max_len=512, stations=True)
-    data = StreetDataset(trunk, coarse, 1, coarse_scale, max_len=512, stations=True, plan_cells=16)
+    trunk_model = StreetModel(1, d=32, layers=1, heads=4, max_len=512, stations=True, exits=True)
+    data = StreetDataset(trunk, coarse, 1, coarse_scale, max_len=512, stations=True, plan_cells=16, exits=True)
     batch = collate([data[0], data[0]])
     assert int((batch["tokens"] == trunk_model.tokens.station).sum()) == 4
     loss = sequence_loss(trunk_model(batch), batch["tokens"])
@@ -328,8 +363,8 @@ def test_rail_stations_and_main_roads_can_come_from_a_model(tmp_path):
     assert torch.isfinite(loss)
 
     tiles = [(0, tile) for tile in torch.load(cities[0]["folder"] / "streets.pt", weights_only=False)]
-    street_model = StreetModel(1, d=32, layers=1, heads=4, max_len=512)
-    item = StreetDataset(tiles, plans, 1, scale, max_len=512, trunk_first=True, augment=False)[8]
+    street_model = StreetModel(1, d=32, layers=1, heads=4, max_len=512, exits=True)
+    item = StreetDataset(tiles, plans, 1, scale, max_len=512, trunk_first=True, augment=False, exits=True)[8]
     lines = street_model.tokens.decode(item["tokens"])
     given = sum(LINE_CLASSES[class_id][1] in ("major", "subway") for class_id, _points, _joins in lines)
     assert given > 0 and all(LINE_CLASSES[class_id][1] in ("major", "subway") for class_id, _points, _joins in lines[:given])

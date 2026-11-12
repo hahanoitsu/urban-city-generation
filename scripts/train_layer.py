@@ -109,16 +109,16 @@ def main():
             validation_items = [(index, record) for index, record, flag in items if flag] or train_items[:64]
         extra = {"scale": scale}
         if args.layer == "streets":
-            model = StreetModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout)
-            train_set = StreetDataset(train_items, plans, len(cities), scale, augment=not args.overfit, max_len=args.max_len, trunk_first=args.trunk_first)
-            validation_set = StreetDataset(validation_items, plans, len(cities), scale, augment=False, max_len=args.max_len, trunk_first=args.trunk_first)
+            model = StreetModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout, exits=True)
+            train_set = StreetDataset(train_items, plans, len(cities), scale, augment=not args.overfit, max_len=args.max_len, trunk_first=args.trunk_first, exits=True)
+            validation_set = StreetDataset(validation_items, plans, len(cities), scale, augment=False, max_len=args.max_len, trunk_first=args.trunk_first, exits=True)
             extra["trunk_first"] = args.trunk_first
         elif args.layer == "trunk":
             coarse = [pool_plan(plan, TRUNK) for plan in plans]
             scale = (1.0 / plan_statistics(coarse)[1]).astype(np.float32)
-            model = StreetModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout, stations=True)
-            train_set = StreetDataset(train_items, coarse, len(cities), scale, augment=not args.overfit, max_len=args.max_len, stations=True, plan_cells=args.plan_cells, spread=args.spread)
-            validation_set = StreetDataset(validation_items, coarse, len(cities), scale, augment=False, max_len=args.max_len, stations=True, plan_cells=args.plan_cells, spread=args.spread)
+            model = StreetModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout, stations=True, exits=True)
+            train_set = StreetDataset(train_items, coarse, len(cities), scale, augment=not args.overfit, max_len=args.max_len, stations=True, plan_cells=args.plan_cells, spread=args.spread, exits=True)
+            validation_set = StreetDataset(validation_items, coarse, len(cities), scale, augment=False, max_len=args.max_len, stations=True, plan_cells=args.plan_cells, spread=args.spread, exits=True)
             extra = {"scale": scale, "unit": TRUNK, "plan_cells": args.plan_cells, "spread": args.spread}
         else:
             model = BuildingModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout)

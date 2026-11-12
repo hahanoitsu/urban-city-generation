@@ -98,7 +98,7 @@ def rank(class_id):
     return PRIORITY.get(name, 3) if mode == "road" else 3
 
 
-def order_lines(lines, visible, ports=None, touches=None, stops=None, first=()):
+def order_lines(lines, visible, ports=None, touches=None, stops=None, first=(), exits=False):
     ports = find_ports(lines, visible) if ports is None else ports
     touches = touch_lists(lines) if touches is None else touches
     spots = np.asarray([(port[0], port[1]) for port in ports], dtype=np.float64).reshape(-1, 2)
@@ -159,11 +159,12 @@ def order_lines(lines, visible, ports=None, touches=None, stops=None, first=()):
             start_touch, end_touch = end_touch, start_touch
         start_join = bool(start_touch) and not from_port and boundary_side(points[0]) < 0
         end_join = bool(end_touch) and boundary_side(points[-1]) < 0
+        joins = (start_join, end_join, from_port and port_index(points[-1]) is not None) if exits else (start_join, end_join)
         if stops is None:
-            result.append((class_id, points, (start_join, end_join)))
+            result.append((class_id, points, joins))
         else:
             marks = sorted(len(points) - 1 - stop if flip else stop for stop in stops[index])
-            result.append((class_id, points, (start_join, end_join), marks))
+            result.append((class_id, points, joins, marks))
     return result
 
 
@@ -252,7 +253,7 @@ def collate(items):
 
 
 class StreetDataset(torch.utils.data.Dataset):
-    def __init__(self, tiles, plans, cities, scale, augment=True, max_len=1536, city_dropout=0.1, stations=False, plan_cells=PLAN_CELLS, trunk_first=False, spread=()):
+    def __init__(self, tiles, plans, cities, scale, augment=True, max_len=1536, city_dropout=0.1, stations=False, plan_cells=PLAN_CELLS, trunk_first=False, spread=(), exits=False):
         self.tiles = tiles
         self.plans = plans
         self.cities = cities
@@ -264,7 +265,8 @@ class StreetDataset(torch.utils.data.Dataset):
         self.plan_cells = plan_cells
         self.trunk_first = trunk_first
         self.spread = [CHANNELS.index(name) for name in spread]
-        self.tokens = StreetTokens(stations=stations)
+        self.exits = exits
+        self.tokens = StreetTokens(stations=stations, exits=exits)
         for _city_index, tile in tiles:
             if "touches" not in tile:
                 tile["touches"] = touch_lists(tile["targets"])
@@ -291,7 +293,7 @@ class StreetDataset(torch.utils.data.Dataset):
         if not self.augment or random.random() > self.city_dropout:
             city[city_index] = 1.0
         item = condition_arrays(crop, context, ports, city)
-        ordered = order_lines(targets, visible, ports, tile["touches"], tile.get("stops") if self.stations else None, first)
+        ordered = order_lines(targets, visible, ports, tile["touches"], tile.get("stops") if self.stations else None, first, self.exits)
         item["tokens"] = np.asarray(self.tokens.encode(ordered, self.max_len), dtype=np.int64)
         if self.trunk_first:
             written = len(self.tokens.encode(ordered[: len(first)], self.max_len)) - 1
@@ -301,10 +303,10 @@ class StreetDataset(torch.utils.data.Dataset):
 
 
 class StreetModel(nn.Module):
-    def __init__(self, cities, d=256, layers=6, heads=8, max_len=1536, bands=8, dropout=0.0, stations=False):
+    def __init__(self, cities, d=256, layers=6, heads=8, max_len=1536, bands=8, dropout=0.0, stations=False, exits=False):
         super().__init__()
-        self.config = {"cities": cities, "d": d, "layers": layers, "heads": heads, "max_len": max_len, "bands": bands, "dropout": dropout, "stations": stations}
-        self.tokens = StreetTokens(stations=stations)
+        self.config = {"cities": cities, "d": d, "layers": layers, "heads": heads, "max_len": max_len, "bands": bands, "dropout": dropout, "stations": stations, "exits": exits}
+        self.tokens = StreetTokens(stations=stations, exits=exits)
         self.bands = bands
         self.place = nn.Linear(4 * bands, d)
         self.plan = nn.Linear(len(CHANNELS), d)
