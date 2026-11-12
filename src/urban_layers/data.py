@@ -320,12 +320,62 @@ def rail_corridors(lines, gap=12.0):
 
 
 def guide_lines(layers, lines):
-    roads = layers.roads
-    if not roads.empty and "highway" in roads.columns:
-        roads = roads[~roads["highway"].fillna("").astype(str).str.endswith("_link")]
-    main = [line for line in city_lines(replace(layers, roads=roads, rail=layers.rail.iloc[0:0])) if LINE_CLASSES[line[0]][1] == "major"]
-    main = merge_corridors(main, is_road, gap=30.0, shortest=50.0, shared=150.0)
-    return main + [line for line in rail_corridors(lines) if is_rail_trunk(line[0])]
+    return main_corridors(layers) + [line for line in rail_corridors(lines) if is_rail_trunk(line[0])]
+
+
+def main_corridors(layers, reach=40.0, share=0.7, step=20.0):
+    if layers.roads.empty:
+        return []
+    frame = layers.roads.explode(index_parts=False)
+    names = _text(frame, "road_class", "local")
+    tags = _text(frame, "highway", "")
+    ways = _text(frame, "oneway", "")
+    levels = _text(frame, "vertical_mode", "unknown")
+    axis = np.array([math.cos(0.4), math.sin(0.4)])
+    keep = []
+    spare = []
+    for position, geometry in enumerate(frame.geometry):
+        if geometry is None or geometry.is_empty or geometry.geom_type != "LineString" or geometry.length < 1.0:
+            continue
+        if names.iloc[position] != "major" or tags.iloc[position].endswith("_link"):
+            continue
+        line = LineString(np.asarray(geometry.coords)[:, :2])
+        way = ways.iloc[position]
+        single = way in ("yes", "true", "1", "-1") or (tags.iloc[position] == "motorway" and way not in ("no", "false", "0"))
+        heading = np.subtract(line.coords[-1], line.coords[0]) * (-1.0 if way == "-1" else 1.0)
+        item = (line_class("road", "major", levels.iloc[position]), line, 0.0)
+        (spare if single and float(heading @ axis) < 0.0 else keep).append(item)
+    if keep and spare:
+        tree = STRtree([line for _class_id, line, _width in keep])
+        classes = np.asarray([class_id for class_id, _line, _width in keep])
+        for class_id, line, width in spare:
+            count = max(int(line.length // step), 2)
+            points = shapely.line_interpolate_point(line, np.linspace(0.0, line.length, count))
+            found, nearest = tree.query(points, predicate="dwithin", distance=reach)
+            twin = np.zeros(count, dtype=bool)
+            twin[found[classes[nearest] == class_id]] = True
+            if twin.mean() < share:
+                keep.append((class_id, line, width))
+    else:
+        keep += spare
+    return reattach(keep, reach)
+
+
+def reattach(lines, reach, touch=1.0):
+    shapes = [line for _class_id, line, _width in lines]
+    tree = STRtree(shapes) if shapes else None
+    result = []
+    for index, (class_id, line, width) in enumerate(lines):
+        points = np.asarray(line.coords)[:, :2]
+        for slot in (0, -1):
+            end = shapely.Point(points[slot])
+            near = [int(other) for other in tree.query(end, predicate="dwithin", distance=reach) if other != index and lines[other][0] == class_id]
+            gaps = [shapes[other].distance(end) for other in near]
+            if near and min(gaps) > touch:
+                target = np.asarray(nearest_points(shapes[near[int(np.argmin(gaps))]], end)[0].coords[0])
+                points = np.vstack([target[None], points]) if slot == 0 else np.vstack([points, target[None]])
+        result.append((class_id, LineString(points), width))
+    return result
 
 
 def merge_corridors(lines, chosen, gap=12.0, step=10.0, shortest=30.0, shared=100.0):

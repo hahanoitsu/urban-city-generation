@@ -123,12 +123,16 @@ def test_main_road_corridors_leave_out_ramps_and_merge_twin_carriageways():
     from urban_layers.data import city_lines, guide_lines, street_tiles
 
     crs = "EPSG:3857"
-    road = lambda kind, tag, points: {"road_class": kind, "highway": tag, "vertical_mode": "surface", "estimated_width_m": 8.0, "geometry": LineString(points)}
+    road = lambda kind, tag, points, oneway=None: {"road_class": kind, "highway": tag, "oneway": oneway, "vertical_mode": "surface", "estimated_width_m": 8.0, "geometry": LineString(points)}
     roads = [
-        road("major", "primary", [(0, 300), (2000, 300)]),
-        road("major", "primary", [(2000, 316), (0, 316)]),
+        road("major", "primary", [(0, 300), (1100, 300)], "yes"),
+        road("major", "primary", [(1100, 300), (2000, 300)], "yes"),
+        road("major", "primary", [(2000, 316), (900, 316)], "yes"),
+        road("major", "primary", [(900, 316), (0, 316)], "yes"),
         road("major", "primary_link", [(900, 316), (950, 400), (1000, 480)]),
         road("major", "trunk", [(1000, 0), (1000, 2000)]),
+        road("major", "primary", [(500, 316), (500, 700)]),
+        road("major", "primary", [(1900, 1700), (100, 1700)], "yes"),
         road("local", "residential", [(0, 800), (2000, 800)]),
     ]
     frame = lambda rows: gpd.GeoDataFrame(rows, geometry="geometry", crs=crs) if rows else gpd.GeoDataFrame({"geometry": []}, geometry="geometry", crs=crs)
@@ -137,12 +141,13 @@ def test_main_road_corridors_leave_out_ramps_and_merge_twin_carriageways():
     lines = city_lines(layers)
     guide = guide_lines(layers, lines)
     main = [geometry for class_id, geometry, _width in guide if LINE_CLASSES[class_id][0] == "road"]
-    assert sorted(round(geometry.length) for geometry in main) == [2000, 2000]
+    assert sorted(round(geometry.length) for geometry in main) == [400, 900, 1100, 1800, 2000]
+    assert next(geometry for geometry in main if round(geometry.length) == 400).coords[0] == (500.0, 300.0)
     assert len([1 for class_id, _geometry, _width in guide if LINE_CLASSES[class_id][0] == "rail"]) == 1
     tiles = street_tiles([line for line in lines if LINE_CLASSES[line[0]][0] == "road"], (0.0, 0.0, 2048.0, 2048.0), guide=guide)
     tile = next(tile for tile in tiles if tile["origin"] == (512.0, 0.0))
     assert {LINE_CLASSES[class_id][1] for class_id, _points in tile["targets"]} == {"major"}
-    assert len(tile["targets"]) == 4 and len(tile["corridors"]) == 2
+    assert len(tile["targets"]) == 5 and len(tile["corridors"]) == 4
     data = StreetDataset([(0, tile)], [np.zeros((len(CHANNELS), 16, 16), dtype=np.float32)], 1, np.ones(len(CHANNELS), dtype=np.float32), augment=False, max_len=256, exits=True)
     item = data[0]
     assert item["guide_mask"].sum() > 20 and item["guide_xy"][item["guide_mask"]].min() >= -0.26
