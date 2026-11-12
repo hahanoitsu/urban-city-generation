@@ -56,12 +56,18 @@ def main():
     parser.add_argument("--overfit", type=int, default=0, help="train and validate on this many samples")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--cities", nargs="*", help="train on these cities only, any other city in the data folder is held out")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device(args.device)
     cities = load_cities(args.data)
+    if args.cities:
+        missing = set(args.cities) - {city["name"] for city in cities}
+        if missing:
+            raise SystemExit(f"no layer data for {sorted(missing)} in {args.data}")
+        cities = [city for city in cities if city["name"] in args.cities]
     names = [city["name"] for city in cities]
     plans = [city["plan"] for city in cities]
     mean, std, control_scale = plan_statistics(plans)

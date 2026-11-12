@@ -1,0 +1,29 @@
+project:
+  city_id: seoul
+  source_name: OpenStreetMap contributors via BBBike extract
+  source_license: ODbL-1.0
+  source_snapshot: null
+
+input:
+  pbf_path: data/raw/Seoul.osm.pbf
+  bbox_wgs84: [126.76, 37.37, 127.20, 37.73]
+  metric_crs: auto
+  extraction_backend: gdal
+
+output:
+  root: data/cities
+  gpkg_path: data/cities/seoul.gpkg
+  overwrite: false
+
+heights:
+  floor_height_m: 3.1
+  default_height_m: 9.3
+  default_by_building:
+    apartments: 24.8
+    residential: 9.3
+    house: 7.0
+    commercial: 15.5
+    retail: 9.3
+    industrial: 10.0
+    school: 12.4
+    hospital: 18.6

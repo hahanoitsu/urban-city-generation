@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
+import shapely
+from shapely.geometry import Point, box
+from shapely.ops import polygonize, unary_union
+from shapely.strtree import STRtree
 
 from .classify import classify_highway, classify_landuse, clean_tag, road_is_usable, tag_is_true
 
@@ -264,6 +269,96 @@ def _station_points(
     return points
 
 
+def _line_parts(geometry) -> list:
+    if geometry is None or geometry.is_empty:
+        return []
+    if geometry.geom_type == "LineString":
+        return [geometry]
+    return [part for item in getattr(geometry, "geoms", []) for part in _line_parts(item)]
+
+
+def _sea(
+    lines: gpd.GeoDataFrame,
+    polygons: gpd.GeoDataFrame,
+    roads: gpd.GeoDataFrame,
+    bbox_wgs84: tuple[float, float, float, float],
+    probe: float = 5e-5,
+    busy: float = 1.0,
+    cell: float = 0.02,
+) -> gpd.GeoDataFrame:
+    if lines.empty or "natural" not in lines.columns:
+        return _empty()
+    coast = lines[lines["natural"].map(clean_tag).eq("coastline")].geometry
+    region = box(*bbox_wgs84)
+    pieces = []
+    for way in coast:
+        for part in _line_parts(way.intersection(region)):
+            if part.length < 1e-9:
+                continue
+            if way.project(Point(part.coords[-1])) < way.project(Point(part.coords[0])):
+                part = part.reverse()
+            pieces.append(part)
+    if not pieces:
+        return _empty()
+    faces = list(polygonize(unary_union([region.boundary, *pieces])))
+    if not faces:
+        return _empty()
+    tree = STRtree(faces)
+    votes = np.zeros((len(faces), 2))
+    for part in pieces:
+        step = min(part.length * 0.01, 2.0 * probe)
+        for share in (0.25, 0.5, 0.75):
+            along = share * part.length
+            here, ahead = part.interpolate(along), part.interpolate(along + step)
+            dx, dy = ahead.x - here.x, ahead.y - here.y
+            length = float(np.hypot(dx, dy))
+            if length < 1e-12:
+                continue
+            dx, dy = dx / length * probe, dy / length * probe
+            for side, point in enumerate((Point(here.x + dy, here.y - dx), Point(here.x - dy, here.y + dx))):
+                for index in tree.query(point, predicate="within"):
+                    votes[index, side] += part.length
+    wet = [index for index in range(len(faces)) if votes[index, 0] > votes[index, 1]]
+    if wet and not roads.empty:
+        road_tree = STRtree(roads.geometry.values)
+        squash = float(np.cos(np.radians((bbox_wgs84[1] + bbox_wgs84[3]) / 2.0)))
+        kept = []
+        for index in wet:
+            face = faces[index]
+            near = road_tree.query(face, predicate="intersects")
+            length = float(shapely.length(shapely.intersection(roads.geometry.values[near], face)).sum()) if len(near) else 0.0
+            if length * 111.32 * np.sqrt(squash) <= busy * face.area * 111.32**2 * squash:
+                kept.append(index)
+        wet = kept
+    if not wet:
+        return _empty()
+    sea = unary_union([faces[index] for index in wet])
+    if not polygons.empty and "natural" in polygons.columns:
+        islands = polygons[polygons["natural"].map(clean_tag).eq("coastline")].geometry
+        islands = [island for island in islands if island is not None and not island.is_empty]
+        if islands:
+            sea = sea.difference(unary_union(islands))
+    west, south, east, north = bbox_wgs84
+    rows = []
+    for x in np.arange(west, east, cell):
+        for y in np.arange(south, north, cell):
+            part = shapely.clip_by_rect(sea, x, y, x + cell, y + cell)
+            for item in getattr(part, "geoms", [part]):
+                if item.geom_type == "Polygon" and not item.is_empty:
+                    rows.append({"natural": "sea", "geometry": item})
+    if not rows:
+        return _empty()
+    return gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:4326")
+
+
+def _with_sea(water: gpd.GeoDataFrame, sea: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    if sea.empty:
+        return water
+    if water.empty:
+        return sea
+    return gpd.GeoDataFrame(pd.concat([water, sea], ignore_index=True), geometry="geometry", crs="EPSG:4326")
+
+
 def _classify_polygons(polygons: gpd.GeoDataFrame) -> tuple[
     gpd.GeoDataFrame,
     gpd.GeoDataFrame,
@@ -348,7 +443,7 @@ def _extract_with_gdal(
 
     lines = _expand_other_tags(
         lines,
-        ["highway", "railway", *ROAD_TAGS],
+        ["highway", "railway", "natural", *ROAD_TAGS],
     )
     polygons = _expand_other_tags(
         polygons,
@@ -376,6 +471,7 @@ def _extract_with_gdal(
     roads, rail = _classify_lines(lines)
     buildings, landuse, landuse_known, water, green = _classify_polygons(polygons)
     stations = _classify_stations([points, polygons])
+    water = _with_sea(water, _sea(lines, polygons, roads, bbox_wgs84))
     return CityLayers(roads, buildings, landuse, landuse_known, water, green, rail, stations)
 
 

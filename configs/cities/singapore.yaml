@@ -16,7 +16,7 @@ input:
 
 output:
   root: data/cities
-  gpkg_path: data/cities/singapore.gpkg
+  gpkg_path: data/cities/singapore-v3.gpkg
   overwrite: false
   save_extracted_gpkg: false
   save_tile_vectors: false

@@ -27,6 +27,7 @@ LOCAL_HIGHWAYS = {
     "unclassified",
     "service",
     "road",
+    "pedestrian",
 }
 
 EXCLUDED_SERVICE_TYPES = {
@@ -54,6 +55,7 @@ DEFAULT_WIDTH_BY_HIGHWAY_M: dict[str, float] = {
     "unclassified": 5.0,
     "service": 3.5,
     "road": 5.0,
+    "pedestrian": 5.0,
 }
 
 RESIDENTIAL_LANDUSE = {"residential"}
