@@ -436,40 +436,60 @@ def trim_stubs(lines, shortest=10.0, touch=1.0, rounds=3):
 
 
 def link_pieces_near(lines, reach=100.0, water=None, touch=1.0):
-    added = []
-    while True:
-        shapes, label = labels(lines)
-        size = np.bincount(label, weights=shapely.length(shapes))
-        if len(size) < 2:
-            break
-        tree = STRtree(shapes)
-        best = None
-        for index, slot in free_ends(lines, tree, touch):
-            class_id, points = lines[index]
-            if level(class_id) != "surface":
-                continue
-            point = end_of(points, slot)
-            for other in tree.query(Point(point), predicate="dwithin", distance=reach):
-                if label[other] == label[index] or level(lines[other][0]) != "surface":
-                    continue
-                target = onto(shapes[other], lines[other][1], point, touch)
-                gap = float(np.linalg.norm(target - point))
-                if gap < 1e-6 or (best is not None and gap >= best[0]):
-                    continue
-                bridge = LineString([point, target])
-                if water is not None and bridge.intersects(water):
-                    continue
-                if any(k not in (index, other) for k in tree.query(bridge, predicate="crosses")):
-                    continue
-                best = (gap, index, slot, int(other), target)
-        if best is None:
-            break
-        _gap, index, slot, other, target = best
+    shapes, label = labels(lines)
+    if len(lines) < 2 or int(label.max()) == 0:
+        return lines, []
+    tree = STRtree(shapes)
+    found = []
+    for index, slot in free_ends(lines, tree, touch):
         class_id, points = lines[index]
-        added.append(np.stack([end_of(points, slot), target]))
+        if level(class_id) != "surface":
+            continue
+        point = end_of(points, slot)
+        options = []
+        for other in tree.query(Point(point), predicate="dwithin", distance=reach):
+            if label[other] == label[index] or level(lines[other][0]) != "surface":
+                continue
+            target = onto(shapes[other], lines[other][1], point, touch)
+            gap = float(np.linalg.norm(target - point))
+            if gap >= 1e-6:
+                options.append((gap, int(other), target))
+        reached = set()
+        for gap, other, target in sorted(options, key=lambda item: item[0]):
+            if label[other] in reached:
+                continue
+            bridge = LineString([point, target])
+            if water is not None and bridge.intersects(water):
+                continue
+            if any(k not in (index, other) for k in tree.query(bridge, predicate="crosses")):
+                continue
+            reached.add(label[other])
+            found.append((gap, index, slot, other, target))
+    parent = list(range(int(label.max()) + 1))
+
+    def find(piece):
+        while parent[piece] != piece:
+            parent[piece] = parent[parent[piece]]
+            piece = parent[piece]
+        return piece
+
+    added = []
+    used = set()
+    cuts = {}
+    for _gap, index, slot, other, target in sorted(found, key=lambda item: item[0]):
+        a, b = find(int(label[index])), find(int(label[other]))
+        if a == b or (index, slot) in used:
+            continue
+        class_id, points = lines[index]
+        link = np.stack([end_of(points, slot), target])
+        if any(LineString(link).crosses(LineString(earlier)) for earlier in added):
+            continue
+        parent[a] = b
+        used.add((index, slot))
+        added.append(link)
         lines[index] = (class_id, extend(points, slot, target))
-        lines = split_at(lines, {other: [target]})
-    return lines, added
+        cuts.setdefault(other, []).append(target)
+    return split_at(lines, cuts), added
 
 
 def drop_small(lines, smallest=300.0):
