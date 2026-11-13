@@ -298,7 +298,7 @@ def collate(items):
 
 
 class StreetDataset(torch.utils.data.Dataset):
-    def __init__(self, tiles, plans, cities, scale, augment=True, max_len=1536, city_dropout=0.1, stations=False, plan_cells=PLAN_CELLS, spread=(), exits=False, pinned=False, hidden=(), patterns=None, pattern_dropout=0.15):
+    def __init__(self, tiles, plans, cities, scale, augment=True, max_len=1536, city_dropout=0.1, stations=False, plan_cells=PLAN_CELLS, spread=(), exits=False, pinned=False, hidden=(), patterns=None, pattern_dropout=0.15, loose=(), loose_dropout=0.2):
         self.tiles = tiles
         self.plans = plans
         self.cities = cities
@@ -314,6 +314,8 @@ class StreetDataset(torch.utils.data.Dataset):
         self.hidden = [CHANNELS.index(name) for name in hidden]
         self.patterns = patterns
         self.pattern_dropout = pattern_dropout
+        self.loose = [CHANNELS.index(name) for name in loose]
+        self.loose_dropout = loose_dropout
         self.tokens = StreetTokens(stations=stations, exits=exits)
         for _city_index, tile in tiles:
             if "touches" not in tile:
@@ -337,6 +339,8 @@ class StreetDataset(torch.utils.data.Dataset):
             crop[self.spread] = crop[self.spread].mean(axis=(1, 2), keepdims=True)
         if self.hidden:
             crop[self.hidden] = 0.0
+        if self.loose and self.augment and random.random() < self.loose_dropout:
+            crop[self.loose] = crop[self.loose].mean(axis=(1, 2), keepdims=True)
         if self.patterns is not None:
             told = np.zeros((len(PATTERN), self.plan_cells, self.plan_cells), dtype=np.float32)
             if not self.augment or random.random() > self.pattern_dropout:
@@ -403,7 +407,9 @@ class StreetModel(nn.Module):
     def generate(self, batch, temperature=1.0, top_p=0.95, generator=None, max_points=128, max_lines=400, force_ports=True, classes=None, guidance=1.0):
         memory, padding = self.condition(batch)
         plain = None
-        if guidance != 1.0 and self.config.get("pattern", False):
+        if guidance != 1.0 and "plain" in batch:
+            plain = self.condition({**batch, "plan": batch["plain"]})[0]
+        elif guidance != 1.0 and self.config.get("pattern", False):
             blind = dict(batch)
             blind["plan"] = batch["plan"].clone()
             blind["plan"][..., len(CHANNELS) :] = 0.0

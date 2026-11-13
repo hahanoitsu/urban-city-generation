@@ -241,6 +241,7 @@ def to_edge(points, reach=4.0, visible=(), joins=(False, False)):
 def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets", offset=0, pinned=False, pattern=None, guidance=1.0):
     spread = [CHANNELS.index(channel) for channel in checkpoint.get("spread", ())]
     hidden = [CHANNELS.index(channel) for channel in checkpoint.get("hidden", ())]
+    loose = [CHANNELS.index(channel) for channel in checkpoint.get("loose", ())] if guidance != 1.0 else []
     rows = math.ceil((plan.shape[1] - 2 * offset) * CELL / TILE)
     columns = math.ceil((plan.shape[2] - 2 * offset) * CELL / TILE)
     scale = np.asarray(checkpoint["scale"], dtype=np.float32)
@@ -259,6 +260,7 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
         batch = [(row, diagonal - row) for row in range(rows) if 0 <= diagonal - row < columns]
         items = []
         meta = []
+        plains = []
         for row, column in batch:
             context, ports, visible = neighbour_lines(done, row, column)
             crop = plan_crop(plan, row * per_tile + offset, column * per_tile + offset, size=plan_cells) * scale[:, None, None]
@@ -266,11 +268,16 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
                 crop[spread] = crop[spread].mean(axis=(1, 2), keepdims=True)
             if hidden:
                 crop[hidden] = 0.0
+            plain = crop.copy()
+            if loose:
+                plain[loose] = plain[loose].mean(axis=(1, 2), keepdims=True)
             if model.config.get("pattern", False):
                 told = np.zeros((len(PATTERN), plan_cells, plan_cells), dtype=np.float32)
                 if pattern is not None:
                     told = plan_crop(pattern, row * per_tile + offset, column * per_tile + offset, size=plan_cells)
                 crop = np.concatenate([crop, told])
+                plain = np.concatenate([plain, told])
+            plains.append(plain.reshape(plain.shape[0], -1).T.astype(np.float32))
             corridors = []
             if given:
                 window = box(column * TILE - MARGIN, row * TILE - MARGIN, (column + 1) * TILE + MARGIN, (row + 1) * TILE + MARGIN)
@@ -281,6 +288,8 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
             meta.append((ports, visible))
         arrays = {name: value.to(device) for name, value in collate(items).items()}
         arrays["sides"] = torch.tensor([[SIDES[side] in visible for side in range(4)] for _ports, visible in meta], dtype=torch.bool, device=device)
+        if loose:
+            arrays["plain"] = torch.from_numpy(np.stack(plains)).to(device)
         results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, classes=classes, guidance=guidance)
         for (row, column), lines, (ports, visible) in zip(batch, results, meta):
             snapped = snap_to_ports(lines, ports)
@@ -352,10 +361,11 @@ def place_stations(stops, runs, reach=100.0, same=60.0, touch=1.0):
     return stations
 
 
-def generate_trunk(model, checkpoint, plan, weights, size, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, margin=0):
+def generate_trunk(model, checkpoint, plan, weights, size, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, margin=0, pattern=None, guidance=1.0):
     unit = float(checkpoint["unit"])
     classes = [is_trunk(class_id) for class_id in range(len(LINE_CLASSES))]
-    lines, stops = generate_streets(model, checkpoint, pool_plan(plan, unit), weights, generator, temperature, top_p, device, log, classes=classes, plan_cells=int(checkpoint.get("plan_cells", PLAN_CELLS)), name="trunk", offset=int(margin // unit))
+    told = None if pattern is None else pool_plan(pattern, unit)
+    lines, stops = generate_streets(model, checkpoint, pool_plan(plan, unit), weights, generator, temperature, top_p, device, log, classes=classes, plan_cells=int(checkpoint.get("plan_cells", PLAN_CELLS)), name="trunk", offset=int(margin // unit), pattern=told, guidance=guidance)
     snapped = snap_lines(clip_lines(lines, (size[0] / unit, size[1] / unit)))
     main = [(class_id, np.asarray(points, dtype=np.float64) * unit) for class_id, points in snapped]
     return main, [(x * unit, y * unit) for x, y in stops]
@@ -783,7 +793,7 @@ def generate_city(
     else:
         trunk_model, trunk_checkpoint = models["trunk"]
         trunk_weights = style_weights(trunk_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in trunk_checkpoint["cities"]})
-        main, stops = generate_trunk(trunk_model, trunk_checkpoint, wide, trunk_weights, size, generator, temperature, top_p, device, log, margin=margin)
+        main, stops = generate_trunk(trunk_model, trunk_checkpoint, wide, trunk_weights, size, generator, temperature, top_p, device, log, margin=margin, pattern=known_pattern, guidance=pattern_guidance)
         km = lambda mode: sum(LineString(points).length for class_id, points in main if LINE_CLASSES[class_id][0] == mode) / 1000.0
         log(f"trunk: {km('rail'):.1f} km of rail, {km('road'):.1f} km of main road corridor, {time.time() - started:.0f}s")
         warmth = temperature if street_temperature is None else street_temperature

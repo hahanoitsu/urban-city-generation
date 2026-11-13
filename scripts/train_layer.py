@@ -60,8 +60,9 @@ def main():
     parser.add_argument("--plan-cells", type=int, default=16, help="trunk: plan cells each tile sees")
     parser.add_argument("--spread", nargs="*", default=[], help="trunk: plan channels the model is told the amount of but not where, for example major rail")
     parser.add_argument("--start", type=Path, help="checkpoint to start from instead of random weights")
-    parser.add_argument("--pattern", action="store_true", help="streets: also show the model the street pattern map")
+    parser.add_argument("--pattern", action="store_true", help="streets and trunk: also show the model the street pattern map")
     parser.add_argument("--reach", type=float, default=1.0, help="trunk: tile widths over which the position code stays unique, 2 for 16 plan cells")
+    parser.add_argument("--loose", nargs="*", default=[], help="trunk: plan channels that are sometimes shown as an amount only, so sampling can be pushed toward where they are")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -142,10 +143,15 @@ def main():
                 raise SystemExit("the position code repeats inside this many plan cells, raise --reach")
             coarse = [pool_plan(plan, TRUNK) for plan in plans]
             scale = (1.0 / plan_statistics(coarse)[1]).astype(np.float32)
-            model = StreetModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout, stations=True, exits=True, reach=args.reach)
-            train_set = StreetDataset(train_items, coarse, len(cities), scale, augment=not args.overfit, max_len=args.max_len, stations=True, plan_cells=args.plan_cells, spread=args.spread, exits=True)
-            validation_set = StreetDataset(validation_items, coarse, len(cities), scale, augment=False, max_len=args.max_len, stations=True, plan_cells=args.plan_cells, spread=args.spread, exits=True)
-            extra = {"scale": scale, "unit": TRUNK, "plan_cells": args.plan_cells, "spread": args.spread}
+            patterns = None
+            if args.pattern:
+                if any(city["pattern"] is None for city in cities):
+                    raise SystemExit("a city has no pattern.npy, build its layer data again")
+                patterns = [pool_plan(city["pattern"], TRUNK) for city in cities]
+            model = StreetModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout, stations=True, exits=True, pattern=args.pattern, reach=args.reach)
+            train_set = StreetDataset(train_items, coarse, len(cities), scale, augment=not args.overfit, max_len=args.max_len, stations=True, plan_cells=args.plan_cells, spread=args.spread, exits=True, patterns=patterns, loose=args.loose)
+            validation_set = StreetDataset(validation_items, coarse, len(cities), scale, augment=False, max_len=args.max_len, stations=True, plan_cells=args.plan_cells, spread=args.spread, exits=True, patterns=patterns)
+            extra = {"scale": scale, "unit": TRUNK, "plan_cells": args.plan_cells, "spread": args.spread, "loose": args.loose}
         else:
             model = BuildingModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout, roads=True)
             train_set = BuildingDataset(train_items, len(cities), scale, augment=not args.overfit, max_len=args.max_len)

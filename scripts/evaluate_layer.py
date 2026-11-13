@@ -49,7 +49,7 @@ def main():
             data = BuildingDataset(items, 1, scale, augment=False, max_len=model.config["max_len"])
         else:
             plan = pool_plan(city["plan"], unit) if layer == "trunk" else city["plan"]
-            data = StreetDataset(items, [plan], 1, scale, augment=False, max_len=model.config["max_len"], stations=model.config.get("stations", False), plan_cells=int(checkpoint.get("plan_cells", 8)), spread=checkpoint.get("spread", ()), exits=model.config.get("exits", False), pinned=checkpoint.get("pinned", False), hidden=checkpoint.get("hidden", ()), patterns=[city["pattern"]] if model.config.get("pattern", False) else None)
+            data = StreetDataset(items, [plan], 1, scale, augment=False, max_len=model.config["max_len"], stations=model.config.get("stations", False), plan_cells=int(checkpoint.get("plan_cells", 8)), spread=checkpoint.get("spread", ()), exits=model.config.get("exits", False), pinned=checkpoint.get("pinned", False), hidden=checkpoint.get("hidden", ()), patterns=[pool_plan(city["pattern"], unit) if layer == "trunk" else city["pattern"]] if model.config.get("pattern", False) else None)
         codes = {"no city": np.zeros(len(known), dtype=np.float32)}
         if name in known:
             codes["own city"] = np.eye(len(known), dtype=np.float32)[known.index(name)]
