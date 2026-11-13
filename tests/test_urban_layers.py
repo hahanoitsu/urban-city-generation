@@ -455,6 +455,10 @@ def test_rail_stations_and_main_roads_can_come_from_a_model(tmp_path):
     city, plan = generate_city(checkpoints, size_m=(1024.0, 1024.0), style={"small": 1.0}, plan_steps=2, seed=3, log=lambda _text: None)
     assert city["rules"] == ["plan totals", "natural cover", "building clearance", "road and rail repairs"]
     assert all(LINE_CLASSES[line_class("rail", item["class"], item["vertical"])][0] == "rail" for item in city["rail"])
+    corridors = [LineString(item["points"]) for item in city["corridors"]]
+    for road in city["roads"]:
+        if road["class"] == "major":
+            assert all(min(line.distance(Point(spot)) for line in corridors) < 2.0 for spot in road["points"])
     from urban_layers.check import check_city, failures
 
     assert [item for item in failures(check_city(city, plan)) if not item.startswith("plan_orientation")] == []
@@ -474,6 +478,26 @@ def test_a_corridor_is_handed_from_tile_to_tile():
     for x, y in ((0.0, 300.0), (512.0, 500.0), (542.72, 512.0), (1024.0, 700.0)):
         assert np.hypot(ends[:, 0] - x, ends[:, 1] - y).min() < 1.0
     assert (np.hypot(ends[:, 0] - 512.0, ends[:, 1] - 500.0) < 1.0).sum() >= 2
+
+
+def test_main_roads_are_kept_as_the_corridor_model_drew_them():
+    from urban_layers.city import generate_streets
+
+    torch.manual_seed(0)
+    major = line_class("road", "major", "surface")
+    local = line_class("road", "local", "surface")
+    model = StreetModel(1, d=32, layers=1, heads=4, max_len=512, exits=True, guided=True).eval()
+    plan = np.zeros((len(CHANNELS), 8, 8), dtype=np.float32)
+    checkpoint = {"scale": np.ones(len(CHANNELS), dtype=np.float32)}
+    given = [(major, np.array([[0.0, 300.0], [1024.0, 700.0]])), (major, np.array([[256.0, 400.0], [256.0, 1024.0]])), (local, np.array([[0.0, 900.0], [1024.0, 900.0]]))]
+    lines = generate_streets(model, checkpoint, plan, np.ones(1, dtype=np.float32), torch.Generator().manual_seed(0), given=given, pinned=True, keep_main=True, log=lambda _text: None)
+    drawn = [LineString(points) for class_id, points, _joins in lines if class_id == major]
+    wanted = [LineString(points) for class_id, points in given if class_id == major]
+    assert abs(sum(line.length for line in drawn) - sum(line.length for line in wanted)) < 4.0
+    assert all(min(max(other.distance(Point(spot)) for spot in line.coords) for other in wanted) < 1.0 for line in drawn)
+    assert any(class_id != major for class_id, _points, _joins in lines)
+    ends = np.asarray([points[slot] for class_id, points, _joins in lines if class_id == major for slot in (0, -1)])
+    assert (np.hypot(ends[:, 0] - 512.0, ends[:, 1] - 500.0) < 1.0).sum() == 2
 
 
 @pytest.mark.parametrize("max_len", [40, 512])

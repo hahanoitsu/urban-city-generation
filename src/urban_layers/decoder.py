@@ -93,7 +93,7 @@ class TokenDecoder(nn.Module):
         return self.head(self.norm(x))
 
     @torch.no_grad()
-    def generate(self, memory, padding, grammar, max_len=None, temperature=1.0, top_p=0.95, generator=None, greedy=False, plain=None, guidance=1.0):
+    def generate(self, memory, padding, grammar, max_len=None, temperature=1.0, top_p=0.95, generator=None, greedy=False, plain=None, guidance=1.0, prefix=None):
         max_len = min(max_len or self.max_len, self.max_len)
         batch = memory.shape[0]
         device = memory.device
@@ -112,6 +112,12 @@ class TokenDecoder(nn.Module):
             if plain is not None:
                 logits = logits[batch:] + guidance * (logits[:batch] - logits[batch:])
             valid = grammar.allowed(state)
+            if prefix is not None:
+                told = prefix[:, position - 1] if position - 1 < prefix.shape[1] else torch.zeros(batch, dtype=torch.long, device=device)
+                only = torch.zeros_like(valid)
+                only[torch.arange(batch, device=device), told] = True
+                valid = torch.where((told > 0)[:, None], only, valid)
+                state = {**state, "scripted": told > 0}
             logits = logits.masked_fill(~valid, float("-inf"))
             if greedy:
                 token = logits.argmax(dim=-1)

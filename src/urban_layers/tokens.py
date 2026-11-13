@@ -165,6 +165,7 @@ class StreetGrammar:
             "rail": torch.zeros(batch, dtype=torch.bool, device=device),
             "stopped": torch.zeros(batch, dtype=torch.bool, device=device),
             "klass": torch.full((batch,), -1, dtype=torch.long, device=device),
+            "scripted": torch.zeros(batch, dtype=torch.bool, device=device),
         }
 
     def pending(self, state):
@@ -250,7 +251,7 @@ class StreetGrammar:
         rows = torch.arange(len(phase), device=token.device)
         finished = phase == 4
 
-        current = torch.where((kinds == 4) & (phase == 0), self.pending(state), current)
+        current = torch.where((kinds == 4) & (phase == 0) & ~state["scripted"], self.pending(state), current)
         last_x = torch.where(kinds == 5, token - self.tokens.first_x, last_x)
         new_point = kinds == 6
         last = torch.where(new_point[:, None], torch.stack([last_x, token - self.tokens.first_y], dim=1), last)

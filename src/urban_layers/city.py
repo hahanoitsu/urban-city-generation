@@ -46,7 +46,7 @@ from urban_layers.data import (
 from urban_layers.network import join_network, repair_network, repair_rail
 from urban_layers.plan import PlanNet, sample_pattern, sample_plan
 from urban_layers.rail import RAIL_WIDTH, TRACKS, heading_at, rail_corridors, rail_runs, rail_stations
-from urban_layers.streets import PLAN_CELLS, PORTS, SIDES, StreetModel, collate, condition_arrays, guide_crossings, plan_crop, port_key, snap_to_ports
+from urban_layers.streets import PLAN_CELLS, PORTS, SIDES, StreetModel, collate, condition_arrays, end_ports, guide_crossings, is_main_road, laid_lines, order_lines, plan_crop, port_key, snap_to_ports
 from urban_model.structured_city_data import BUILDING_KINDS
 
 SLIDERS = {
@@ -238,7 +238,7 @@ def to_edge(points, reach=4.0, visible=(), joins=(False, False)):
     return points
 
 
-def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets", offset=0, pinned=False, pattern=None, guidance=1.0, at_once=8):
+def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets", offset=0, pinned=False, pattern=None, guidance=1.0, at_once=8, keep_main=False):
     spread = [CHANNELS.index(channel) for channel in checkpoint.get("spread", ())]
     hidden = [CHANNELS.index(channel) for channel in checkpoint.get("hidden", ())]
     loose = [CHANNELS.index(channel) for channel in checkpoint.get("loose", ())] if guidance != 1.0 else []
@@ -249,7 +249,7 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
     if given is not None:
         given = [(class_id, LineString(points), 0.0) for class_id, points in given]
         guide_tree = STRtree([geometry for _class_id, geometry, _width in given]) if given else None
-        classes = [mode == "road" for mode, _name, _level in LINE_CLASSES]
+        classes = [mode == "road" and not (keep_main and name == "major") for mode, name, _level in LINE_CLASSES]
     elif classes is None and not rail:
         plan = plan.copy()
         plan[CHANNELS.index("rail")] = 0.0
@@ -261,6 +261,7 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
         items = []
         meta = []
         plains = []
+        scripts = []
         for row, column in batch:
             context, ports, visible = neighbour_lines(done, row, column)
             crop = plan_crop(plan, row * per_tile + offset, column * per_tile + offset, size=plan_cells) * scale[:, None, None]
@@ -279,13 +280,21 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
                 plain = np.concatenate([plain, told])
             plains.append(plain.reshape(plain.shape[0], -1).T.astype(np.float32))
             corridors = []
+            script = ([], 0)
             if given:
                 window = box(column * TILE - MARGIN, row * TILE - MARGIN, (column + 1) * TILE + MARGIN, (row + 1) * TILE + MARGIN)
                 corridors = guide_pieces(given, guide_tree, window, (column * TILE, row * TILE))
-                if pinned:
+                if keep_main:
+                    laid = laid_lines(given, guide_tree, (column * TILE, row * TILE), model.tokens)
+                    entries = end_ports(laid)[:PORTS]
+                    ports = (entries + [port for port in ports if not is_main_road(port[4])])[:PORTS]
+                    if laid:
+                        script = (model.tokens.encode(order_lines(laid, visible, ports, exits=model.tokens.exit is not None))[1:-1], len(entries))
+                elif pinned:
                     ports = sorted(ports + guide_crossings(corridors, visible), key=port_key)[:PORTS]
             items.append(condition_arrays(crop, context, ports, weights, corridors))
             meta.append((ports, visible))
+            scripts.append(script)
         results = []
         for start in range(0, len(items), at_once):
             part = slice(start, start + at_once)
@@ -293,6 +302,14 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
             arrays["sides"] = torch.tensor([[SIDES[side] in visible for side in range(4)] for _ports, visible in meta[part]], dtype=torch.bool, device=device)
             if loose:
                 arrays["plain"] = torch.from_numpy(np.stack(plains[part])).to(device)
+            if keep_main:
+                laid = torch.zeros(len(items[part]), max(max(len(tokens) for tokens, _count in scripts[part]), 1), dtype=torch.long)
+                entries = torch.zeros(len(items[part]), PORTS, dtype=torch.bool)
+                for index, (tokens, count) in enumerate(scripts[part]):
+                    laid[index, : len(tokens)] = torch.as_tensor(tokens, dtype=torch.long)
+                    entries[index, :count] = True
+                arrays["laid"] = laid.to(device)
+                arrays["port_laid"] = entries.to(device)
             results += model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, classes=classes, guidance=guidance)
         for (row, column), lines, (ports, visible) in zip(batch, results, meta):
             snapped = snap_to_ports(lines, ports)
@@ -716,6 +733,7 @@ def generate_city(
     log=print,
     transport_rules=True,
     repairs=True,
+    keep_main=True,
 ):
     started = time.time()
     plan_model, plan_checkpoint = models["plan"]
@@ -805,7 +823,7 @@ def generate_city(
         if repairs:
             main, mended = repair_rail(main)
         warmth = temperature if street_temperature is None else street_temperature
-        lines = generate_streets(street_model, street_checkpoint, wide, street_weights, generator, warmth, top_p, device, log, given=main, offset=margin, pinned=street_checkpoint.get("pinned", False), pattern=known_pattern, guidance=pattern_guidance)
+        lines = generate_streets(street_model, street_checkpoint, wide, street_weights, generator, warmth, top_p, device, log, given=main, offset=margin, pinned=street_checkpoint.get("pinned", False), pattern=known_pattern, guidance=pattern_guidance, keep_main=keep_main)
         streets = snap_lines(clip_lines(lines, size))
         if repairs:
             streets, road_mended = repair_network(streets, size, water_union)

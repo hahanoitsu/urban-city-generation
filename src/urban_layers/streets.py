@@ -134,6 +134,38 @@ def find_ports(lines, visible, corridors=(), near=6.0):
     return ports
 
 
+def is_main_road(class_id):
+    return LINE_CLASSES[class_id][:2] == ("road", "major")
+
+
+def laid_lines(given, tree, origin, tokens):
+    x0, y0 = origin
+    area = box(x0, y0, x0 + TILE, y0 + TILE)
+    lines = []
+    for index in tree.query(area, predicate="intersects"):
+        class_id, line, _width = given[index]
+        if not is_main_road(class_id):
+            continue
+        piece = line.intersection(area)
+        for part in getattr(piece, "geoms", [piece]):
+            if part.geom_type != "LineString":
+                continue
+            points = tokens.quantise(np.asarray(part.coords)[:, :2] - (x0, y0))
+            if len(points) >= 2:
+                lines.append((class_id, points.astype(np.float32)))
+    return lines
+
+
+def end_ports(lines):
+    ports = []
+    for class_id, points in lines:
+        for start in (True, False):
+            point = points[0] if start else points[-1]
+            if boundary_side(point) >= 0 and not any(other[4] == class_id and other[0] == point[0] and other[1] == point[1] for other in ports):
+                ports.append((float(point[0]), float(point[1]), *heading(points, start), class_id))
+    return sorted(ports, key=port_key)
+
+
 def rank(class_id):
     mode, name, _level = LINE_CLASSES[class_id]
     return PRIORITY.get(name, 3) if mode == "road" else 3
@@ -418,8 +450,10 @@ class StreetModel(nn.Module):
         if force_ports:
             spots = torch.round(batch["port_xy"] * TILE).clamp(0, TILE).long()
             ports = torch.cat([batch["port_class"][..., None], spots], dim=-1).masked_fill(~batch["port_mask"][..., None], -1)
+            if "port_laid" in batch:
+                ports = ports.masked_fill(batch["port_laid"][..., None], -1)
         grammar = StreetGrammar(self.tokens, max_points, max_lines, ports, max_len=self.decoder.max_len, sides=batch.get("sides"), classes=classes)
-        tokens = self.decoder.generate(memory, padding, grammar, temperature=temperature, top_p=top_p, generator=generator, plain=plain, guidance=guidance)
+        tokens = self.decoder.generate(memory, padding, grammar, temperature=temperature, top_p=top_p, generator=generator, plain=plain, guidance=guidance, prefix=batch.get("laid"))
         return [self.tokens.decode(row.tolist()) for row in tokens.cpu()]
 
 
