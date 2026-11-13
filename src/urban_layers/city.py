@@ -238,7 +238,7 @@ def to_edge(points, reach=4.0, visible=(), joins=(False, False)):
     return points
 
 
-def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets", offset=0, pinned=False, pattern=None, guidance=1.0):
+def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets", offset=0, pinned=False, pattern=None, guidance=1.0, at_once=8):
     spread = [CHANNELS.index(channel) for channel in checkpoint.get("spread", ())]
     hidden = [CHANNELS.index(channel) for channel in checkpoint.get("hidden", ())]
     loose = [CHANNELS.index(channel) for channel in checkpoint.get("loose", ())] if guidance != 1.0 else []
@@ -286,11 +286,14 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
                     ports = sorted(ports + guide_crossings(corridors, visible), key=port_key)[:PORTS]
             items.append(condition_arrays(crop, context, ports, weights, corridors))
             meta.append((ports, visible))
-        arrays = {name: value.to(device) for name, value in collate(items).items()}
-        arrays["sides"] = torch.tensor([[SIDES[side] in visible for side in range(4)] for _ports, visible in meta], dtype=torch.bool, device=device)
-        if loose:
-            arrays["plain"] = torch.from_numpy(np.stack(plains)).to(device)
-        results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, classes=classes, guidance=guidance)
+        results = []
+        for start in range(0, len(items), at_once):
+            part = slice(start, start + at_once)
+            arrays = {name: value.to(device) for name, value in collate(items[part]).items()}
+            arrays["sides"] = torch.tensor([[SIDES[side] in visible for side in range(4)] for _ports, visible in meta[part]], dtype=torch.bool, device=device)
+            if loose:
+                arrays["plain"] = torch.from_numpy(np.stack(plains[part])).to(device)
+            results += model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, classes=classes, guidance=guidance)
         for (row, column), lines, (ports, visible) in zip(batch, results, meta):
             snapped = snap_to_ports(lines, ports)
             done[(row, column)] = [(class_id, to_edge(points, visible=visible, joins=joins), joins) for class_id, points, joins, *_rest in snapped]
