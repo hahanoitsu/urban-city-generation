@@ -453,7 +453,7 @@ def test_rail_stations_and_main_roads_can_come_from_a_model(tmp_path):
         "buildings": (building_model.eval(), {"cities": ["small"], "scale": scale}),
     }
     city, plan = generate_city(checkpoints, size_m=(1024.0, 1024.0), style={"small": 1.0}, plan_steps=2, seed=3, log=lambda _text: None)
-    assert city["rules"] == ["plan totals", "natural cover", "building clearance"]
+    assert city["rules"] == ["plan totals", "natural cover", "building clearance", "road and rail repairs"]
     assert all(LINE_CLASSES[line_class("rail", item["class"], item["vertical"])][0] == "rail" for item in city["rail"])
     from urban_layers.check import check_city, failures
 
@@ -877,3 +877,37 @@ def test_plan_cells_far_apart_get_different_position_codes():
     assert len(torch.unique(fourier(small, 8).round(decimals=4), dim=0)) == len(small)
     model = StreetModel(1, d=32, layers=1, heads=4, max_len=64, stations=True, exits=True, reach=2.0)
     assert len(torch.unique(model.where(spots).detach().round(decimals=4), dim=0)) == len(spots)
+
+
+def test_repairs_join_trim_link_and_drop():
+    from urban_layers.network import repair_network, repair_rail
+
+    local = line_class("road", "local", "surface")
+    major = line_class("road", "major", "surface")
+    rail = line_class("rail", "rail", "surface")
+    lines = [
+        (major, np.array([[0.0, 100.0], [1000.0, 100.0]])),
+        (local, np.array([[200.0, 106.0], [200.0, 400.0]])),
+        (local, np.array([[400.0, 100.0], [400.0, 108.0]])),
+        (local, np.array([[600.0, 100.0], [600.0, 300.0]])),
+        (local, np.array([[600.0, 300.0], [900.0, 300.0]])),
+        (local, np.array([[900.0, 380.0], [900.0, 700.0], [700.0, 700.0]])),
+        (local, np.array([[50.0, 900.0], [120.0, 900.0]])),
+    ]
+    fixed, told = repair_network(lines, (1024.0, 1024.0))
+    assert (told["near_misses_joined"], told["stubs_removed"], told["links_added"], told["strays_dropped"]) == (1, 1, 1, 1)
+    assert told["links"] == [[[900.0, 300.0], [900.0, 380.0]]] and abs(told["link_km"] - 0.08) < 1e-6
+    shapes = [LineString(points) for _class_id, points in fixed]
+    assert all(min(shape.distance(other) for other in shapes if other is not shape) < 1e-6 for shape in shapes)
+    assert not any(LineString(points).length < 10.0 for _class_id, points in fixed)
+    tracks = [(rail, np.array([[0.0, 0.0], [500.0, 0.0]])), (rail, np.array([[520.0, 5.0], [900.0, 5.0]])), (rail, np.array([[300.0, 600.0], [360.0, 600.0]])), (major, np.array([[0.0, 50.0], [10.0, 50.0]]))]
+    mended, said = repair_rail(tracks)
+    kept = [LineString(points) for class_id, points in mended if class_id == rail]
+    assert said["rail_strays_dropped"] == 1 and len(kept) == 2 and kept[0].distance(kept[1]) < 1e-6 and sum(1 for class_id, _points in mended if class_id == major) == 1
+    weave = [(rail, np.array([[0.0, 0.0], [1000.0, 0.0]])), (rail, np.array([[100.0, 12.0], [400.0, -10.0], [700.0, 14.0], [800.0, 200.0]])), (rail, np.array([[0.0, 300.0], [400.0, 300.0], [400.0, 700.0]]))]
+    mended, said = repair_rail(weave)
+    through, branch, bend = [LineString(points) for _class_id, points in mended]
+    assert 0.5 < said["rail_side_by_side_km"] < 0.7 and through.length == 1000.0 and not through.crosses(branch)
+    assert branch.distance(through) < 1e-6 and branch.distance(Point(800.0, 200.0)) < 1e-6
+    turns = np.abs(np.diff(np.unwrap(np.arctan2(*np.diff(np.asarray(bend.coords), axis=0).T[::-1]))))
+    assert turns.max() < np.deg2rad(40) and bend.distance(Point(400.0, 300.0)) < 30.0

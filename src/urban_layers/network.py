@@ -5,11 +5,11 @@ import shapely
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
 from shapely.geometry import LineString, Point
-from shapely.ops import nearest_points
+from shapely.ops import nearest_points, substring
 from shapely.strtree import STRtree
 
 from urban_layers.audit import road_pieces
-from urban_layers.data import CELL, CHANNELS, LINE_CLASSES, TILE, ROAD_CLASSES, line_class
+from urban_layers.data import CELL, CHANNELS, LINE_CLASSES, TILE, ROAD_CLASSES, line_class, merge_corridors
 from urban_layers.rail import smooth_line
 
 
@@ -349,3 +349,189 @@ def join_network(lines, plan, size, water=None):
     lines, links = link_pieces(lines, plan, water)
     km = lambda new: sum(LineString(points).length for _class_id, points in new) / 1000.0
     return lines, {"ramps": landed, "stitched": stitched, "dropped": dropped, "downgraded": downgraded, "major_links": len(major_links), "major_link_km": km(major_links), "links": len(links), "link_km": km(links)}
+
+
+def close_gaps(lines, reach=10.0, touch=1.0):
+    shapes = [LineString(points) for _class_id, points in lines]
+    tree = STRtree(shapes)
+    cuts = {}
+    closed = 0
+    for index, slot in free_ends(lines, tree, touch):
+        class_id, points = lines[index]
+        point = end_of(points, slot)
+        best = None
+        for other in tree.query(Point(point), predicate="dwithin", distance=reach):
+            if other == index or level(lines[other][0]) != level(class_id):
+                continue
+            target = onto(shapes[other], lines[other][1], point, touch)
+            gap = float(np.linalg.norm(target - point))
+            if gap <= 1e-6 or (best is not None and gap >= best[0]):
+                continue
+            if shapes[other].distance(shapes[index]) <= touch:
+                met = shapes[index].project(nearest_points(shapes[index], shapes[other])[0])
+                here = 0.0 if slot == 0 else shapes[index].length
+                if abs(here - met) < 3.0 * reach:
+                    continue
+            best = (gap, int(other), target)
+        if best is None:
+            continue
+        lines[index] = (class_id, extend(points, slot, best[2]))
+        cuts.setdefault(best[1], []).append(best[2])
+        closed += 1
+    return split_at(lines, cuts), closed
+
+
+def meeting_points(lines, shapes, tree, index, touch=1.0):
+    shape = shapes[index]
+    marks = []
+    for other in tree.query(shape, predicate="dwithin", distance=touch):
+        if other == index:
+            continue
+        theirs = lines[other][1]
+        for end in (theirs[0], theirs[-1]):
+            if shape.distance(Point(end)) <= touch:
+                marks.append(shape.project(Point(end)))
+        if level(lines[other][0]) == level(lines[index][0]):
+            crossing = shape.intersection(shapes[other])
+            marks += [shape.project(part) for part in getattr(crossing, "geoms", [crossing]) if part.geom_type == "Point"]
+    return marks
+
+
+def trim_stubs(lines, shortest=10.0, touch=1.0, rounds=3):
+    removed = 0
+    metres = 0.0
+    for _round in range(rounds):
+        shapes = [LineString(points) for _class_id, points in lines]
+        tree = STRtree(shapes)
+        loose = {}
+        for index, slot in free_ends(lines, tree, touch):
+            loose.setdefault(index, []).append(slot)
+        kept = []
+        changed = False
+        for index, (class_id, points) in enumerate(lines):
+            if index not in loose:
+                kept.append((class_id, points))
+                continue
+            shape = shapes[index]
+            marks = meeting_points(lines, shapes, tree, index, touch)
+            start, stop = 0.0, shape.length
+            if 0 in loose[index] and min(marks, default=shape.length) < shortest:
+                start = min(marks, default=shape.length)
+            if 1 in loose[index] and shape.length - max(marks, default=0.0) < shortest:
+                stop = max(marks, default=0.0)
+            if start <= 0.0 and stop >= shape.length:
+                kept.append((class_id, points))
+                continue
+            changed = True
+            removed += 1
+            if stop - start < 0.5:
+                metres += shape.length
+                continue
+            metres += shape.length - (stop - start)
+            kept.append((class_id, np.asarray(substring(shape, start, stop).coords, dtype=np.float64)))
+        lines = kept
+        if not changed:
+            break
+    return lines, removed, metres
+
+
+def link_pieces_near(lines, reach=100.0, water=None, touch=1.0):
+    added = []
+    while True:
+        shapes, label = labels(lines)
+        size = np.bincount(label, weights=shapely.length(shapes))
+        if len(size) < 2:
+            break
+        tree = STRtree(shapes)
+        best = None
+        for index, slot in free_ends(lines, tree, touch):
+            class_id, points = lines[index]
+            if level(class_id) != "surface":
+                continue
+            point = end_of(points, slot)
+            for other in tree.query(Point(point), predicate="dwithin", distance=reach):
+                if label[other] == label[index] or level(lines[other][0]) != "surface":
+                    continue
+                target = onto(shapes[other], lines[other][1], point, touch)
+                gap = float(np.linalg.norm(target - point))
+                if gap < 1e-6 or (best is not None and gap >= best[0]):
+                    continue
+                bridge = LineString([point, target])
+                if water is not None and bridge.intersects(water):
+                    continue
+                if any(k not in (index, other) for k in tree.query(bridge, predicate="crosses")):
+                    continue
+                best = (gap, index, slot, int(other), target)
+        if best is None:
+            break
+        _gap, index, slot, other, target = best
+        class_id, points = lines[index]
+        added.append(np.stack([end_of(points, slot), target]))
+        lines[index] = (class_id, extend(points, slot, target))
+        lines = split_at(lines, {other: [target]})
+    return lines, added
+
+
+def drop_small(lines, smallest=300.0):
+    shapes, label = labels(lines)
+    size = np.bincount(label, weights=shapely.length(shapes))
+    keep = size >= smallest
+    keep[np.argmax(size)] = True
+    metres = float(size[~keep].sum())
+    return [line for line, piece in zip(lines, label) if keep[piece]], int((~keep).sum()), metres
+
+
+def repair_network(lines, size, water=None, gap=10.0, ahead=60.0, stub=10.0, link=100.0, stray=300.0):
+    lines = [(class_id, np.asarray(points, dtype=np.float64)) for class_id, points in lines]
+    lines = [(class_id, points) for class_id, points in lines if len(points) >= 2 and LineString(points).length > 0.5]
+    if not lines:
+        return lines, {}
+    before = sum(LineString(points).length for _class_id, points in lines)
+    lines, landed = land_ramps(lines)
+    lines, closed = close_gaps(lines, gap)
+    lines, stitched = stitch(lines, size, reach=ahead)
+    lines, stubs, stub_metres = trim_stubs(lines, stub)
+    lines, links = link_pieces_near(lines, link, water)
+    lines, strays, stray_metres = drop_small(lines, stray)
+    return lines, {
+        "ramps_landed": landed,
+        "near_misses_joined": closed,
+        "ends_joined_ahead": stitched,
+        "stubs_removed": stubs,
+        "stub_km": stub_metres / 1000.0,
+        "links_added": len(links),
+        "link_km": sum(float(np.linalg.norm(points[1] - points[0])) for points in links) / 1000.0,
+        "strays_dropped": strays,
+        "stray_km": stray_metres / 1000.0,
+        "road_km_before": before / 1000.0,
+        "road_km_after": sum(LineString(points).length for _class_id, points in lines) / 1000.0,
+        "links": [points.tolist() for points in links],
+    }
+
+
+def round_corners(points, reach=40.0, rounds=2):
+    points = np.asarray(points, dtype=np.float64)
+    for _round in range(rounds):
+        if len(points) < 3:
+            break
+        step = np.diff(points, axis=0)
+        length = np.maximum(np.linalg.norm(step, axis=1, keepdims=True), 1e-9)
+        cut = np.minimum(0.25, reach / length)
+        pairs = np.stack([points[:-1] + cut * step, points[1:] - cut * step], axis=1).reshape(-1, 2)
+        points = np.vstack([points[:1], pairs[1:-1], points[-1:]])
+    return points
+
+
+def repair_rail(lines, beside=30.0, gap=30.0, stray=150.0):
+    rails = [(class_id, np.asarray(points, dtype=np.float64)) for class_id, points in lines if LINE_CLASSES[class_id][0] == "rail" and len(points) >= 2]
+    rest = [(class_id, points) for class_id, points in lines if LINE_CLASSES[class_id][0] != "rail"]
+    if not rails:
+        return lines, {}
+    before = sum(LineString(points).length for _class_id, points in rails)
+    merged = merge_corridors([(class_id, LineString(points), 0.0) for class_id, points in rails], lambda class_id: True, beside)
+    rails = [(class_id, np.asarray(line.coords, dtype=np.float64)[:, :2]) for class_id, line, _width in merged if line.length > 1.0]
+    saved = max(before - sum(LineString(points).length for _class_id, points in rails), 0.0)
+    rails = [(class_id, round_corners(points)) for class_id, points in rails]
+    rails, closed = close_gaps(rails, gap)
+    rails, strays, metres = drop_small(rails, stray)
+    return rest + rails, {"rail_km_before": before / 1000.0, "rail_side_by_side_km": saved / 1000.0, "rail_near_misses_joined": closed, "rail_strays_dropped": strays, "rail_stray_km": metres / 1000.0}

@@ -44,6 +44,7 @@ def main():
     parser.add_argument("--building-batch", type=int, default=64, help="blocks per call to the building model, more is faster on a big gpu")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--no-transport-rules", action="store_true", help="keep rail and roads exactly as the models drew them, no rail layer and no joining of roads")
+    parser.add_argument("--no-repairs", action="store_true", help="skip the repairs after the models: joining near misses, removing stubs, linking and dropping cut off pieces")
     parser.add_argument("--list", action="store_true", help="print the cities the models know and stop")
     args = parser.parse_args()
 
@@ -70,6 +71,7 @@ def main():
         building_samples=args.building_samples,
         building_batch=args.building_batch,
         transport_rules=not args.no_transport_rules,
+        repairs=not args.no_repairs,
         device=args.device,
         log=lambda text: print(text, flush=True),
     )

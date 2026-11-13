@@ -43,7 +43,7 @@ from urban_layers.data import (
     road_index,
     split_block,
 )
-from urban_layers.network import join_network
+from urban_layers.network import join_network, repair_network, repair_rail
 from urban_layers.plan import PlanNet, sample_pattern, sample_plan
 from urban_layers.rail import RAIL_WIDTH, TRACKS, heading_at, rail_corridors, rail_runs, rail_stations
 from urban_layers.streets import PLAN_CELLS, PORTS, SIDES, StreetModel, collate, condition_arrays, guide_crossings, plan_crop, port_key, snap_to_ports
@@ -715,6 +715,7 @@ def generate_city(
     building_batch=64,
     log=print,
     transport_rules=True,
+    repairs=True,
 ):
     started = time.time()
     plan_model, plan_checkpoint = models["plan"]
@@ -776,6 +777,7 @@ def generate_city(
     street_weights = style_weights(street_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in street_checkpoint["cities"]})
     area = box(0.0, 0.0, *size)
     corridors = []
+    mended = {}
     rules = ["plan totals"] if match else []
     rules += ["natural cover", "building clearance" if building_model.config.get("roads", False) else "building placement"]
     if models.get("trunk") is None and not transport_rules:
@@ -800,9 +802,16 @@ def generate_city(
         main, stops = generate_trunk(trunk_model, trunk_checkpoint, wide, trunk_weights, size, generator, temperature, top_p, device, log, margin=margin, pattern=known_pattern, guidance=corridor_guidance)
         km = lambda mode: sum(LineString(points).length for class_id, points in main if LINE_CLASSES[class_id][0] == mode) / 1000.0
         log(f"trunk: {km('rail'):.1f} km of rail, {km('road'):.1f} km of main road corridor, {time.time() - started:.0f}s")
+        if repairs:
+            main, mended = repair_rail(main)
         warmth = temperature if street_temperature is None else street_temperature
         lines = generate_streets(street_model, street_checkpoint, wide, street_weights, generator, warmth, top_p, device, log, given=main, offset=margin, pinned=street_checkpoint.get("pinned", False), pattern=known_pattern, guidance=pattern_guidance)
         streets = snap_lines(clip_lines(lines, size))
+        if repairs:
+            streets, road_mended = repair_network(streets, size, water_union)
+            mended.update(road_mended)
+            rules.append("road and rail repairs")
+            log(f"repairs: {mended.get('near_misses_joined', 0) + mended.get('ends_joined_ahead', 0)} ends joined, {mended.get('stubs_removed', 0)} stubs removed, {mended.get('links_added', 0)} links ({mended.get('link_km', 0.0):.1f} km), {mended.get('strays_dropped', 0)} strays dropped, {mended.get('rail_side_by_side_km', 0.0):.1f} km of rail drawn twice side by side taken out")
         runs = rail_lines(main)
         stations = place_stations(stops, runs)
         corridors = [(class_id, line) for class_id, points in main if LINE_CLASSES[class_id][0] == "road" for line in [LineString(points).intersection(area)] if line.geom_type == "LineString" and line.length > 1.0]
@@ -836,6 +845,7 @@ def generate_city(
         "sliders": {name: float(value) for name, value in sliders.items()},
         "controls": {channel: float(value) for channel, value in zip(CHANNELS, controls)},
         "rules": rules,
+        "repairs": mended,
         "placement": placement,
         "plan": {"cell_m": CELL, "channels": list(CHANNELS), "shape": list(plan.shape)},
         "roads": [],
