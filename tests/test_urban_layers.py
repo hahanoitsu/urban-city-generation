@@ -14,7 +14,7 @@ from urban_layers.city import generate_city, snap_lines
 from urban_layers.data import CHANNELS, LINE_CLASSES, TRUNK, build_city, line_class, load_cities, pool_plan
 from urban_layers.decoder import TokenDecoder, sequence_loss
 from urban_layers.plan import PlanCrops, PlanNet, plan_loss, plan_statistics, urban_cells
-from urban_layers.streets import D4, StreetDataset, StreetModel, collate, find_ports, guide_crossings, move_grid, move_points, order_lines, port_key
+from urban_layers.streets import D4, StreetDataset, StreetModel, collate, condition_arrays, find_ports, guide_crossings, move_grid, move_points, order_lines, port_key
 from urban_layers.tokens import BuildingTokens, StreetGrammar, StreetTokens
 
 
@@ -863,3 +863,17 @@ def test_a_pattern_map_can_be_drawn_from_a_plan():
     assert torch.isfinite(plan_loss(model, batch))
     drawn = sample_pattern(model, plans[0][:, :16, :16], np.ones(1, dtype=np.float32), np.zeros(len(PATTERN) + 1, dtype=np.float32), told_mean, told_std, mean, std, steps=2)
     assert drawn.shape == (len(PATTERN), 16, 16) and np.hypot(drawn[0], drawn[1]).max() <= 1.0 + 1e-5 and set(np.unique(drawn[2])) <= {0.0, 1.0}
+
+
+def test_plan_cells_far_apart_get_different_position_codes():
+    from urban_layers.decoder import fourier
+
+    crop = np.zeros((len(CHANNELS), 16, 16), dtype=np.float32)
+    spots = torch.from_numpy(condition_arrays(crop, [], [], np.ones(1, dtype=np.float32))["plan_xy"])
+    close = torch.unique(fourier(spots, 8).round(decimals=4), dim=0)
+    wide = torch.unique(fourier(spots / 2.0, 8).round(decimals=4), dim=0)
+    assert len(close) < len(spots) == len(wide)
+    small = torch.from_numpy(condition_arrays(crop[:, :8, :8], [], [], np.ones(1, dtype=np.float32))["plan_xy"])
+    assert len(torch.unique(fourier(small, 8).round(decimals=4), dim=0)) == len(small)
+    model = StreetModel(1, d=32, layers=1, heads=4, max_len=64, stations=True, exits=True, reach=2.0)
+    assert len(torch.unique(model.where(spots).detach().round(decimals=4), dim=0)) == len(spots)

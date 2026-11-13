@@ -356,9 +356,10 @@ class StreetDataset(torch.utils.data.Dataset):
 
 
 class StreetModel(nn.Module):
-    def __init__(self, cities, d=256, layers=6, heads=8, max_len=1536, bands=8, dropout=0.0, stations=False, exits=False, guided=False, pattern=False):
+    def __init__(self, cities, d=256, layers=6, heads=8, max_len=1536, bands=8, dropout=0.0, stations=False, exits=False, guided=False, pattern=False, reach=1.0):
         super().__init__()
-        self.config = {"cities": cities, "d": d, "layers": layers, "heads": heads, "max_len": max_len, "bands": bands, "dropout": dropout, "stations": stations, "exits": exits, "guided": guided, "pattern": pattern}
+        self.config = {"cities": cities, "d": d, "layers": layers, "heads": heads, "max_len": max_len, "bands": bands, "dropout": dropout, "stations": stations, "exits": exits, "guided": guided, "pattern": pattern, "reach": reach}
+        self.reach = reach
         self.tokens = StreetTokens(stations=stations, exits=exits)
         self.bands = bands
         self.guided = guided
@@ -370,23 +371,26 @@ class StreetModel(nn.Module):
         self.city = nn.Linear(cities, d)
         self.decoder = TokenDecoder(self.tokens.vocab, self.tokens.features(), d, layers, heads, max_len, dropout)
 
+    def where(self, xy):
+        return self.place(fourier(xy / self.reach, self.bands))
+
     def condition(self, batch):
         kinds = self.kind.weight
-        plan = self.plan(batch["plan"]) + self.place(fourier(batch["plan_xy"], self.bands)) + kinds[0]
+        plan = self.plan(batch["plan"]) + self.where(batch["plan_xy"]) + kinds[0]
         context = (
-            self.place(fourier(batch["context_xy"], self.bands))
+            self.where(batch["context_xy"])
             + self.line_class(batch["context_class"])
             + self.direction(batch["context_direction"])
             + kinds[1]
         )
-        ports = self.place(fourier(batch["port_xy"], self.bands)) + self.line_class(batch["port_class"]) + self.direction(batch["port_heading"]) + kinds[2]
+        ports = self.where(batch["port_xy"]) + self.line_class(batch["port_class"]) + self.direction(batch["port_heading"]) + kinds[2]
         city = (self.city(batch["city"]) + kinds[3])[:, None]
         memory = torch.cat([city, plan, context, ports], dim=1)
         batch_size = memory.shape[0]
         fixed = torch.zeros(batch_size, 1 + plan.shape[1], dtype=torch.bool, device=memory.device)
         padding = torch.cat([fixed, ~batch["context_mask"], ~batch["port_mask"]], dim=1)
         if self.guided:
-            guide = self.place(fourier(batch["guide_xy"], self.bands)) + self.line_class(batch["guide_class"]) + self.direction(batch["guide_direction"]) + kinds[4]
+            guide = self.where(batch["guide_xy"]) + self.line_class(batch["guide_class"]) + self.direction(batch["guide_direction"]) + kinds[4]
             memory = torch.cat([memory, guide], dim=1)
             padding = torch.cat([padding, ~batch["guide_mask"]], dim=1)
         return memory, padding
