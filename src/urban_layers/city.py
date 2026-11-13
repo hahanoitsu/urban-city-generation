@@ -704,6 +704,7 @@ def generate_city(
     known_mask=None,
     known_pattern=None,
     pattern_guidance=1.0,
+    corridor_guidance=1.0,
     map_guidance=3.0,
     street_temperature=None,
     match=True,
@@ -793,7 +794,7 @@ def generate_city(
     else:
         trunk_model, trunk_checkpoint = models["trunk"]
         trunk_weights = style_weights(trunk_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in trunk_checkpoint["cities"]})
-        main, stops = generate_trunk(trunk_model, trunk_checkpoint, wide, trunk_weights, size, generator, temperature, top_p, device, log, margin=margin, pattern=known_pattern, guidance=pattern_guidance)
+        main, stops = generate_trunk(trunk_model, trunk_checkpoint, wide, trunk_weights, size, generator, temperature, top_p, device, log, margin=margin, pattern=known_pattern, guidance=corridor_guidance)
         km = lambda mode: sum(LineString(points).length for class_id, points in main if LINE_CLASSES[class_id][0] == mode) / 1000.0
         log(f"trunk: {km('rail'):.1f} km of rail, {km('road'):.1f} km of main road corridor, {time.time() - started:.0f}s")
         warmth = temperature if street_temperature is None else street_temperature

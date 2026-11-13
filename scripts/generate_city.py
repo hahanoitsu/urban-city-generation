@@ -35,6 +35,7 @@ def main():
     parser.add_argument("--plan-steps", type=int, default=50)
     parser.add_argument("--guidance", type=float, default=1.5)
     parser.add_argument("--pattern-guidance", type=float, default=1.0, help="how hard the streets follow the pattern map, 1 is as trained")
+    parser.add_argument("--corridor-guidance", type=float, default=1.0, help="how hard the corridors follow the plan's main road and rail cells, 1 is as trained")
     parser.add_argument("--map-guidance", type=float, default=3.0, help="guidance when the pattern map itself is drawn")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--street-temperature", type=float, help="temperature for the street model alone, lower gives more regular streets")
@@ -61,6 +62,7 @@ def main():
         plan_steps=args.plan_steps,
         guidance=args.guidance,
         pattern_guidance=args.pattern_guidance,
+        corridor_guidance=args.corridor_guidance,
         map_guidance=args.map_guidance,
         street_temperature=args.street_temperature,
         temperature=args.temperature,
