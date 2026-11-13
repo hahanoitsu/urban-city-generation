@@ -144,6 +144,14 @@ def test_main_road_corridors_leave_out_ramps_and_merge_twin_carriageways():
     assert sorted(round(geometry.length) for geometry in main) == [400, 900, 1100, 1800, 2000]
     assert next(geometry for geometry in main if round(geometry.length) == 400).coords[0] == (500.0, 300.0)
     assert len([1 for class_id, _geometry, _width in guide if LINE_CLASSES[class_id][0] == "rail"]) == 1
+    from urban_layers.data import is_trunk, trunk_tiles
+
+    local = line_class("road", "local", "surface")
+    assert not is_trunk(local) and is_trunk(local, ("major", "local")) and is_trunk(line_class("rail", "subway", "elevated"), ("local",))
+    wider = guide_lines(layers, lines, ("major", "local"))
+    assert sorted(round(geometry.length) for class_id, geometry, _width in wider if class_id == local) == [2000] and len(wider) == len(guide) + 1
+    classes = lambda roads: {class_id for tile in trunk_tiles(wider, (0.0, 0.0, 2048.0, 2048.0), roads=roads) for class_id, _points in tile["targets"]}
+    assert local in classes(("major", "local")) and local not in classes(("major",))
     tiles = street_tiles([line for line in lines if LINE_CLASSES[line[0]][0] == "road"], (0.0, 0.0, 2048.0, 2048.0), guide=guide)
     tile = next(tile for tile in tiles if tile["origin"] == (512.0, 0.0))
     assert {LINE_CLASSES[class_id][1] for class_id, _points in tile["targets"]} == {"major"}
@@ -498,6 +506,12 @@ def test_main_roads_are_kept_as_the_corridor_model_drew_them():
     assert any(class_id != major for class_id, _points, _joins in lines)
     ends = np.asarray([points[slot] for class_id, points, _joins in lines if class_id == major for slot in (0, -1)])
     assert (np.hypot(ends[:, 0] - 512.0, ends[:, 1] - 500.0) < 1.0).sum() == 2
+    secondary = line_class("road", "secondary", "surface")
+    given = given[:2] + [(secondary, np.array([[0.0, 900.0], [1024.0, 900.0]]))]
+    lines = generate_streets(model, checkpoint, plan, np.ones(1, dtype=np.float32), torch.Generator().manual_seed(0), given=given, pinned=True, keep_main=True, kept=("major", "secondary"), log=lambda _text: None)
+    assert abs(sum(LineString(points).length for class_id, points, _joins in lines if class_id == secondary) - 1024.0) < 2.0
+    assert all(abs(points[:, 1] - 900.0).max() < 1.0 for class_id, points, _joins in lines if class_id == secondary)
+    assert {LINE_CLASSES[class_id][1] for class_id, _points, _joins in lines} == {"major", "secondary", "local"}
 
 
 @pytest.mark.parametrize("max_len", [40, 512])

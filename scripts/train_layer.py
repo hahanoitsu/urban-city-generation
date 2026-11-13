@@ -63,6 +63,7 @@ def main():
     parser.add_argument("--pattern", action="store_true", help="streets and trunk: also show the model the street pattern map")
     parser.add_argument("--reach", type=float, default=1.0, help="trunk: tile widths over which the position code stays unique, 2 for 16 plan cells")
     parser.add_argument("--loose", nargs="*", default=[], help="trunk: plan channels that are sometimes shown as an amount only, so sampling can be pushed toward where they are")
+    parser.add_argument("--roads", nargs="+", default=["major"], help="trunk: road classes in the corridor tiles of the data folder, kept with the model so generation knows what it draws")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -151,7 +152,7 @@ def main():
             model = StreetModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout, stations=True, exits=True, pattern=args.pattern, reach=args.reach)
             train_set = StreetDataset(train_items, coarse, len(cities), scale, augment=not args.overfit, max_len=args.max_len, stations=True, plan_cells=args.plan_cells, spread=args.spread, exits=True, patterns=patterns, loose=args.loose)
             validation_set = StreetDataset(validation_items, coarse, len(cities), scale, augment=False, max_len=args.max_len, stations=True, plan_cells=args.plan_cells, spread=args.spread, exits=True, patterns=patterns)
-            extra = {"scale": scale, "unit": TRUNK, "plan_cells": args.plan_cells, "spread": args.spread, "loose": args.loose}
+            extra = {"scale": scale, "unit": TRUNK, "plan_cells": args.plan_cells, "spread": args.spread, "loose": args.loose, "roads": args.roads}
         else:
             model = BuildingModel(len(cities), args.d, args.layers, args.heads, args.max_len, dropout=0.0 if args.overfit else args.dropout, roads=True)
             train_set = BuildingDataset(train_items, len(cities), scale, augment=not args.overfit, max_len=args.max_len)
@@ -166,7 +167,8 @@ def main():
         for key, value in model.state_dict().items():
             if key in state and state[key].shape != value.shape:
                 wide = torch.zeros_like(value)
-                wide[:, : state[key].shape[1]] = state[key]
+                part = tuple(slice(0, min(old, new)) for old, new in zip(state[key].shape, value.shape))
+                wide[part] = state[key][part]
                 state[key] = wide
         model.load_state_dict(state)
     model = model.to(device)

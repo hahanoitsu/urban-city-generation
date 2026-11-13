@@ -59,9 +59,9 @@ def line_class(mode, name, level):
     return LINE_CLASSES.index((mode, name, level))
 
 
-def is_trunk(class_id):
+def is_trunk(class_id, roads=("major",)):
     mode, name, _level = LINE_CLASSES[class_id]
-    return name == "major" if mode == "road" else name != "tram"
+    return name in roads if mode == "road" else name != "tram"
 
 
 def corridor(points, reach):
@@ -320,11 +320,11 @@ def rail_corridors(lines, gap=12.0):
     return merge_corridors(lines, is_rail_trunk, gap)
 
 
-def guide_lines(layers, lines):
-    return main_corridors(layers) + [line for line in rail_corridors(lines) if is_rail_trunk(line[0])]
+def guide_lines(layers, lines, roads=("major",)):
+    return [line for name in roads for line in main_corridors(layers, name=name)] + [line for line in rail_corridors(lines) if is_rail_trunk(line[0])]
 
 
-def main_corridors(layers, reach=40.0, share=0.7, step=20.0):
+def main_corridors(layers, reach=40.0, share=0.7, step=20.0, name="major"):
     if layers.roads.empty:
         return []
     frame = layers.roads.explode(index_parts=False)
@@ -338,13 +338,13 @@ def main_corridors(layers, reach=40.0, share=0.7, step=20.0):
     for position, geometry in enumerate(frame.geometry):
         if geometry is None or geometry.is_empty or geometry.geom_type != "LineString" or geometry.length < 1.0:
             continue
-        if names.iloc[position] != "major" or tags.iloc[position].endswith("_link"):
+        if names.iloc[position] != name or tags.iloc[position].endswith("_link"):
             continue
         line = LineString(np.asarray(geometry.coords)[:, :2])
         way = ways.iloc[position]
         single = way in ("yes", "true", "1", "-1") or (tags.iloc[position] == "motorway" and way not in ("no", "false", "0"))
         heading = np.subtract(line.coords[-1], line.coords[0]) * (-1.0 if way == "-1" else 1.0)
-        item = (line_class("road", "major", levels.iloc[position]), line, 0.0)
+        item = (line_class("road", name, levels.iloc[position]), line, 0.0)
         (spare if single and float(heading @ axis) < 0.0 else keep).append(item)
     if keep and spare:
         tree = STRtree([line for _class_id, line, _width in keep])
@@ -510,8 +510,8 @@ def add_stops(tiles, stations, unit, reach=80.0, same=1.0):
     return tiles
 
 
-def trunk_tiles(lines, bounds, stations=(), unit=TRUNK, stride=TILE / 2):
-    small = [(class_id, affinity.scale(geometry, 1.0 / unit, 1.0 / unit, origin=(0, 0)), width) for class_id, geometry, width in lines if is_trunk(class_id)]
+def trunk_tiles(lines, bounds, stations=(), unit=TRUNK, stride=TILE / 2, roads=("major",)):
+    small = [(class_id, affinity.scale(geometry, 1.0 / unit, 1.0 / unit, origin=(0, 0)), width) for class_id, geometry, width in lines if is_trunk(class_id, roads)]
     if not small:
         return []
     tiles = street_tiles(small, tuple(value / unit for value in bounds), stride)
@@ -943,6 +943,24 @@ def build_city(gpkg, name, output, stride=TILE):
         "channel_means": {channel: float(plan[index].mean()) for index, channel in enumerate(CHANNELS)},
     }
     summary.update(token_lengths(tiles, blocks, trunk))
+    (folder / "meta.json").write_text(json.dumps(summary, indent=2) + "\n")
+    return summary
+
+
+def build_trunk(gpkg, name, source, output, roads=("major", "secondary")):
+    layers, _metadata = load_city_gpkg(gpkg)
+    lines = [line for line in city_lines(layers) if LINE_CLASSES[line[0]][1] != "tram"]
+    before = Path(source) / name
+    bounds = tuple(np.load(before / "plan.npz")["bounds"].tolist())
+    stations = np.load(before / "stations.npy")
+    trunk = trunk_tiles(guide_lines(layers, lines, roads), bounds, stations[stations[:, 2] != RAIL_CLASSES.index("tram")], roads=roads)
+    folder = Path(output) / name
+    folder.mkdir(parents=True, exist_ok=True)
+    for item in ("plan.npz", "stations.npy", "pattern.npy"):
+        (folder / item).write_bytes((before / item).read_bytes())
+    torch.save(trunk, folder / "trunk.pt")
+    summary = json.loads((before / "meta.json").read_text())
+    summary.update({"trunk_tiles": len(trunk), "trunk_roads": list(roads), "trunk_tokens": token_lengths([], [], trunk)["trunk_tokens"]})
     (folder / "meta.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
 

@@ -134,17 +134,17 @@ def find_ports(lines, visible, corridors=(), near=6.0):
     return ports
 
 
-def is_main_road(class_id):
-    return LINE_CLASSES[class_id][:2] == ("road", "major")
+def is_main_road(class_id, names=("major",)):
+    return LINE_CLASSES[class_id][0] == "road" and LINE_CLASSES[class_id][1] in names
 
 
-def laid_lines(given, tree, origin, tokens):
+def laid_lines(given, tree, origin, tokens, names=("major",)):
     x0, y0 = origin
     area = box(x0, y0, x0 + TILE, y0 + TILE)
     lines = []
     for index in tree.query(area, predicate="intersects"):
         class_id, line, _width = given[index]
-        if not is_main_road(class_id):
+        if not is_main_road(class_id, names):
             continue
         piece = line.intersection(area)
         for part in getattr(piece, "geoms", [piece]):

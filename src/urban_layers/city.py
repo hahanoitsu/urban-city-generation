@@ -238,7 +238,7 @@ def to_edge(points, reach=4.0, visible=(), joins=(False, False)):
     return points
 
 
-def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets", offset=0, pinned=False, pattern=None, guidance=1.0, at_once=8, keep_main=False):
+def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets", offset=0, pinned=False, pattern=None, guidance=1.0, at_once=8, keep_main=False, kept=("major",)):
     spread = [CHANNELS.index(channel) for channel in checkpoint.get("spread", ())]
     hidden = [CHANNELS.index(channel) for channel in checkpoint.get("hidden", ())]
     loose = [CHANNELS.index(channel) for channel in checkpoint.get("loose", ())] if guidance != 1.0 else []
@@ -248,8 +248,10 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
     per_tile = int(round(TILE / CELL))
     if given is not None:
         given = [(class_id, LineString(points), 0.0) for class_id, points in given]
-        guide_tree = STRtree([geometry for _class_id, geometry, _width in given]) if given else None
-        classes = [mode == "road" and not (keep_main and name == "major") for mode, name, _level in LINE_CLASSES]
+        guides = [line for line in given if is_trunk(line[0])]
+        guide_tree = STRtree([geometry for _class_id, geometry, _width in guides]) if guides else None
+        given_tree = STRtree([geometry for _class_id, geometry, _width in given]) if given else None
+        classes = [mode == "road" and not (keep_main and name in kept) for mode, name, _level in LINE_CLASSES]
     elif classes is None and not rail:
         plan = plan.copy()
         plan[CHANNELS.index("rail")] = 0.0
@@ -283,11 +285,11 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
             script = ([], 0)
             if given:
                 window = box(column * TILE - MARGIN, row * TILE - MARGIN, (column + 1) * TILE + MARGIN, (row + 1) * TILE + MARGIN)
-                corridors = guide_pieces(given, guide_tree, window, (column * TILE, row * TILE))
+                corridors = guide_pieces(guides, guide_tree, window, (column * TILE, row * TILE)) if guides else []
                 if keep_main:
-                    laid = laid_lines(given, guide_tree, (column * TILE, row * TILE), model.tokens)
+                    laid = laid_lines(given, given_tree, (column * TILE, row * TILE), model.tokens, kept)
                     entries = end_ports(laid)[:PORTS]
-                    ports = (entries + [port for port in ports if not is_main_road(port[4])])[:PORTS]
+                    ports = (entries + [port for port in ports if not is_main_road(port[4], kept)])[:PORTS]
                     if laid:
                         script = (model.tokens.encode(order_lines(laid, visible, ports, exits=model.tokens.exit is not None))[1:-1], len(entries))
                 elif pinned:
@@ -383,7 +385,7 @@ def place_stations(stops, runs, reach=100.0, same=60.0, touch=1.0):
 
 def generate_trunk(model, checkpoint, plan, weights, size, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, margin=0, pattern=None, guidance=1.0):
     unit = float(checkpoint["unit"])
-    classes = [is_trunk(class_id) for class_id in range(len(LINE_CLASSES))]
+    classes = [is_trunk(class_id, tuple(checkpoint.get("roads", ("major",)))) for class_id in range(len(LINE_CLASSES))]
     told = None if pattern is None else pool_plan(pattern, unit)
     lines, stops = generate_streets(model, checkpoint, pool_plan(plan, unit), weights, generator, temperature, top_p, device, log, classes=classes, plan_cells=int(checkpoint.get("plan_cells", PLAN_CELLS)), name="trunk", offset=int(margin // unit), pattern=told, guidance=guidance)
     snapped = snap_lines(clip_lines(lines, (size[0] / unit, size[1] / unit)))
@@ -823,7 +825,7 @@ def generate_city(
         if repairs:
             main, mended = repair_rail(main)
         warmth = temperature if street_temperature is None else street_temperature
-        lines = generate_streets(street_model, street_checkpoint, wide, street_weights, generator, warmth, top_p, device, log, given=main, offset=margin, pinned=street_checkpoint.get("pinned", False), pattern=known_pattern, guidance=pattern_guidance, keep_main=keep_main)
+        lines = generate_streets(street_model, street_checkpoint, wide, street_weights, generator, warmth, top_p, device, log, given=main, offset=margin, pinned=street_checkpoint.get("pinned", False), pattern=known_pattern, guidance=pattern_guidance, keep_main=keep_main, kept=tuple(trunk_checkpoint.get("roads", ("major",))))
         streets = snap_lines(clip_lines(lines, size))
         if repairs:
             streets, road_mended = repair_network(streets, size, water_union)
@@ -832,7 +834,7 @@ def generate_city(
             log(f"repairs: {mended.get('near_misses_joined', 0) + mended.get('ends_joined_ahead', 0)} ends joined, {mended.get('stubs_removed', 0)} stubs removed, {mended.get('links_added', 0)} links ({mended.get('link_km', 0.0):.1f} km), {mended.get('strays_dropped', 0)} strays dropped, {mended.get('rail_side_by_side_km', 0.0):.1f} km of rail drawn twice side by side taken out")
         runs = rail_lines(main)
         stations = place_stations(stops, runs)
-        corridors = [(class_id, line) for class_id, points in main if LINE_CLASSES[class_id][0] == "road" for line in [LineString(points).intersection(area)] if line.geom_type == "LineString" and line.length > 1.0]
+        corridors = [(class_id, line) for class_id, points in main if is_main_road(class_id) for line in [LineString(points).intersection(area)] if line.geom_type == "LineString" and line.length > 1.0]
         log(f"rail: {len(runs)} pieces, {len(stations)} stations")
     lines = streets + [(class_id, points) for class_id, points, _number in runs]
     roads_frame, rail_frame, graph = lines_to_layers(lines, *size)
