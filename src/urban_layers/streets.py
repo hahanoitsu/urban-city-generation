@@ -83,7 +83,7 @@ def port_key(port):
     return side, round(port[1] if side in (0, 2) else port[0], 3)
 
 
-def guide_crossings(corridors, visible, reach=8.0):
+def guide_crossings(corridors, visible, reach=8.0, same=2.0):
     edge = box(0.0, 0.0, TILE, TILE).exterior
     found = []
     for class_id, points in corridors:
@@ -103,8 +103,9 @@ def guide_crossings(corridors, visible, reach=8.0):
             if step @ np.asarray(SIDES[side]) > 0:
                 step = -step
             length = np.linalg.norm(step)
-            if length > 1e-6:
-                found.append((float(point[0]), float(point[1]), float(step[0] / length), float(step[1] / length), class_id))
+            if length <= 1e-6 or any(other[4] == class_id and np.hypot(other[0] - point[0], other[1] - point[1]) < same for other in found):
+                continue
+            found.append((float(point[0]), float(point[1]), float(step[0] / length), float(step[1] / length), class_id))
     return found
 
 

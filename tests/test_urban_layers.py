@@ -161,6 +161,8 @@ def test_main_road_corridors_leave_out_ramps_and_merge_twin_carriageways():
     crossings = guide_crossings(tile["corridors"], done)
     assert sorted((x, y) for x, y, *_rest in crossings) == [(488.0, 512.0), (512.0, 300.0)]
     assert all(hx < -0.9 if x == 512.0 else hy < -0.9 for x, y, hx, hy, _class_id in crossings)
+    halves = [(crossings[0][4], np.array([[300.0, 300.0], [512.0, 300.0]])), (crossings[0][4], np.array([[512.0, 300.0], [600.0, 300.0]]))]
+    assert len(guide_crossings(halves, done)) == 1
     plain = find_ports(tile["targets"], done)
     pinned = find_ports(tile["targets"], done, tile["corridors"])
     assert len(plain) == 3 and sorted(set(pinned) - set(plain)) == [(488.0, 512.0, 0.0, -1.0, crossings[0][4]), (512.0, 300.0, -1.0, 0.0, crossings[0][4])]
