@@ -43,15 +43,16 @@ class Residual(nn.Module):
 
 
 class PlanNet(nn.Module):
-    def __init__(self, cities, channels=len(CHANNELS), width=64, condition=256):
+    def __init__(self, cities, channels=len(CHANNELS), width=64, condition=256, given=0, controls=None):
         super().__init__()
-        self.config = {"cities": cities, "channels": channels, "width": width, "condition": condition}
+        controls = channels if controls is None else controls
+        self.config = {"cities": cities, "channels": channels, "width": width, "condition": condition, "given": given, "controls": controls}
         self.cities = cities
         self.time = nn.Sequential(nn.Linear(condition, condition), nn.SiLU(), nn.Linear(condition, condition))
         self.city = nn.Linear(cities, condition)
-        self.controls = nn.Sequential(nn.Linear(channels + 1, condition), nn.SiLU(), nn.Linear(condition, condition))
+        self.controls = nn.Sequential(nn.Linear(controls + 1, condition), nn.SiLU(), nn.Linear(condition, condition))
         widths = [width, width * 2, width * 4]
-        self.stem = nn.Conv2d(channels, width, 3, padding=1)
+        self.stem = nn.Conv2d(channels + given, width, 3, padding=1)
         self.down = nn.ModuleList()
         current = width
         for level, size in enumerate(widths):
@@ -67,10 +68,10 @@ class PlanNet(nn.Module):
         self.head = nn.Sequential(nn.GroupNorm(8, width), nn.SiLU(), nn.Conv2d(width, channels, 3, padding=1))
         self.condition_size = condition
 
-    def forward(self, x, time, city, controls, has_controls):
+    def forward(self, x, time, city, controls, has_controls, given=None):
         condition = self.time(time_features(time, self.condition_size)) + self.city(city)
         condition = condition + self.controls(torch.cat([controls * has_controls[:, None], has_controls[:, None]], dim=1))
-        h = self.stem(x)
+        h = self.stem(x if given is None else torch.cat([x, given], dim=1))
         skips = []
         for level, blocks in enumerate(self.down):
             for block in blocks:
@@ -108,7 +109,7 @@ class PlanCrops(torch.utils.data.Dataset):
     def __len__(self):
         return self.length
 
-    def __getitem__(self, index):
+    def place(self):
         city = int(np.random.choice(len(self.plans), p=self.weights))
         plan = self.plans[city]
         size = self.size
@@ -117,18 +118,63 @@ class PlanCrops(torch.utils.data.Dataset):
             column = random.randint(0, max(plan.shape[2] - size, 0))
             if self.keep is None or self.keep[city][row : row + size, column : column + size].mean() > 0.5:
                 break
+        return city, row, column, random.randint(0, 3), random.random() < 0.5
+
+    def cut(self, plan, row, column, turns, mirror):
+        size = self.size
         crop = np.zeros((plan.shape[0], size, size), dtype=np.float32)
         piece = plan[:, row : row + size, column : column + size]
         crop[:, : piece.shape[1], : piece.shape[2]] = piece
-        crop = np.rot90(crop, random.randint(0, 3), axes=(1, 2))
-        if random.random() < 0.5:
+        crop = np.rot90(crop, turns, axes=(1, 2))
+        if mirror:
             crop = crop[:, :, ::-1]
-        crop = np.ascontiguousarray(crop)
+        return np.ascontiguousarray(crop)
+
+    def __getitem__(self, index):
+        city, row, column, turns, mirror = self.place()
+        crop = self.cut(self.plans[city], row, column, turns, mirror)
         controls = crop.mean(axis=(1, 2)) * self.control_scale
         normalised = (crop - self.mean[:, None, None]) / self.std[:, None, None]
         one_hot = np.zeros(len(self.plans), dtype=np.float32)
         one_hot[city] = 1.0
         return {"plan": normalised.astype(np.float32), "controls": controls.astype(np.float32), "city": one_hot}
+
+
+def coarse(plan, factor=4):
+    channels, height, width = plan.shape
+    padded = np.pad(plan, ((0, 0), (0, -height % factor), (0, -width % factor)), mode="edge")
+    pooled = padded.reshape(channels, padded.shape[1] // factor, factor, padded.shape[2] // factor, factor).mean(axis=(2, 4))
+    return np.repeat(np.repeat(pooled, factor, axis=1), factor, axis=2)[:, :height, :width]
+
+
+def pattern_controls(pattern, keep=None):
+    cells = pattern.reshape(pattern.shape[0], -1) if keep is None else pattern[:, keep]
+    known = cells[2] > 0.5
+    strength = float(np.hypot(cells[0], cells[1])[known].mean()) if known.any() else 0.0
+    return np.asarray([cells[0].mean(), cells[1].mean(), cells[2].mean(), strength], dtype=np.float32)
+
+
+class PatternCrops(PlanCrops):
+    def __init__(self, patterns, plans, mean, std, given_mean, given_std, size=64, length=4096, keep=None):
+        super().__init__(patterns, mean, std, np.ones(len(mean), dtype=np.float32), size, length, keep)
+        self.given = plans
+        self.given_mean = given_mean
+        self.given_std = given_std
+
+    def __getitem__(self, index):
+        city, row, column, turns, mirror = self.place()
+        crop = self.cut(self.plans[city], row, column, turns, mirror)
+        if mirror:
+            crop[1] = -crop[1]
+        given = coarse(self.cut(self.given[city], row, column, turns, mirror))
+        one_hot = np.zeros(len(self.plans), dtype=np.float32)
+        one_hot[city] = 1.0
+        return {
+            "plan": ((crop - self.mean[:, None, None]) / self.std[:, None, None]).astype(np.float32),
+            "given": ((given - self.given_mean[:, None, None]) / self.given_std[:, None, None]).astype(np.float32),
+            "controls": pattern_controls(crop),
+            "city": one_hot,
+        }
 
 
 def plan_loss(model, batch, drop=0.15):
@@ -141,7 +187,7 @@ def plan_loss(model, batch, drop=0.15):
     target = alpha[:, None, None, None] * noise - sigma[:, None, None, None] * x
     keep_city = (torch.rand(size, device=x.device) > drop).float()
     has_controls = (torch.rand(size, device=x.device) > drop).float()
-    prediction = model(noisy, time, batch["city"] * keep_city[:, None], batch["controls"], has_controls)
+    prediction = model(noisy, time, batch["city"] * keep_city[:, None], batch["controls"], has_controls, batch.get("given"))
     return F.mse_loss(prediction, target)
 
 
@@ -165,7 +211,7 @@ def match_means(plan, wanted, rounds=4):
 
 
 @torch.no_grad()
-def sample_plan(model, height, width, city, controls, mean, std, steps=50, guidance=1.5, generator=None, known=None, known_mask=None, wanted=None):
+def denoise(model, height, width, city, controls, mean, std, steps=50, guidance=1.5, generator=None, known=None, known_mask=None, given=None):
     device = next(model.parameters()).device
     channels = model.config["channels"]
     city = torch.as_tensor(city, dtype=torch.float32, device=device)[None]
@@ -184,9 +230,9 @@ def sample_plan(model, height, width, city, controls, mean, std, steps=50, guida
         following = times[index + 1].reshape(1)
         alpha, sigma = coefficients(time)
         next_alpha, next_sigma = coefficients(following)
-        conditioned = model(x, time, city, controls, on)
+        conditioned = model(x, time, city, controls, on, given)
         if guidance != 1.0:
-            free = model(x, time, torch.zeros_like(city), controls, off)
+            free = model(x, time, torch.zeros_like(city), controls, off, given)
             velocity = free + guidance * (conditioned - free)
         else:
             velocity = conditioned
@@ -196,14 +242,29 @@ def sample_plan(model, height, width, city, controls, mean, std, steps=50, guida
         if known is not None:
             fresh = torch.randn(x.shape, device=device, generator=generator)
             x = known_mask * (next_alpha * known + next_sigma * fresh) + (1 - known_mask) * x
-    plan = x[0] * std_t[0] + mean_t[0]
-    plan = plan.clamp_min(0.0)
+    return x[0] * std_t[0] + mean_t[0]
+
+
+def sample_plan(model, height, width, city, controls, mean, std, steps=50, guidance=1.5, generator=None, known=None, known_mask=None, wanted=None):
+    plan = denoise(model, height, width, city, controls, mean, std, steps, guidance, generator, known, known_mask).clamp_min(0.0)
     fractions = [CHANNELS.index(name) for name in FRACTIONS]
     plan[fractions] = plan[fractions].clamp_max(1.0)
     plan = plan.cpu().numpy()
     if wanted is not None:
         plan = match_means(plan, wanted)
     return plan
+
+
+def sample_pattern(model, plan, city, controls, mean, std, given_mean, given_std, steps=50, guidance=1.5, generator=None):
+    device = next(model.parameters()).device
+    shift = torch.as_tensor(given_mean, dtype=torch.float32, device=device)[:, None, None]
+    scale = torch.as_tensor(given_std, dtype=torch.float32, device=device)[:, None, None]
+    given = ((torch.as_tensor(coarse(plan), dtype=torch.float32, device=device) - shift) / scale)[None]
+    pattern = denoise(model, plan.shape[1], plan.shape[2], city, controls, mean, std, steps, guidance, generator, given=given).cpu().numpy()
+    known = pattern[2] > 0.5
+    pattern[:2] = pattern[:2] / np.maximum(np.hypot(pattern[0], pattern[1]), 1.0) * known
+    pattern[2] = known
+    return pattern.astype(np.float32)
 
 
 def urban_cells(plan, reach=2):

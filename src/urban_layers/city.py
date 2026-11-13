@@ -25,6 +25,7 @@ from urban_layers.data import (
     CHANNELS,
     LANDUSE,
     LINE_CLASSES,
+    PATTERN,
     TILE,
     MARGIN,
     block_record,
@@ -43,7 +44,7 @@ from urban_layers.data import (
     split_block,
 )
 from urban_layers.network import join_network
-from urban_layers.plan import PlanNet, sample_plan
+from urban_layers.plan import PlanNet, sample_pattern, sample_plan
 from urban_layers.rail import RAIL_WIDTH, TRACKS, heading_at, rail_corridors, rail_runs, rail_stations
 from urban_layers.streets import PLAN_CELLS, PORTS, SIDES, StreetModel, collate, condition_arrays, guide_crossings, plan_crop, port_key, snap_to_ports
 from urban_model.structured_city_data import BUILDING_KINDS
@@ -69,7 +70,7 @@ SETBACKS = {"major": 6.0, "secondary": 4.0, "local": 3.0}
 def load_layer(path, device="cpu"):
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     layer = checkpoint["layer"]
-    if layer == "plan":
+    if layer in ("plan", "pattern"):
         model = PlanNet(**checkpoint["config"])
     elif layer in ("streets", "trunk"):
         model = StreetModel(**checkpoint["config"])
@@ -237,7 +238,7 @@ def to_edge(points, reach=4.0, visible=(), joins=(False, False)):
     return points
 
 
-def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets", offset=0, pinned=False):
+def generate_streets(model, checkpoint, plan, weights, generator=None, temperature=1.0, top_p=0.95, device="cpu", log=print, rail=False, classes=None, plan_cells=PLAN_CELLS, given=None, name="streets", offset=0, pinned=False, pattern=None, guidance=1.0):
     spread = [CHANNELS.index(channel) for channel in checkpoint.get("spread", ())]
     hidden = [CHANNELS.index(channel) for channel in checkpoint.get("hidden", ())]
     rows = math.ceil((plan.shape[1] - 2 * offset) * CELL / TILE)
@@ -265,6 +266,11 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
                 crop[spread] = crop[spread].mean(axis=(1, 2), keepdims=True)
             if hidden:
                 crop[hidden] = 0.0
+            if model.config.get("pattern", False):
+                told = np.zeros((len(PATTERN), plan_cells, plan_cells), dtype=np.float32)
+                if pattern is not None:
+                    told = plan_crop(pattern, row * per_tile + offset, column * per_tile + offset, size=plan_cells)
+                crop = np.concatenate([crop, told])
             corridors = []
             if given:
                 window = box(column * TILE - MARGIN, row * TILE - MARGIN, (column + 1) * TILE + MARGIN, (row + 1) * TILE + MARGIN)
@@ -275,7 +281,7 @@ def generate_streets(model, checkpoint, plan, weights, generator=None, temperatu
             meta.append((ports, visible))
         arrays = {name: value.to(device) for name, value in collate(items).items()}
         arrays["sides"] = torch.tensor([[SIDES[side] in visible for side in range(4)] for _ports, visible in meta], dtype=torch.bool, device=device)
-        results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, classes=classes)
+        results = model.generate(arrays, temperature=temperature, top_p=top_p, generator=generator, classes=classes, guidance=guidance)
         for (row, column), lines, (ports, visible) in zip(batch, results, meta):
             snapped = snap_to_ports(lines, ports)
             done[(row, column)] = [(class_id, to_edge(points, visible=visible, joins=joins), joins) for class_id, points, joins, *_rest in snapped]
@@ -686,6 +692,10 @@ def generate_city(
     device="cpu",
     known_plan=None,
     known_mask=None,
+    known_pattern=None,
+    pattern_guidance=1.0,
+    map_guidance=3.0,
+    street_temperature=None,
     match=True,
     building_samples=4,
     building_batch=64,
@@ -707,6 +717,8 @@ def generate_city(
     if margin and known_plan is not None:
         known_plan = np.pad(known_plan, ((0, 0), (margin, margin), (margin, margin)))
         known_mask = np.pad(known_mask, ((margin, margin), (margin, margin)))
+    if known_pattern is not None:
+        known_pattern = np.pad(known_pattern, ((0, 0), (margin, margin), (margin, margin)))
     wide = sample_plan(
         plan_model,
         height + 2 * margin,
@@ -723,6 +735,23 @@ def generate_city(
         wanted=controls if match else None,
     )
     plan = wide[:, margin : margin + height, margin : margin + width]
+    if known_pattern is None and models.get("pattern") is not None:
+        pattern_model, pattern_checkpoint = models["pattern"]
+        pattern_weights = style_weights(pattern_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in pattern_checkpoint["cities"]})
+        told = sum(weight * np.asarray(values, dtype=np.float32) for weight, values in zip(pattern_weights, pattern_checkpoint["city_controls"]))
+        known_pattern = sample_pattern(
+            pattern_model,
+            wide,
+            pattern_weights,
+            told,
+            pattern_checkpoint["mean"],
+            pattern_checkpoint["std"],
+            pattern_checkpoint["given_mean"],
+            pattern_checkpoint["given_std"],
+            steps=plan_steps,
+            guidance=map_guidance,
+            generator=torch.Generator(device=device).manual_seed(int(seed) + 1),
+        )
     size = (width * CELL, height * CELL)
     log(f"plan: {height} x {width} cells, {time.time() - started:.0f}s")
     water = plan_polygons(plan, "water")
@@ -757,7 +786,8 @@ def generate_city(
         main, stops = generate_trunk(trunk_model, trunk_checkpoint, wide, trunk_weights, size, generator, temperature, top_p, device, log, margin=margin)
         km = lambda mode: sum(LineString(points).length for class_id, points in main if LINE_CLASSES[class_id][0] == mode) / 1000.0
         log(f"trunk: {km('rail'):.1f} km of rail, {km('road'):.1f} km of main road corridor, {time.time() - started:.0f}s")
-        lines = generate_streets(street_model, street_checkpoint, wide, street_weights, generator, temperature, top_p, device, log, given=main, offset=margin, pinned=street_checkpoint.get("pinned", False))
+        warmth = temperature if street_temperature is None else street_temperature
+        lines = generate_streets(street_model, street_checkpoint, wide, street_weights, generator, warmth, top_p, device, log, given=main, offset=margin, pinned=street_checkpoint.get("pinned", False), pattern=known_pattern, guidance=pattern_guidance)
         streets = snap_lines(clip_lines(lines, size))
         runs = rail_lines(main)
         stations = place_stations(stops, runs)

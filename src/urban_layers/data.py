@@ -47,6 +47,7 @@ VERTICAL = ("surface", "elevated", "underground", "unknown")
 LINE_CLASSES = [("road", name, level) for name in ROAD_CLASSES for level in VERTICAL] + [
     ("rail", name, level) for name in RAIL_CLASSES for level in VERTICAL
 ]
+PATTERN = ("grid_x", "grid_y", "grid_known")
 LANDUSE = ("none", "residential", "commercial", "industrial", "civic", "green")
 LANDUSE_SOURCE = {"residential": 1, "commercial_mixed": 2, "industrial": 3, "civic": 4, "green": 5}
 
@@ -570,6 +571,39 @@ def street_tiles(lines, bounds, stride=TILE, minimum_length=40.0, guide=None):
     return tiles
 
 
+def street_pattern(tiles, shape, window=5, step=32.0, least=200.0):
+    total = np.zeros((3, *shape), dtype=np.float64)
+    for tile in tiles:
+        row, column = tile["cell"]
+        for _class_id, points in tile["targets"]:
+            points = np.asarray(points, dtype=np.float64)
+            move = np.diff(points, axis=0)
+            length = np.hypot(move[:, 0], move[:, 1])
+            keep = length > 1e-6
+            if not keep.any():
+                continue
+            start, move, length = points[:-1][keep], move[keep], length[keep]
+            count = np.maximum(np.ceil(length / step), 1).astype(int)
+            index = np.repeat(np.arange(len(count)), count)
+            part = (np.concatenate([np.arange(value) for value in count]) + 0.5) / count[index]
+            middle = start[index] + move[index] * part[:, None]
+            turn = 4.0 * np.arctan2(move[index, 1], move[index, 0])
+            weight = length[index] / count[index]
+            rows = row + np.floor(middle[:, 1] / CELL).astype(int)
+            columns = column + np.floor(middle[:, 0] / CELL).astype(int)
+            inside = (rows >= 0) & (rows < shape[0]) & (columns >= 0) & (columns < shape[1])
+            for layer, value in enumerate((weight * np.cos(turn), weight * np.sin(turn), weight)):
+                np.add.at(total[layer], (rows[inside], columns[inside]), value[inside])
+    reach = window // 2
+    padded = np.pad(total, ((0, 0), (reach, reach), (reach, reach)))
+    summed = sum(padded[:, dy : dy + shape[0], dx : dx + shape[1]] for dy in range(window) for dx in range(window))
+    known = summed[2] >= least
+    pattern = np.zeros_like(summed)
+    pattern[:2, known] = summed[:2, known] / summed[2, known]
+    pattern[2] = known
+    return pattern.astype(np.float32)
+
+
 def guide_pieces(guide, tree, window, origin):
     pieces = []
     for index in tree.query(window, predicate="intersects"):
@@ -888,6 +922,7 @@ def build_city(gpkg, name, output, stride=TILE):
     folder.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(folder / "plan.npz", plan=plan, bounds=np.asarray(bounds))
     np.save(folder / "stations.npy", stations)
+    np.save(folder / "pattern.npy", street_pattern(tiles, plan.shape[1:]))
     torch.save(tiles, folder / "streets.pt")
     torch.save(trunk, folder / "trunk.pt")
     torch.save(blocks, folder / "blocks.pt")
@@ -938,6 +973,7 @@ def load_cities(root):
                 "plan": plan["plan"],
                 "bounds": tuple(plan["bounds"].tolist()),
                 "stations": np.load(folder / "stations.npy") if (folder / "stations.npy").exists() else np.zeros((0, 3)),
+                "pattern": np.load(folder / "pattern.npy") if (folder / "pattern.npy").exists() else None,
                 "folder": folder,
             }
         )

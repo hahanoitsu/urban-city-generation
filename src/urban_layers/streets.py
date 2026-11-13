@@ -7,7 +7,7 @@ import torch
 from shapely.geometry import LineString, box
 from torch import nn
 
-from urban_layers.data import CELL, CHANNELS, LINE_CLASSES, MARGIN, TILE, boundary_side, touch_lists
+from urban_layers.data import CELL, CHANNELS, LINE_CLASSES, MARGIN, PATTERN, TILE, boundary_side, touch_lists
 from urban_layers.decoder import TokenDecoder, fourier
 from urban_layers.tokens import StreetGrammar, StreetTokens
 
@@ -298,7 +298,7 @@ def collate(items):
 
 
 class StreetDataset(torch.utils.data.Dataset):
-    def __init__(self, tiles, plans, cities, scale, augment=True, max_len=1536, city_dropout=0.1, stations=False, plan_cells=PLAN_CELLS, spread=(), exits=False, pinned=False, hidden=()):
+    def __init__(self, tiles, plans, cities, scale, augment=True, max_len=1536, city_dropout=0.1, stations=False, plan_cells=PLAN_CELLS, spread=(), exits=False, pinned=False, hidden=(), patterns=None, pattern_dropout=0.15):
         self.tiles = tiles
         self.plans = plans
         self.cities = cities
@@ -312,6 +312,8 @@ class StreetDataset(torch.utils.data.Dataset):
         self.exits = exits
         self.pinned = pinned
         self.hidden = [CHANNELS.index(name) for name in hidden]
+        self.patterns = patterns
+        self.pattern_dropout = pattern_dropout
         self.tokens = StreetTokens(stations=stations, exits=exits)
         for _city_index, tile in tiles:
             if "touches" not in tile:
@@ -335,6 +337,13 @@ class StreetDataset(torch.utils.data.Dataset):
             crop[self.spread] = crop[self.spread].mean(axis=(1, 2), keepdims=True)
         if self.hidden:
             crop[self.hidden] = 0.0
+        if self.patterns is not None:
+            told = np.zeros((len(PATTERN), self.plan_cells, self.plan_cells), dtype=np.float32)
+            if not self.augment or random.random() > self.pattern_dropout:
+                told = move_grid(plan_crop(self.patterns[city_index], *tile["cell"], size=self.plan_cells), matrix)
+                if np.linalg.det(matrix) < 0:
+                    told[1] = -told[1]
+            crop = np.concatenate([crop, told])
         corridors = [(class_id, move_points(points, matrix)) for class_id, points in tile.get("corridors", ())]
         ports = find_ports(targets, visible, corridors if self.pinned else ())[:PORTS]
         city = np.zeros(self.cities, dtype=np.float32)
@@ -347,14 +356,14 @@ class StreetDataset(torch.utils.data.Dataset):
 
 
 class StreetModel(nn.Module):
-    def __init__(self, cities, d=256, layers=6, heads=8, max_len=1536, bands=8, dropout=0.0, stations=False, exits=False, guided=False):
+    def __init__(self, cities, d=256, layers=6, heads=8, max_len=1536, bands=8, dropout=0.0, stations=False, exits=False, guided=False, pattern=False):
         super().__init__()
-        self.config = {"cities": cities, "d": d, "layers": layers, "heads": heads, "max_len": max_len, "bands": bands, "dropout": dropout, "stations": stations, "exits": exits, "guided": guided}
+        self.config = {"cities": cities, "d": d, "layers": layers, "heads": heads, "max_len": max_len, "bands": bands, "dropout": dropout, "stations": stations, "exits": exits, "guided": guided, "pattern": pattern}
         self.tokens = StreetTokens(stations=stations, exits=exits)
         self.bands = bands
         self.guided = guided
         self.place = nn.Linear(4 * bands, d)
-        self.plan = nn.Linear(len(CHANNELS), d)
+        self.plan = nn.Linear(len(CHANNELS) + (len(PATTERN) if pattern else 0), d)
         self.line_class = nn.Embedding(len(LINE_CLASSES), d)
         self.direction = nn.Linear(2, d)
         self.kind = nn.Embedding(5 if guided else 4, d)
@@ -387,14 +396,20 @@ class StreetModel(nn.Module):
         return self.decoder(batch["tokens"], memory, padding)
 
     @torch.no_grad()
-    def generate(self, batch, temperature=1.0, top_p=0.95, generator=None, max_points=128, max_lines=400, force_ports=True, classes=None):
+    def generate(self, batch, temperature=1.0, top_p=0.95, generator=None, max_points=128, max_lines=400, force_ports=True, classes=None, guidance=1.0):
         memory, padding = self.condition(batch)
+        plain = None
+        if guidance != 1.0 and self.config.get("pattern", False):
+            blind = dict(batch)
+            blind["plan"] = batch["plan"].clone()
+            blind["plan"][..., len(CHANNELS) :] = 0.0
+            plain = self.condition(blind)[0]
         ports = None
         if force_ports:
             spots = torch.round(batch["port_xy"] * TILE).clamp(0, TILE).long()
             ports = torch.cat([batch["port_class"][..., None], spots], dim=-1).masked_fill(~batch["port_mask"][..., None], -1)
         grammar = StreetGrammar(self.tokens, max_points, max_lines, ports, max_len=self.decoder.max_len, sides=batch.get("sides"), classes=classes)
-        tokens = self.decoder.generate(memory, padding, grammar, temperature=temperature, top_p=top_p, generator=generator)
+        tokens = self.decoder.generate(memory, padding, grammar, temperature=temperature, top_p=top_p, generator=generator, plain=plain, guidance=guidance)
         return [self.tokens.decode(row.tolist()) for row in tokens.cpu()]
 
 

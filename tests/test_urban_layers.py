@@ -808,3 +808,58 @@ def test_roads_over_water_are_marked_as_bridges():
     loop = [[110.0, 0.0], [150.0, 0.0], [150.0, 30.0], [110.0, 0.0]]
     spans = bridge_spans(loop, water)
     assert len(spans) == 1 and np.isclose(spans[0][0], 0.0) and np.isclose(spans[0][1], LineString(loop).length)
+
+
+def test_the_pattern_map_says_which_way_the_streets_run():
+    from urban_layers.data import PATTERN, street_pattern
+
+    rise = math.tan(math.radians(22.5))
+    slanted = np.array([[10.0, 10.0], [500.0, 10.0 + 490.0 * rise]])
+    tile = {"cell": (4, 4), "targets": [(0, slanted), (0, slanted + (0.0, 150.0))], "context": []}
+    pattern = street_pattern([tile], (16, 16))
+    assert pattern.shape == (len(PATTERN), 16, 16)
+    assert pattern[2, 5, 6] == 1.0 and abs(pattern[0, 5, 6]) < 1e-3 and pattern[1, 5, 6] > 0.999 and not pattern[:, 14, 14].any()
+
+    mirror = D4[4]
+    turned = street_pattern([{"cell": (4, 4), "targets": [(0, move_points(points, mirror)) for _class_id, points in tile["targets"]]}], (16, 16))
+    moved = move_grid(pattern[:, 2:10, 2:10], mirror)
+    moved[1] = -moved[1]
+    assert np.allclose(moved, turned[:, 2:10, 2:10], atol=1e-4) and turned[1, 5, 5] < -0.999
+
+    plans = [np.zeros((len(CHANNELS), 16, 16), dtype=np.float32)]
+    data = StreetDataset([(0, tile)], plans, 1, np.ones(len(CHANNELS), dtype=np.float32), augment=False, max_len=256, exits=True, patterns=[pattern])
+    item = data[0]
+    assert item["plan"].shape[1] == len(CHANNELS) + len(PATTERN) and item["plan"][:, len(CHANNELS) + 1].max() > 0.999
+    batch = collate([item])
+    model = StreetModel(1, d=32, layers=1, heads=4, max_len=256, exits=True, guided=True, pattern=True)
+    assert torch.isfinite(sequence_loss(model(batch), batch["tokens"]))
+    torch.manual_seed(0)
+    free = model.eval().generate({name: value for name, value in batch.items() if name != "tokens"}, max_lines=4)
+    torch.manual_seed(0)
+    led = model.generate({name: value for name, value in batch.items() if name != "tokens"}, max_lines=4, guidance=3.0)
+    assert len(free) == 1 and len(led) == 1
+    plain = StreetDataset([(0, tile)], plans, 1, np.ones(len(CHANNELS), dtype=np.float32), augment=False, max_len=256, exits=True)[0]
+    assert plain["plan"].shape[1] == len(CHANNELS)
+
+
+def test_a_pattern_map_can_be_drawn_from_a_plan():
+    from urban_layers.data import PATTERN
+    from urban_layers.plan import PatternCrops, coarse, pattern_controls, sample_pattern
+
+    torch.manual_seed(0)
+    np.random.seed(0)
+    plans = [np.random.rand(len(CHANNELS), 40, 40).astype(np.float32)]
+    patterns = [np.random.uniform(-1.0, 1.0, (len(PATTERN), 40, 40)).astype(np.float32)]
+    mean, std, _scale = plan_statistics(plans)
+    told_mean, told_std, _scale = plan_statistics(patterns)
+    data = PatternCrops(patterns, plans, told_mean, told_std, mean, std, size=16, length=4)
+    items = [data[index] for index in range(4)]
+    batch = {name: torch.from_numpy(np.stack([item[name] for item in items])) for name in ("plan", "given", "controls", "city")}
+    assert batch["plan"].shape == (4, len(PATTERN), 16, 16) and batch["given"].shape == (4, len(CHANNELS), 16, 16)
+    assert batch["controls"].shape == (4, len(PATTERN) + 1) and np.allclose(coarse(plans[0])[:, :4, :4], plans[0][:, :4, :4].mean(axis=(1, 2), keepdims=True), atol=1e-6)
+    whole = np.ones((40, 40), dtype=bool)
+    assert np.allclose(pattern_controls(patterns[0], whole)[:3], patterns[0].mean(axis=(1, 2)), atol=1e-5)
+    model = PlanNet(1, channels=len(PATTERN), width=16, given=len(CHANNELS), controls=len(PATTERN) + 1)
+    assert torch.isfinite(plan_loss(model, batch))
+    drawn = sample_pattern(model, plans[0][:, :16, :16], np.ones(1, dtype=np.float32), np.zeros(len(PATTERN) + 1, dtype=np.float32), told_mean, told_std, mean, std, steps=2)
+    assert drawn.shape == (len(PATTERN), 16, 16) and np.hypot(drawn[0], drawn[1]).max() <= 1.0 + 1e-5 and set(np.unique(drawn[2])) <= {0.0, 1.0}

@@ -26,6 +26,7 @@ def main():
     parser.add_argument("--streets", type=Path, required=True)
     parser.add_argument("--buildings", type=Path, required=True)
     parser.add_argument("--trunk", type=Path, help="model for rail, stations and main roads, without it they are drawn by rule")
+    parser.add_argument("--pattern", type=Path, help="model for the street pattern map, which way streets run and how regular they are")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--size", type=float, nargs=2, default=(4096.0, 4096.0), help="width and height in metres")
     parser.add_argument("--style", nargs="*", help="city=weight, for example singapore=0.7 tokyo=0.3")
@@ -33,7 +34,10 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--plan-steps", type=int, default=50)
     parser.add_argument("--guidance", type=float, default=1.5)
+    parser.add_argument("--pattern-guidance", type=float, default=1.0, help="how hard the streets follow the pattern map, 1 is as trained")
+    parser.add_argument("--map-guidance", type=float, default=3.0, help="guidance when the pattern map itself is drawn")
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--street-temperature", type=float, help="temperature for the street model alone, lower gives more regular streets")
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--building-samples", type=int, default=4, help="samples per block, the one closest to the planned coverage is kept")
     parser.add_argument("--building-batch", type=int, default=64, help="blocks per call to the building model, more is faster on a big gpu")
@@ -42,7 +46,7 @@ def main():
     parser.add_argument("--list", action="store_true", help="print the cities the models know and stop")
     args = parser.parse_args()
 
-    models = {name: load_layer(path, args.device) for name, path in (("plan", args.plan), ("trunk", args.trunk), ("streets", args.streets), ("buildings", args.buildings)) if path is not None}
+    models = {name: load_layer(path, args.device) for name, path in (("plan", args.plan), ("pattern", args.pattern), ("trunk", args.trunk), ("streets", args.streets), ("buildings", args.buildings)) if path is not None}
     if args.list:
         for name, (_model, checkpoint) in models.items():
             print(name, checkpoint["cities"])
@@ -56,6 +60,9 @@ def main():
         seed=args.seed,
         plan_steps=args.plan_steps,
         guidance=args.guidance,
+        pattern_guidance=args.pattern_guidance,
+        map_guidance=args.map_guidance,
+        street_temperature=args.street_temperature,
         temperature=args.temperature,
         top_p=args.top_p,
         building_samples=args.building_samples,

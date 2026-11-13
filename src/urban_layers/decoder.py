@@ -93,19 +93,24 @@ class TokenDecoder(nn.Module):
         return self.head(self.norm(x))
 
     @torch.no_grad()
-    def generate(self, memory, padding, grammar, max_len=None, temperature=1.0, top_p=0.95, generator=None, greedy=False):
+    def generate(self, memory, padding, grammar, max_len=None, temperature=1.0, top_p=0.95, generator=None, greedy=False, plain=None, guidance=1.0):
         max_len = min(max_len or self.max_len, self.max_len)
         batch = memory.shape[0]
         device = memory.device
         allowed = (~padding)[:, None, None, :]
+        if plain is not None:
+            memory = torch.cat([memory, plain])
+            allowed = torch.cat([allowed, allowed])
         caches = [{"self": {}, "cross": {}} for _ in self.layers]
         tokens = torch.full((batch, 1), 1, dtype=torch.long, device=device)
         state = grammar.start(batch, device)
-        x = self.embed(tokens)
+        x = self.embed(tokens if plain is None else tokens.repeat(2, 1))
         for position in range(1, max_len):
             for layer, cache in zip(self.layers, caches):
                 x = layer(x, memory, allowed, cache)
             logits = self.head(self.norm(x[:, -1])).float()
+            if plain is not None:
+                logits = logits[batch:] + guidance * (logits[:batch] - logits[batch:])
             valid = grammar.allowed(state)
             logits = logits.masked_fill(~valid, float("-inf"))
             if greedy:
@@ -117,6 +122,8 @@ class TokenDecoder(nn.Module):
             if bool(grammar.done(state).all()):
                 break
             x = self.embed(token[:, None], position)
+            if plain is not None:
+                x = x.repeat(2, 1, 1)
         return tokens
 
 
