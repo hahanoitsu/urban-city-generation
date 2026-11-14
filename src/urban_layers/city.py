@@ -43,7 +43,7 @@ from urban_layers.data import (
     road_index,
     split_block,
 )
-from urban_layers.network import join_network, repair_network, repair_rail
+from urban_layers.network import join_network, repair_corridors, repair_network
 from urban_layers.plan import PlanNet, sample_pattern, sample_plan
 from urban_layers.rail import RAIL_WIDTH, TRACKS, heading_at, rail_corridors, rail_runs, rail_stations
 from urban_layers.streets import PLAN_CELLS, PORTS, SIDES, StreetModel, collate, condition_arrays, end_ports, guide_crossings, is_main_road, laid_lines, order_lines, plan_crop, port_key, snap_to_ports
@@ -823,7 +823,7 @@ def generate_city(
         km = lambda mode: sum(LineString(points).length for class_id, points in main if LINE_CLASSES[class_id][0] == mode) / 1000.0
         log(f"trunk: {km('rail'):.1f} km of rail, {km('road'):.1f} km of main road corridor, {time.time() - started:.0f}s")
         if repairs:
-            main, mended = repair_rail(main)
+            main, mended = repair_corridors(main)
         warmth = temperature if street_temperature is None else street_temperature
         lines = generate_streets(street_model, street_checkpoint, wide, street_weights, generator, warmth, top_p, device, log, given=main, offset=margin, pinned=street_checkpoint.get("pinned", False), pattern=known_pattern, guidance=pattern_guidance, keep_main=keep_main, kept=tuple(trunk_checkpoint.get("roads", ("major",))))
         streets = snap_lines(clip_lines(lines, size))
@@ -831,7 +831,7 @@ def generate_city(
             streets, road_mended = repair_network(streets, size, water_union)
             mended.update(road_mended)
             rules.append("road and rail repairs")
-            log(f"repairs: {mended.get('near_misses_joined', 0) + mended.get('ends_joined_ahead', 0)} ends joined, {mended.get('stubs_removed', 0)} stubs removed, {mended.get('links_added', 0)} links ({mended.get('link_km', 0.0):.1f} km), {mended.get('strays_dropped', 0)} strays dropped, {mended.get('rail_side_by_side_km', 0.0):.1f} km of rail drawn twice side by side taken out")
+            log(f"repairs: {mended.get('near_misses_joined', 0) + mended.get('ends_joined_ahead', 0)} ends joined, {mended.get('stubs_removed', 0)} stubs removed, {mended.get('links_added', 0)} links ({mended.get('link_km', 0.0):.1f} km), {mended.get('strays_dropped', 0)} strays dropped, {mended.get('corridor_side_by_side_km', 0.0):.1f} km of road and {mended.get('rail_side_by_side_km', 0.0):.1f} km of rail drawn twice side by side taken out")
         runs = rail_lines(main)
         stations = place_stations(stops, runs)
         corridors = [(class_id, line) for class_id, points in main if is_main_road(class_id) for line in [LineString(points).intersection(area)] if line.geom_type == "LineString" and line.length > 1.0]

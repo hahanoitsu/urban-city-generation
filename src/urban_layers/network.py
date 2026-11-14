@@ -9,7 +9,7 @@ from shapely.ops import nearest_points, substring
 from shapely.strtree import STRtree
 
 from urban_layers.audit import road_pieces
-from urban_layers.data import CELL, CHANNELS, LINE_CLASSES, TILE, ROAD_CLASSES, line_class, merge_corridors
+from urban_layers.data import CELL, CHANNELS, LINE_CLASSES, TILE, ROAD_CLASSES, line_class, tangents
 from urban_layers.rail import smooth_line
 
 
@@ -356,7 +356,10 @@ def close_gaps(lines, reach=10.0, touch=1.0):
     tree = STRtree(shapes)
     cuts = {}
     closed = 0
+    reached = set()
     for index, slot in free_ends(lines, tree, touch):
+        if (index, slot) in reached:
+            continue
         class_id, points = lines[index]
         point = end_of(points, slot)
         best = None
@@ -377,6 +380,7 @@ def close_gaps(lines, reach=10.0, touch=1.0):
             continue
         lines[index] = (class_id, extend(points, slot, best[2]))
         cuts.setdefault(best[1], []).append(best[2])
+        reached.update((best[1], side) for side in (0, 1) if np.linalg.norm(end_of(lines[best[1]][1], side) - best[2]) <= touch)
         closed += 1
     return split_at(lines, cuts), closed
 
@@ -542,16 +546,98 @@ def round_corners(points, reach=40.0, rounds=2):
     return points
 
 
-def repair_rail(lines, beside=30.0, gap=30.0, stray=150.0):
+def merge_twins(lines, gap=30.0, shared=100.0, step=10.0, shortest=30.0, touch=1.0):
+    lines = [(class_id, np.asarray(points, dtype=np.float64)) for class_id, points in lines]
+    before = [LineString(points) for _class_id, points in lines]
+    tree = STRtree(before)
+    held = set()
+    for index, (_class_id, points) in enumerate(lines):
+        for end in (points[0], points[-1]):
+            if any(other != index for other in tree.query(Point(end), predicate="dwithin", distance=touch)):
+                held.add((round(float(end[0]), 1), round(float(end[1]), 1)))
+    kept = []
+    shapes = []
+    removed = 0.0
+    for index in sorted(range(len(lines)), key=lambda index: -before[index].length):
+        class_id, points = lines[index]
+        shape = before[index]
+        near = [number for number, other in enumerate(shapes) if kept[number][0] == class_id and other.distance(shape) <= gap]
+        count = max(int(np.ceil(shape.length / step)), 1)
+        edges = np.linspace(0.0, shape.length, count + 1)
+        along = (edges[:-1] + edges[1:]) / 2.0
+        here = shapely.line_interpolate_point(shape, along)
+        heading = tangents(shape, along, shape.length)
+        covered = np.zeros(count, dtype=bool)
+        for number in near:
+            other = shapes[number]
+            position = shapely.line_locate_point(other, here)
+            close = shapely.distance(here, shapely.line_interpolate_point(other, position)) <= gap
+            if close.any():
+                covered |= close & (np.abs((heading * tangents(other, position, other.length)).sum(axis=1)) > 0.85)
+        begin = None
+        for mark in range(count + 1):
+            inside = mark < count and covered[mark]
+            if inside and begin is None:
+                begin = mark
+            if not inside and begin is not None:
+                if edges[mark] - edges[begin] < shared and (begin > 0 or mark < count):
+                    covered[begin:mark] = False
+                begin = None
+        if not covered.any():
+            kept.append((class_id, points))
+            shapes.append(shape)
+            continue
+        rest = shapely.union_all([shapes[number] for number in near])
+        begin = None
+        for mark in range(count + 1):
+            free = mark < count and not covered[mark]
+            if free and begin is None:
+                begin = mark
+            if not free and begin is not None:
+                if edges[mark] - edges[begin] >= shortest:
+                    piece = np.asarray(substring(shape, edges[begin], edges[mark]).coords, dtype=np.float64)[:, :2]
+                    for cut, end in ((begin > 0, 0), (mark < count, -1)):
+                        target = np.asarray(nearest_points(rest, Point(piece[end]))[0].coords[0])
+                        if cut and np.linalg.norm(target - piece[end]) <= 3.0 * gap:
+                            piece = np.vstack([target[None], piece]) if end == 0 else np.vstack([piece, target[None]])
+                    kept.append((class_id, piece))
+                    shapes.append(LineString(piece))
+                begin = None
+        removed += shape.length - sum(edges[mark + 1] - edges[mark] for mark in range(count) if not covered[mark])
+    tree = STRtree(shapes)
+    cuts = {}
+    for index, slot in free_ends(kept, tree, touch):
+        class_id, points = kept[index]
+        point = end_of(points, slot)
+        if (round(float(point[0]), 1), round(float(point[1]), 1)) not in held:
+            continue
+        best = None
+        for other in tree.query(Point(point), predicate="dwithin", distance=1.5 * gap):
+            if other == index or level(kept[other][0]) != level(class_id):
+                continue
+            target = onto(shapes[other], kept[other][1], point, touch)
+            distance = float(np.linalg.norm(target - point))
+            if distance > 1e-6 and (best is None or distance < best[0]):
+                best = (distance, int(other), target)
+        if best is not None:
+            kept[index] = (class_id, extend(points, slot, best[2]))
+            cuts.setdefault(best[1], []).append(best[2])
+    return split_at(kept, cuts), removed
+
+
+def repair_corridors(lines, beside=30.0, gap=30.0, stray=150.0):
     rails = [(class_id, np.asarray(points, dtype=np.float64)) for class_id, points in lines if LINE_CLASSES[class_id][0] == "rail" and len(points) >= 2]
-    rest = [(class_id, points) for class_id, points in lines if LINE_CLASSES[class_id][0] != "rail"]
-    if not rails:
-        return lines, {}
-    before = sum(LineString(points).length for _class_id, points in rails)
-    merged = merge_corridors([(class_id, LineString(points), 0.0) for class_id, points in rails], lambda class_id: True, beside)
-    rails = [(class_id, np.asarray(line.coords, dtype=np.float64)[:, :2]) for class_id, line, _width in merged if line.length > 1.0]
-    saved = max(before - sum(LineString(points).length for _class_id, points in rails), 0.0)
-    rails = [(class_id, round_corners(points)) for class_id, points in rails]
-    rails, closed = close_gaps(rails, gap)
-    rails, strays, metres = drop_small(rails, stray)
-    return rest + rails, {"rail_km_before": before / 1000.0, "rail_side_by_side_km": saved / 1000.0, "rail_near_misses_joined": closed, "rail_strays_dropped": strays, "rail_stray_km": metres / 1000.0}
+    roads = [(class_id, np.asarray(points, dtype=np.float64)) for class_id, points in lines if LINE_CLASSES[class_id][0] == "road" and len(points) >= 2]
+    told = {}
+    if roads:
+        before = sum(LineString(points).length for _class_id, points in roads)
+        roads, saved = merge_twins(roads, beside)
+        told.update({"corridor_km_before": before / 1000.0, "corridor_side_by_side_km": saved / 1000.0})
+    if rails:
+        before = sum(LineString(points).length for _class_id, points in rails)
+        rails, saved = merge_twins(rails, beside)
+        rails = [(class_id, round_corners(points)) for class_id, points in rails]
+        rails, closed = close_gaps(rails, gap)
+        rails, strays, metres = drop_small(rails, stray)
+        told.update({"rail_km_before": before / 1000.0, "rail_side_by_side_km": saved / 1000.0, "rail_near_misses_joined": closed, "rail_strays_dropped": strays, "rail_stray_km": metres / 1000.0})
+    return roads + rails, told

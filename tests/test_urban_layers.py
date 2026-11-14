@@ -918,7 +918,7 @@ def test_plan_cells_far_apart_get_different_position_codes():
 
 
 def test_repairs_join_trim_link_and_drop():
-    from urban_layers.network import repair_network, repair_rail
+    from urban_layers.network import repair_corridors, repair_network
 
     local = line_class("road", "local", "surface")
     major = line_class("road", "major", "surface")
@@ -939,13 +939,29 @@ def test_repairs_join_trim_link_and_drop():
     assert all(min(shape.distance(other) for other in shapes if other is not shape) < 1e-6 for shape in shapes)
     assert not any(LineString(points).length < 10.0 for _class_id, points in fixed)
     tracks = [(rail, np.array([[0.0, 0.0], [500.0, 0.0]])), (rail, np.array([[520.0, 5.0], [900.0, 5.0]])), (rail, np.array([[300.0, 600.0], [360.0, 600.0]])), (major, np.array([[0.0, 50.0], [10.0, 50.0]]))]
-    mended, said = repair_rail(tracks)
+    mended, said = repair_corridors(tracks)
     kept = [LineString(points) for class_id, points in mended if class_id == rail]
     assert said["rail_strays_dropped"] == 1 and len(kept) == 2 and kept[0].distance(kept[1]) < 1e-6 and sum(1 for class_id, _points in mended if class_id == major) == 1
     weave = [(rail, np.array([[0.0, 0.0], [1000.0, 0.0]])), (rail, np.array([[100.0, 12.0], [400.0, -10.0], [700.0, 14.0], [800.0, 200.0]])), (rail, np.array([[0.0, 300.0], [400.0, 300.0], [400.0, 700.0]]))]
-    mended, said = repair_rail(weave)
+    mended, said = repair_corridors(weave)
     through, branch, bend = [LineString(points) for _class_id, points in mended]
     assert 0.5 < said["rail_side_by_side_km"] < 0.7 and through.length == 1000.0 and not through.crosses(branch)
     assert branch.distance(through) < 1e-6 and branch.distance(Point(800.0, 200.0)) < 1e-6
     turns = np.abs(np.diff(np.unwrap(np.arctan2(*np.diff(np.asarray(bend.coords), axis=0).T[::-1]))))
     assert turns.max() < np.deg2rad(40) and bend.distance(Point(400.0, 300.0)) < 30.0
+
+
+def test_a_road_drawn_twice_side_by_side_becomes_one():
+    from urban_layers.network import close_gaps, repair_corridors
+
+    major = line_class("road", "major", "surface")
+    secondary = line_class("road", "secondary", "surface")
+    lines = [(major, np.array([[0.0, 0.0], [1000.0, 0.0]])), (major, np.array([[100.0, 15.0], [900.0, 15.0]])), (secondary, np.array([[500.0, 15.0], [500.0, 400.0]]))]
+    mended, said = repair_corridors(lines)
+    mains = [LineString(points) for class_id, points in mended if class_id == major]
+    side = [LineString(points) for class_id, points in mended if class_id == secondary]
+    assert abs(said["corridor_side_by_side_km"] - 0.8) < 1e-6 and abs(sum(line.length for line in mains) - 1000.0) < 1e-6
+    assert len(side) == 1 and min(line.distance(side[0]) for line in mains) < 1e-6
+    facing = [(major, np.array([[0.0, 0.0], [500.0, 0.0]])), (major, np.array([[508.0, 0.0], [900.0, 0.0]]))]
+    joined, closed = close_gaps([(class_id, points.copy()) for class_id, points in facing])
+    assert closed == 1 and abs(sum(LineString(points).length for _class_id, points in joined) - 900.0) < 1e-6
