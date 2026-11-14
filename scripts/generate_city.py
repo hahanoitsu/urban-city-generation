@@ -36,6 +36,7 @@ def main():
     parser.add_argument("--guidance", type=float, default=1.5)
     parser.add_argument("--pattern-guidance", type=float, default=1.0, help="how hard the streets follow the pattern map, 1 is as trained")
     parser.add_argument("--corridor-guidance", type=float, default=1.0, help="how hard the corridors follow the plan's main road and rail cells, 1 is as trained")
+    parser.add_argument("--corridor-top-p", type=float, default=1.0, help="the corridor model samples from its whole distribution, a cut below 1 makes it draw fewer roads and more of them twice")
     parser.add_argument("--map-guidance", type=float, default=3.0, help="guidance when the pattern map itself is drawn")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--street-temperature", type=float, help="temperature for the street model alone, lower gives more regular streets")
@@ -46,6 +47,7 @@ def main():
     parser.add_argument("--no-transport-rules", action="store_true", help="keep rail and roads exactly as the models drew them, no rail layer and no joining of roads")
     parser.add_argument("--no-repairs", action="store_true", help="skip the repairs after the models: joining near misses, removing stubs, linking and dropping cut off pieces")
     parser.add_argument("--redraw-main", action="store_true", help="let the street model draw the main roads again along the corridors instead of keeping the corridor model's lines")
+    parser.add_argument("--keep-plan-roads", action="store_true", help="leave the plan's main road, secondary road and rail cells as the plan model drew them, instead of writing in the corridors that were drawn")
     parser.add_argument("--list", action="store_true", help="print the cities the models know and stop")
     args = parser.parse_args()
 
@@ -65,6 +67,7 @@ def main():
         guidance=args.guidance,
         pattern_guidance=args.pattern_guidance,
         corridor_guidance=args.corridor_guidance,
+        corridor_top_p=args.corridor_top_p,
         map_guidance=args.map_guidance,
         street_temperature=args.street_temperature,
         temperature=args.temperature,
@@ -74,6 +77,7 @@ def main():
         transport_rules=not args.no_transport_rules,
         repairs=not args.no_repairs,
         keep_main=not args.redraw_main,
+        update_plan=not args.keep_plan_roads,
         device=args.device,
         log=lambda text: print(text, flush=True),
     )

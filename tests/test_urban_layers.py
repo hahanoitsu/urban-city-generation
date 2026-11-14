@@ -965,3 +965,13 @@ def test_a_road_drawn_twice_side_by_side_becomes_one():
     facing = [(major, np.array([[0.0, 0.0], [500.0, 0.0]])), (major, np.array([[508.0, 0.0], [900.0, 0.0]]))]
     joined, closed = close_gaps([(class_id, points.copy()) for class_id, points in facing])
     assert closed == 1 and abs(sum(LineString(points).length for _class_id, points in joined) - 900.0) < 1e-6
+
+
+def test_road_cells_hold_the_length_drawn_in_them():
+    from urban_layers.data import line_cells
+
+    major = line_class("road", "major", "surface")
+    rail = line_class("rail", "rail", "elevated")
+    cells = line_cells([(major, LineString([(0.0, 64.0), (256.0, 64.0)])), (rail, LineString([(192.0, 0.0), (192.0, 128.0)]))], 0.0, 0.0, 3, 2)
+    assert cells.shape == (4, 2, 3) and cells[:, 1].sum() == 0.0
+    assert np.allclose(cells[CHANNELS.index("major"), 0], [0.5, 0.5, 0.0]) and np.allclose(cells[CHANNELS.index("rail"), 0], [0.0, 0.5, 0.0])

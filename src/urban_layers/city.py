@@ -33,6 +33,7 @@ from urban_layers.data import (
     corridor,
     guide_pieces,
     is_trunk,
+    line_cells,
     line_index,
     make_blocks,
     road_segments,
@@ -727,6 +728,7 @@ def generate_city(
     known_pattern=None,
     pattern_guidance=1.0,
     corridor_guidance=1.0,
+    corridor_top_p=1.0,
     map_guidance=3.0,
     street_temperature=None,
     match=True,
@@ -736,6 +738,7 @@ def generate_city(
     transport_rules=True,
     repairs=True,
     keep_main=True,
+    update_plan=True,
 ):
     started = time.time()
     plan_model, plan_checkpoint = models["plan"]
@@ -819,11 +822,15 @@ def generate_city(
     else:
         trunk_model, trunk_checkpoint = models["trunk"]
         trunk_weights = style_weights(trunk_checkpoint["cities"], {name: weights[cities.index(name)] for name in cities if name in trunk_checkpoint["cities"]})
-        main, stops = generate_trunk(trunk_model, trunk_checkpoint, wide, trunk_weights, size, generator, temperature, top_p, device, log, margin=margin, pattern=known_pattern, guidance=corridor_guidance)
+        main, stops = generate_trunk(trunk_model, trunk_checkpoint, wide, trunk_weights, size, generator, temperature, corridor_top_p, device, log, margin=margin, pattern=known_pattern, guidance=corridor_guidance)
         km = lambda mode: sum(LineString(points).length for class_id, points in main if LINE_CLASSES[class_id][0] == mode) / 1000.0
         log(f"trunk: {km('rail'):.1f} km of rail, {km('road'):.1f} km of main road corridor, {time.time() - started:.0f}s")
         if repairs:
             main, mended = repair_corridors(main)
+        if update_plan:
+            drawn = line_cells([(class_id, LineString(points)) for class_id, points in main], 0.0, 0.0, width, height)
+            for name in (*trunk_checkpoint.get("roads", ("major",)), "rail"):
+                wide[CHANNELS.index(name), margin : margin + height, margin : margin + width] = drawn[CHANNELS.index(name)]
         warmth = temperature if street_temperature is None else street_temperature
         lines = generate_streets(street_model, street_checkpoint, wide, street_weights, generator, warmth, top_p, device, log, given=main, offset=margin, pinned=street_checkpoint.get("pinned", False), pattern=known_pattern, guidance=pattern_guidance, keep_main=keep_main, kept=tuple(trunk_checkpoint.get("roads", ("major",))))
         streets = snap_lines(clip_lines(lines, size))

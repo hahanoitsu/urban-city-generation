@@ -181,14 +181,10 @@ def _pool(image, bounds):
     return image[: height * factor, : width * factor].reshape(height, factor, width, factor).mean(axis=(1, 3))
 
 
-def plan_raster(layers, lines, bounds):
-    minx, miny, maxx, maxy = bounds
-    width = int(round((maxx - minx) / CELL))
-    height = int(round((maxy - miny) / CELL))
-    plan = np.zeros((len(CHANNELS), height, width), dtype=np.float32)
-
+def line_cells(lines, minx, miny, width, height):
+    cells = np.zeros((4, height, width), dtype=np.float32)
     for class_id in range(len(LINE_CLASSES)):
-        geometries = [geometry for item_class, geometry, _width in lines if item_class == class_id]
+        geometries = [item[1] for item in lines if item[0] == class_id]
         if not geometries:
             continue
         mode, name, _level = LINE_CLASSES[class_id]
@@ -203,8 +199,17 @@ def plan_raster(layers, lines, bounds):
         column = np.floor((middle[:, 0] - minx) / CELL).astype(int)
         row = np.floor((middle[:, 1] - miny) / CELL).astype(int)
         keep = (column >= 0) & (column < width) & (row >= 0) & (row < height)
-        np.add.at(plan[channel], (row[keep], column[keep]), length[keep])
-    plan[:4] = np.clip(plan[:4] / (2.0 * CELL), 0.0, 3.0)
+        np.add.at(cells[channel], (row[keep], column[keep]), length[keep])
+    return np.clip(cells / (2.0 * CELL), 0.0, 3.0)
+
+
+def plan_raster(layers, lines, bounds):
+    minx, miny, maxx, maxy = bounds
+    width = int(round((maxx - minx) / CELL))
+    height = int(round((maxy - miny) / CELL))
+    plan = np.zeros((len(CHANNELS), height, width), dtype=np.float32)
+
+    plan[:4] = line_cells(lines, minx, miny, width, height)
 
     buildings = layers.buildings
     footprints = []
