@@ -571,9 +571,12 @@ def merge_twins(lines, gap=30.0, shared=100.0, step=10.0, shortest=30.0, touch=1
         for number in near:
             other = shapes[number]
             position = shapely.line_locate_point(other, here)
-            close = shapely.distance(here, shapely.line_interpolate_point(other, position)) <= gap
-            if close.any():
-                covered |= close & (np.abs((heading * tangents(other, position, other.length)).sum(axis=1)) > 0.85)
+            away = shapely.get_coordinates(here) - shapely.get_coordinates(shapely.line_interpolate_point(other, position))
+            apart = np.linalg.norm(away, axis=1)
+            if (apart <= gap).any():
+                along = tangents(other, position, other.length)
+                abeam = (np.abs((away * along).sum(axis=1)) <= 0.5 * apart) | (apart < touch)
+                covered |= (apart <= gap) & abeam & (np.abs((heading * along).sum(axis=1)) > 0.85)
         begin = None
         for mark in range(count + 1):
             inside = mark < count and covered[mark]

@@ -962,6 +962,9 @@ def test_a_road_drawn_twice_side_by_side_becomes_one():
     side = [LineString(points) for class_id, points in mended if class_id == secondary]
     assert abs(said["corridor_side_by_side_km"] - 0.8) < 1e-6 and abs(sum(line.length for line in mains) - 1000.0) < 1e-6
     assert len(side) == 1 and min(line.distance(side[0]) for line in mains) < 1e-6
+    onward = [(major, np.array([[0.0, 0.0], [500.0, 0.0]])), (major, np.array([[500.0, 0.0], [545.0, 20.0]])), (major, np.array([[545.0, 20.0], [900.0, 300.0]]))]
+    mended, said = repair_corridors(onward)
+    assert said["corridor_side_by_side_km"] == 0.0 and len(mended) == 3
     facing = [(major, np.array([[0.0, 0.0], [500.0, 0.0]])), (major, np.array([[508.0, 0.0], [900.0, 0.0]]))]
     joined, closed = close_gaps([(class_id, points.copy()) for class_id, points in facing])
     assert closed == 1 and abs(sum(LineString(points).length for _class_id, points in joined) - 900.0) < 1e-6
